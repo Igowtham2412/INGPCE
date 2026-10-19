@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>INGPCE — SURVEILLANCE OPERATIONS CENTER</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<div class="ops-shell">
+  <header class="cmd-bar">
+    <div class="cmd-left">
+      <div class="agency-badge"></div>
+      <div class="agency-text"><h1>INGPCE</h1><span>SURVEILLANCE OPERATIONS CENTER</span></div>
+    </div>
+    <div class="cmd-stats" id="topbarStats">
+      <div class="cmd-stat"><span class="stat-val" id="statCamerasOnline">–</span><span class="stat-lbl">FEEDS ACTIVE</span></div>
+      <div class="cmd-stat threat"><span class="stat-val" id="statViolations24h">–</span><span class="stat-lbl" id="statViolationsPeriod">THREATS 24H</span></div>
+      <div class="cmd-stat"><span class="stat-val" id="statActiveRules">–</span><span class="stat-lbl">ALERT RULES</span></div>
+    </div>
+    <div class="cmd-right">
+      <span class="sys-status">SYSTEM INITIALIZING</span>
+      <span class="cmd-clock" id="liveClock">--:--:--</span>
+      <span class="conn-indicator" id="wsConnDot" title="Event stream"></span>
+      <button class="ops-btn-sec" id="logoutBtn" hidden>Sign out</button>
+    </div>
+  </header>
+
+  <main class="ops-grid">
+    <section class="surveillance-panel">
+      <div class="panel-hdr">
+        <h2><span class="hdr-icon">◉</span> SURVEILLANCE FEEDS</h2>
+        <div class="mode-selector">
+          <button class="mode-btn active" data-tab="feeds">LIVE WALL</button>
+          <button class="mode-btn" data-tab="playback">PLAYBACK</button>
+          <button class="mode-btn" data-tab="violations">INCIDENTS</button>
+          <button class="mode-btn" data-tab="analytics">ANALYTICS</button>
+          <button class="mode-btn" data-tab="cameras">CAMERAS</button>
+          <button class="mode-btn" data-tab="camera-status">CAMERA STATUS</button>
+          <button class="mode-btn" data-tab="alert-delivery" id="alertDeliveryTab" hidden>ALERT DELIVERY</button>
+          <button class="mode-btn" data-tab="rules">ALERT RULES</button>
+        </div>
+      </div>
+
+      <div id="tab-feeds" class="tab-pane active">
+        <div class="wall-toolbar">
+          <div class="wall-controls">
+            <label class="wall-filter">
+              <span>AREA</span>
+              <select id="wallAreaFilter"><option value="">All areas</option></select>
+            </label>
+            <label class="wall-filter wall-search">
+              <span>CAMERA</span>
+              <input id="wallCameraSearch" type="search" placeholder="Search cameras…" />
+            </label>
+          </div>
+          <div class="wall-actions">
+            <div class="wall-layout" role="group" aria-label="Camera grid density">
+              <button type="button" data-wall-columns="2" aria-pressed="false" title="2 columns">2 COL</button>
+              <button type="button" data-wall-columns="3" aria-pressed="false" title="3 columns">3 COL</button>
+              <button type="button" data-wall-columns="4" class="active" aria-pressed="true" title="4 columns">4 COL</button>
+            </div>
+            <span class="wall-feed-count" id="wallFeedCount">—</span>
+            <button class="ops-btn-sec wall-focus-button" id="btnWallFocus" aria-pressed="false">⛶ FOCUS</button>
+            <button class="ops-btn-sec" id="btnReconnectAll">↻ RECONNECT</button>
+          </div>
+        </div>
+        <div id="feedsByGroup"></div>
+      </div>
+
+      <div id="tab-playback" class="tab-pane">
+        <section class="playback-page">
+          <div class="playback-heading">
+            <div><span class="playback-eyebrow">RECORDED VIDEO</span><h2>Camera playback</h2>
+              <p>Select a registered camera and the recording start time. Times use the camera/NVR local clock.</p></div>
+          </div>
+          <form id="playbackForm" class="playback-toolbar">
+            <label for="playbackCamera">CAMERA
+              <select id="playbackCamera" required><option value="">Select a camera</option></select>
+            </label>
+            <label for="playbackIp">CAMERA IP
+              <input id="playbackIp" type="text" readonly placeholder="Select a camera" />
+            </label>
+            <label for="playbackStart">START TIME
+              <input id="playbackStart" type="datetime-local" required />
+            </label>
+            <label for="playbackDuration">DURATION
+              <select id="playbackDuration">
+                <option value="5">5 minutes</option>
+                <option value="10" selected>10 minutes</option>
+                <option value="30">30 minutes</option>
+                <option value="60">60 minutes</option>
+                <option value="120">120 minutes</option>
+              </select>
+            </label>
+            <button class="ops-btn" id="btnStartPlayback" type="submit">▶ PLAY RECORDING</button>
+            <button class="ops-btn-sec" id="btnStopPlayback" type="button" disabled>■ STOP</button>
+          </form>
+          <p id="playbackStatus" class="playback-status" role="status" aria-live="polite">Choose a camera and a time with a recording.</p>
+          <div class="playback-screen">
+            <div id="playbackPlaceholder" class="playback-placeholder">RECORDED CAMERA VIDEO WILL APPEAR HERE</div>
+            <img id="playbackImage" alt="Selected camera recording playback" hidden />
+          </div>
+        </section>
+      </div>
+
+      <div id="tab-violations" class="tab-pane">
+        <div class="filter-bar">
+          <select id="violationCameraFilter"><option value="">ALL CAMERAS</option></select>
+          <select id="violationAreaGroupFilter"><option value="">ALL SECTORS</option></select>
+          <select id="violationTypeFilter">
+            <option value="">ALL THREAT TYPES</option>
+            <option value="no_helmet">MISSING HELMET</option>
+            <option value="no_vest">MISSING VEST</option>
+            <option value="no_mask">MISSING MASK</option>
+            <option value="no_gloves">MISSING GLOVES</option>
+            <option value="no_boots">MISSING BOOTS</option>
+            <option value="no_goggles">MISSING GOGGLES</option>
+          </select>
+          <select id="violationAgeFilter" aria-label="Violation date range">
+            <option value="2" selected>LAST 2 DAYS</option>
+            <option value="all">ALL HISTORY</option>
+          </select>
+          <button class="ops-btn" id="btnRefreshViolations">↻ REFRESH</button>
+          <button class="ops-btn-sec" id="btnCleanOldViolations" title="Permanently delete incidents and evidence older than 2 days">CLEAN OLDER THAN 2 DAYS</button>
+          <span id="violationCleanupStatus" role="status" aria-live="polite"></span>
+        </div>
+        <div class="incidents-grid" id="violationsGallery"><div class="empty-state">LOADING INCIDENT DATA…</div></div>
+        <button class="ops-btn-sec load-more-violations" id="btnLoadMoreViolations" type="button" hidden>LOAD MORE INCIDENTS</button>
+      </div>
+
+      <div id="tab-analytics" class="tab-pane">
+        <div class="analytics-page">
+          <div class="analytics-toolbar">
+            <div class="analytics-title">
+              <span class="analytics-eyebrow">OPERATIONS INTELLIGENCE</span>
+              <h2>Safety analytics</h2>
+              <p>Incident patterns and camera activity across your site.</p>
+            </div>
+            <div class="analytics-controls">
+              <label for="analyticsRange">REPORTING PERIOD</label>
+              <select id="analyticsRange" aria-label="Analytics reporting period">
+                <option value="24">Last 24 hours</option>
+                <option value="168">Last 7 days</option>
+                <option value="720">Last 30 days</option>
+              </select>
+              <button class="ops-btn-sec" id="btnRefreshAnalytics" type="button">↻ REFRESH</button>
+              <span id="analyticsLastUpdated" aria-live="polite">Waiting for data</span>
+            </div>
+          </div>
+          <div class="analytics-message" id="analyticsMessage" role="status" aria-live="polite" hidden></div>
+          <section class="analytics-kpis" aria-label="Key safety statistics">
+            <article class="analytics-kpi">
+              <span class="analytics-kpi-icon incidents">!</span>
+              <div><span class="analytics-kpi-label">TOTAL INCIDENTS</span><strong id="analyticsTotal">—</strong><small id="analyticsPeriodCaption">Last 24 hours</small></div>
+            </article>
+            <article class="analytics-kpi">
+              <span class="analytics-kpi-icon cameras">◉</span>
+              <div><span class="analytics-kpi-label">CAMERAS ONLINE</span><strong id="analyticsCameras">—</strong><small id="analyticsCameraCaption">of enabled cameras</small></div>
+            </article>
+            <article class="analytics-kpi">
+              <span class="analytics-kpi-icon issue">↗</span>
+              <div><span class="analytics-kpi-label">TOP VIOLATION</span><strong id="analyticsTopIssue">—</strong><small id="analyticsTopIssueCaption">No incidents recorded</small></div>
+            </article>
+            <article class="analytics-kpi">
+              <span class="analytics-kpi-icon area">⌖</span>
+              <div><span class="analytics-kpi-label">MOST AFFECTED AREA</span><strong id="analyticsTopArea">—</strong><small id="analyticsTopAreaCaption">No incidents recorded</small></div>
+            </article>
+          </section>
+          <section class="analytics-grid" aria-label="Incident charts">
+            <article class="analytics-card analytics-trend-card">
+              <div class="analytics-card-heading">
+                <div><span class="analytics-card-overline">INCIDENT VOLUME</span><h3>Activity over time</h3></div>
+                <span class="analytics-chart-key"><i></i> Incidents</span>
+              </div>
+              <div class="analytics-chart-wrap analytics-trend-wrap">
+                <canvas id="hourlyChart" role="img" aria-label="Incident activity over time"></canvas>
+              </div>
+            </article>
+            <article class="analytics-card analytics-type-card">
+              <div class="analytics-card-heading">
+                <div><span class="analytics-card-overline">PPE BREAKDOWN</span><h3>Violation types</h3></div>
+              </div>
+              <div class="analytics-donut-layout">
+                <div class="analytics-chart-wrap analytics-donut-wrap">
+                  <canvas id="typeChart" role="img" aria-label="Incident share by violation type"></canvas>
+                  <div class="analytics-donut-center"><strong id="analyticsDonutTotal">0</strong><span>INCIDENTS</span></div>
+                </div>
+                <div id="typeLegend" class="analytics-legend"></div>
+              </div>
+            </article>
+            <article class="analytics-card analytics-area-card">
+              <div class="analytics-card-heading">
+                <div><span class="analytics-card-overline">LOCATION ANALYSIS</span><h3>Incidents by area</h3></div>
+              </div>
+              <div id="areaGroupChart" class="analytics-rank-list"></div>
+            </article>
+            <article class="analytics-card analytics-camera-card">
+              <div class="analytics-card-heading">
+                <div><span class="analytics-card-overline">CAMERA ANALYSIS</span><h3>Incident hotspots</h3></div>
+              </div>
+              <div id="cameraRankList" class="analytics-rank-list"></div>
+            </article>
+          </section>
+        </div>
+      </div>
+
+      <div id="tab-cameras" class="tab-pane">
+        <div class="cam-toolbar">
+          <button class="ops-btn" id="btnNewCamera">+ ADD CAMERA</button>
+          <button class="ops-btn-sec" id="btnManageGroups">MANAGE SECTORS</button>
+          <button class="ops-btn-sync" id="btnSyncSeed" title="Sync default cameras">⟲ SYNC DEFAULTS</button>
+          <span class="sync-msg" id="syncStatus"></span>
+        </div>
+        <table class="ops-table">
+          <thead><tr><th>ID</th><th>DESIGNATION</th><th>SECTOR</th><th>REQUIRED PPE</th><th>LINK</th><th>STATE</th><th>ACTIONS</th></tr></thead>
+          <tbody id="camerasTableBody"></tbody>
+        </table>
+      </div>
+
+      <div id="tab-camera-status" class="tab-pane">
+        <div class="status-report-toolbar">
+          <label>DATE RANGE
+            <select id="cameraStatusRange">
+              <option value="1h">Last hour</option>
+              <option value="24h">Last 24 hours</option>
+              <option value="7d">Last 7 days</option>
+              <option value="30d" selected>Last 30 days</option>
+            </select>
+          </label>
+          <label>CAMERA
+            <select id="cameraStatusCamera"><option value="">All cameras</option></select>
+          </label>
+          <label>AREA GROUP
+            <select id="cameraStatusGroup"><option value="">All groups</option></select>
+          </label>
+          <button class="ops-btn" id="btnRefreshCameraStatus">↻ REFRESH</button>
+          <button class="ops-btn-sec" id="btnClearCameraStatusFilters">CLEAR FILTERS</button>
+          <button class="ops-btn-sec" id="btnExportCameraStatus">↓ EXPORT REPORT</button>
+        </div>
+        <div class="camera-status-message" id="cameraStatusMessage" role="status" aria-live="polite" hidden></div>
+        <div class="status-report-summary" id="cameraStatusSummary">
+          <div class="status-summary-card"><span>OVERALL UPTIME</span><strong>—</strong><small>Based on available history</small></div>
+          <div class="status-summary-card"><span>CAMERAS ONLINE</span><strong>—</strong><small>Current active streams</small></div>
+          <div class="status-summary-card"><span>CAMERAS OFFLINE</span><strong>—</strong><small>Enabled streams needing attention</small></div>
+        </div>
+        <section class="status-report-panel">
+          <div class="status-report-heading">
+            <h3>CONNECTIVITY TIMELINE</h3>
+            <div class="status-legend"><span><i class="online"></i>Online</span><span><i class="partial"></i>Partial</span><span><i class="offline"></i>Offline</span><span><i class="unknown"></i>No history</span></div>
+          </div>
+          <div class="status-timeline-scroll" id="cameraStatusTimeline">
+            <div class="empty-state">Select the Camera Status tab to load connectivity history.</div>
+          </div>
+          <p class="status-history-note">Connectivity history begins when status tracking is enabled. No-history periods are shown as unknown, not counted as downtime.</p>
+        </section>
+        <section class="status-report-panel status-log-panel">
+          <div class="status-report-heading"><h3>CAMERA STATUS LOG</h3><span id="cameraStatusLogCount">0 events</span></div>
+          <div class="status-log-scroll">
+            <table class="ops-table">
+              <thead><tr><th>TIME</th><th>CAMERA</th><th>AREA GROUP</th><th>EVENT</th></tr></thead>
+              <tbody id="cameraStatusLogBody"><tr><td colspan="4" class="empty-state">No status changes in this date range.</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <div id="tab-alert-delivery" class="tab-pane">
+        <section class="alert-delivery-panel">
+          <div class="status-report-heading">
+            <div><h3>POWER AUTOMATE EMAIL DELIVERY</h3>
+              <p>Power Automate sends email alerts only for missing-helmet incidents and attaches the annotated evidence image. Configure the flow URL in the server .env and restart the app before testing. Shift report emails are not part of this build.</p>
+            </div>
+          </div>
+          <div class="email-report-base-settings">
+            <label for="powerAutomateTestRecipient">TEST RECIPIENT EMAIL
+              <input id="powerAutomateTestRecipient" type="email" required maxlength="254" placeholder="safety.team@example.com" autocomplete="email" />
+            </label>
+          </div>
+          <div class="alert-delivery-actions">
+            <div id="powerAutomateTestStatus" role="status" aria-live="polite"></div>
+            <button class="ops-btn-sec" id="btnTestPowerAutomate" type="button">SEND TEST EMAIL</button>
+          </div>
+        </section>
+      </div>
+
+      <div id="tab-rules" class="tab-pane">
+        <div class="rules-panel">
+          <div class="rules-hdr"><h3>ALERT RULES</h3><button class="ops-btn" id="btnNewRule">+ NEW RULE</button></div>
+          <table class="ops-table">
+            <thead><tr><th>RULE</th><th>CAMERA</th><th>SECTOR</th><th>THREAT TYPE</th><th>CHANNELS</th><th>COOLDOWN</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
+            <tbody id="rulesTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+    <aside class="intel-panel">
+      <div class="panel-hdr"><h2><span class="hdr-icon">⚠</span> INCIDENT QUEUE</h2><span class="live-tag">● LIVE</span></div>
+      <div class="intel-feed" id="eventFeed"><div class="empty-state">AWAITING THREAT DATA…</div></div>
+    </aside>
+  </main>
+</div>
+
+<div class="auth-overlay" id="authOverlay" hidden>
+  <form class="auth-card" id="loginForm">
+    <h2>Sign in</h2>
+    <p>Use your operations account to access cameras and incident evidence.</p>
+    <label>Username or email<input id="loginEmail" type="text" autocomplete="username" required /></label>
+    <label>Password<input id="loginPassword" type="password" autocomplete="current-password" required /></label>
+    <div class="auth-error" id="loginError" role="alert"></div>
+    <button class="ops-btn" type="submit">Sign in</button>
+  </form>
+</div>
+
+<div class="modal-overlay" id="cameraModalBackdrop">
+  <div class="ops-modal">
+    <h3 id="cameraModalTitle">ADD CAMERA</h3>
+    <form id="cameraForm">
+      <label>CAMERA ID<input type="text" id="camCameraId" required placeholder="CAM17" /></label>
+      <label>DESIGNATION<input type="text" id="camName" required placeholder="Loading Dock Entry" /></label>
+      <label>RTSP URL<input type="text" id="camRtspUrl" required placeholder="rtsp://admin:pass@192.168.1.53:554/..." /></label>
+      <div class="form-row">
+        <label>SECTOR<select id="camAreaGroup"><option value="">UNASSIGNED</option></select></label>
+        <label class="chk-label" style="align-self:center; margin-top:18px;"><input type="checkbox" id="camEnabled" checked /> ENABLED</label>
+      </div>
+      <label>REQUIRED PPE
+        <div class="ppe-checks">
+          <label class="chk-label"><input type="checkbox" id="ppeHelmet" checked /> Helmet</label>
+          <label class="chk-label"><input type="checkbox" id="ppeVest" checked /> Vest</label>
+          <label class="chk-label"><input type="checkbox" id="ppeMask" /> Mask</label>
+          <label class="chk-label"><input type="checkbox" id="ppeGloves" /> Gloves</label>
+          <label class="chk-label"><input type="checkbox" id="ppeBoots" /> Boots</label>
+          <label class="chk-label"><input type="checkbox" id="ppeGoggles" /> Goggles</label>
+        </div>
+      </label>
+      <div class="modal-btns">
+        <button type="button" class="ops-btn-sec" id="btnCancelCamera">CANCEL</button>
+        <button type="submit" class="ops-btn">SAVE</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="modal-overlay" id="groupsModalBackdrop">
+  <div class="ops-modal">
+    <h3>SECTOR MANAGEMENT</h3>
+    <div class="grp-add-row">
+      <input type="text" id="newGroupName" placeholder="New sector name" />
+      <input type="text" id="newGroupDesc" placeholder="Description" />
+      <button class="ops-btn" id="btnAddGroup">+ ADD</button>
+    </div>
+    <table class="ops-table">
+      <thead><tr><th>SECTOR</th><th>DESCRIPTION</th><th>CAMERAS</th><th></th></tr></thead>
+      <tbody id="groupsTableBody"></tbody>
+    </table>
+    <div class="modal-btns"><button type="button" class="ops-btn-sec" id="btnCloseGroups">CLOSE</button></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="ruleModalBackdrop">
+  <div class="ops-modal">
+    <h3 id="ruleModalTitle">NEW ALERT RULE</h3>
+    <form id="ruleForm">
+      <input type="hidden" id="ruleId" />
+      <label>RULE NAME<input type="text" id="ruleName" required placeholder="Substation Helmet Escalation" /></label>
+      <div class="form-row">
+        <label>CAMERA (blank=any)<input type="text" id="ruleCameraId" placeholder="CAM01" /></label>
+        <label>SECTOR (blank=any)<input type="text" id="ruleZone" placeholder="Substation" /></label>
+      </div>
+      <div class="form-row">
+        <label>VIOLATION TYPE
+            <select id="ruleViolationType">
+              <option value="no_helmet">Missing Helmet</option>
+            </select>
+          </label>
+        <label>COOLDOWN (sec)<input type="number" id="ruleCooldown" value="300" min="10" /></label>
+      </div>
+      <div class="form-row">
+        <label class="chk-label"><input type="checkbox" id="chanPowerAutomate" checked /> Power Automate Email</label>
+        <label class="chk-label"><input type="checkbox" id="ruleEnabled" checked /> Enabled</label>
+      </div>
+      <p>Power Automate alert rules are limited to missing-helmet incidents. The annotated evidence image is attached to each incident email.</p>
+      <label>EMAIL RECIPIENTS<input type="text" id="ruleEmailRecipients" placeholder="safety.team@company.com" /></label>
+      <div class="modal-btns">
+        <button type="button" class="ops-btn-sec" id="btnCancelRule">CANCEL</button>
+        <button type="submit" class="ops-btn">SAVE RULE</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="modal-overlay" id="lightboxBackdrop">
+  <div class="lightbox-inner">
+    <button class="lightbox-close" id="lightboxClose">✕</button>
+    <button class="lightbox-nav lightbox-prev" id="lightboxPrev" aria-label="Previous incident">‹</button>
+    <img id="lightboxImage" alt="Evidence" />
+    <div class="lightbox-image-error" id="lightboxImageError" hidden>Image could not be loaded.</div>
+    <button class="lightbox-nav lightbox-next" id="lightboxNext" aria-label="Next incident">›</button>
+    <div class="lightbox-caption" id="lightboxCaption"></div>
+  </div>
+</div>
+
+<div class="modal-overlay camera-viewer-overlay" id="cameraViewerBackdrop">
+  <div class="camera-viewer">
+    <button class="lightbox-close" id="cameraViewerClose" aria-label="Close camera viewer">✕</button>
+    <button class="viewer-fullscreen-btn" id="btnViewerFullscreen" type="button">FULLSCREEN</button>
+    <button class="lightbox-nav lightbox-prev" id="cameraViewerPrev" aria-label="Previous camera">‹</button>
+    <canvas id="cameraViewerCanvas" width="1920" height="1080"></canvas>
+    <button class="lightbox-nav lightbox-next" id="cameraViewerNext" aria-label="Next camera">›</button>
+    <div class="lightbox-caption" id="cameraViewerCaption"></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

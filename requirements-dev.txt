@@ -1,0 +1,4 @@
+coverage>=7.6,<8
+pip-audit>=2.7,<3
+ruff>=0.4,<1
+playwright>=1.48,<2
