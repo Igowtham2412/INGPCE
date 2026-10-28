@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app import config  # noqa: E402
-from app.face_calibration import (  # noqa: E402
+from app.faces.face_calibration import (  # noqa: E402
     evaluate_queries,
     incident_queries,
     leave_one_out_queries,
@@ -19,7 +19,7 @@ from app.face_calibration import (  # noqa: E402
     load_reference_samples,
     write_calibration_report,
 )
-from app.face_dataset import InsightFaceAnalyzer  # noqa: E402
+from app.faces.face_dataset import InsightFaceAnalyzer  # noqa: E402
 
 
 def _parser() -> argparse.ArgumentParser:

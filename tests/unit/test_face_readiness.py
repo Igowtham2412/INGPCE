@@ -6,13 +6,13 @@ from unittest.mock import patch
 
 from openpyxl import Workbook
 
-from app.face_readiness import get_face_readiness
+from app.faces.face_readiness import get_face_readiness
 
 
 class FaceReadinessTests(unittest.TestCase):
     def test_readiness_lists_missing_dependencies_and_inputs(self):
         with patch(
-            "app.face_readiness.importlib.metadata.version",
+            "app.faces.face_readiness.importlib.metadata.version",
             side_effect=PackageNotFoundError,
         ):
             result = get_face_readiness(0)
@@ -25,7 +25,7 @@ class FaceReadinessTests(unittest.TestCase):
         self.assertIn("Upload a validated consented face dataset", result["missing"])
 
     def test_dataset_presence_ignores_gitkeep_and_reports(self):
-        with patch("app.face_readiness.config.FACE_DATASET_PATH", "dataset/faces"):
+        with patch("app.faces.face_readiness.config.FACE_DATASET_PATH", "dataset/faces"):
             result = get_face_readiness(0)
 
         self.assertTrue(Path(result["dataset_directory_configured"]).as_posix().endswith("dataset/faces")
@@ -41,7 +41,7 @@ class FaceReadinessTests(unittest.TestCase):
             ])
             workbook.save(Path(directory) / "employees.xlsx")
             with patch(
-                "app.face_readiness.config.FACE_DATASET_PATH", directory,
+                "app.faces.face_readiness.config.FACE_DATASET_PATH", directory,
             ):
                 result = get_face_readiness(0)
 

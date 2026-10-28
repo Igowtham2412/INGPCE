@@ -117,7 +117,7 @@ class FaceApiAccessTests(unittest.TestCase):
             "app.main.db.count_active_face_enrollments",
             new=AsyncMock(return_value=0),
         ), patch(
-            "app.face_readiness.get_face_readiness",
+            "app.faces.face_readiness.get_face_readiness",
             return_value={
                 "ready_for_recognition": False,
                 "feature_enabled": False,
@@ -258,9 +258,9 @@ class FaceApiAccessTests(unittest.TestCase):
                 "status": "Identified", "face_crop": b"encrypted-private-crop",
             }),
         ), patch(
-            "app.face_dataset._encryption_key", return_value=b"k" * 32,
+            "app.faces.face_dataset._encryption_key", return_value=b"k" * 32,
         ), patch(
-            "app.face_dataset.decrypt_face_crop", return_value=b"face crop jpeg",
+            "app.faces.face_dataset.decrypt_face_crop", return_value=b"face crop jpeg",
         ), patch(
             "app.main.db.write_audit_log", new=AsyncMock(),
         ) as audit:

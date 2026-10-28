@@ -12,8 +12,8 @@ import numpy as np
 from cryptography.exceptions import InvalidTag
 from openpyxl import Workbook
 
-from app import face_dataset
-from app.face_dataset import (
+from app.faces import face_dataset
+from app.faces.face_dataset import (
     ConsentError,
     ImageRejected,
     InsightFaceAnalyzer,
@@ -333,9 +333,9 @@ class FaceDatasetImportTests(unittest.IsolatedAsyncioTestCase):
             root.mkdir()
             reports = Path(directory) / "reports"
             with patch.object(face_dataset.config, "FACE_REPORT_DIR", str(reports)), patch(
-                "app.face_dataset.db.write_audit_log", side_effect=AssertionError,
+                "app.faces.face_dataset.db.write_audit_log", side_effect=AssertionError,
             ), patch(
-                "app.face_dataset.InsightFaceAnalyzer", side_effect=AssertionError,
+                "app.faces.face_dataset.InsightFaceAnalyzer", side_effect=AssertionError,
             ):
                 result = await import_face_dataset(root, dry_run=True)
                 self.assertTrue(Path(result["report_path"]).is_file())
@@ -357,9 +357,9 @@ class FaceDatasetImportTests(unittest.IsolatedAsyncioTestCase):
             (employee / "photo.jpg").write_bytes(encoded.tobytes())
             reports = Path(directory) / "reports"
             with patch.object(face_dataset.config, "FACE_REPORT_DIR", str(reports)), patch(
-                "app.face_dataset.db.write_audit_log", side_effect=AssertionError,
+                "app.faces.face_dataset.db.write_audit_log", side_effect=AssertionError,
             ), patch(
-                "app.face_dataset.db.list_face_enrollments", side_effect=AssertionError,
+                "app.faces.face_dataset.db.list_face_enrollments", side_effect=AssertionError,
             ):
                 result = await import_face_dataset(
                     root, consent_name="Admin", consent_date="2026-10-26",

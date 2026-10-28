@@ -3,7 +3,7 @@ import importlib.metadata
 from pathlib import Path
 from typing import Any
 
-from . import config
+from .. import config
 
 _SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
 

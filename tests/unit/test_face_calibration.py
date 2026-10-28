@@ -5,7 +5,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from app.face_calibration import (
+from app.faces.face_calibration import (
     CalibrationSample,
     evaluate_queries,
     incident_queries,

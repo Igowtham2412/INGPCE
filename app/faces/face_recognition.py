@@ -16,7 +16,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from . import config, db
+from .. import config, db
 from .face_dataset import (
     FaceAnalyzer,
     ImageRejected,

@@ -44,7 +44,7 @@ from . import auth, config, db, feedback
 from .alert_manager import AlertManager
 from .camera_manager import CameraManager
 from .detector import PPEDetector
-from .face_recognition import FaceRecognitionWorker
+from .faces.face_recognition import FaceRecognitionWorker
 from .ws_hub import hub
 
 logger = logging.getLogger("ppe.api")
@@ -625,7 +625,7 @@ async def face_readiness(request: Request):
     actor = _require_face_admin(request)
     try:
         enrolled_people = await db.count_active_face_enrollments()
-        from .face_readiness import get_face_readiness
+        from .faces.face_readiness import get_face_readiness
 
         result = await asyncio.to_thread(
             get_face_readiness, enrolled_people,
@@ -1312,7 +1312,7 @@ async def get_violation_face_crop(violation_id: int, request: Request):
         or not match.get("face_crop")
     ):
         raise HTTPException(status_code=404, detail="Face crop is not available")
-    from .face_dataset import _encryption_key, decrypt_face_crop
+    from .faces.face_dataset import _encryption_key, decrypt_face_crop
 
     try:
         face_crop = await asyncio.to_thread(
@@ -1343,7 +1343,7 @@ async def list_face_enrollments(request: Request):
 @app.post("/api/face/import")
 async def import_face_dataset_api(payload: FaceDatasetImportIn, request: Request):
     actor = _require_face_manager(request)
-    from .face_dataset import (
+    from .faces.face_dataset import (
         ConsentError,
         FaceModelUnavailable,
         import_face_dataset,
@@ -1479,7 +1479,7 @@ async def delete_face_enrollment(person_id: int, request: Request):
 async def _add_reviewed_incident_embedding(
         violation_id: int, person_id: int, actor: dict[str, Any],
 ) -> bool:
-    from .face_dataset import (
+    from .faces.face_dataset import (
         InsightFaceAnalyzer,
         _encryption_key,
         decrypt_face_crop,

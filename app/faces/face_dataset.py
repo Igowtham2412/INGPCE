@@ -14,7 +14,7 @@ from typing import Any, Protocol
 import cv2
 import numpy as np
 
-from . import config, db
+from .. import config, db
 from .face_manifest import read_face_manifest
 
 logger = logging.getLogger("ppe.face_dataset")

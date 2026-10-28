@@ -19,12 +19,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app import config  # noqa: E402
-from app.face_dataset import (  # noqa: E402
+from app.faces.face_dataset import (  # noqa: E402
     FaceModelUnavailable,
     ImageRejected,
     InsightFaceAnalyzer,
 )
-from app.face_recognition import _crop_person, rank_person_scores  # noqa: E402
+from app.faces.face_recognition import _crop_person, rank_person_scores  # noqa: E402
 
 
 class _ResourceSampler:

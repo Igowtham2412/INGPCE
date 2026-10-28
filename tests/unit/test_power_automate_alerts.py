@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 from app import config
 from app.alert_manager import AlertManager
-from app.face_recognition import FaceRecognitionWorker
+from app.faces.face_recognition import FaceRecognitionWorker
 from app.rules_engine import MatchedAlert
 
 
@@ -71,13 +71,13 @@ class PowerAutomateAlertTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(config, "FACE_INCLUDE_IN_EMAIL", False), patch.object(
             config, "FACE_MATCH_RETENTION_DAYS", 0,
         ), patch(
-            "app.face_recognition.db.claim_face_recognition_job",
+            "app.faces.face_recognition.db.claim_face_recognition_job",
             new=AsyncMock(return_value=None),
         ), patch(
-            "app.face_recognition.db.reuse_face_match_for_track",
+            "app.faces.face_recognition.db.reuse_face_match_for_track",
             new=AsyncMock(return_value=None),
         ), patch(
-            "app.face_recognition.db.fail_face_recognition_job",
+            "app.faces.face_recognition.db.fail_face_recognition_job",
             new=AsyncMock(),
         ) as fail_face_job, patch.object(
             self.manager, "_dispatch", new=AsyncMock(return_value=True),

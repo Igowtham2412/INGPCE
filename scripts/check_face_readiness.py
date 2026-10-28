@@ -10,7 +10,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app import db  # noqa: E402
-from app.face_readiness import get_face_readiness  # noqa: E402
+from app.faces.face_readiness import get_face_readiness  # noqa: E402
 
 
 async def _run() -> dict:

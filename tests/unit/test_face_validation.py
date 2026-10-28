@@ -7,8 +7,8 @@ import cv2
 import numpy as np
 from openpyxl import Workbook
 
-from app.face_dataset import discover_dataset
-from app.face_validation import validate_face_dataset
+from app.faces.face_dataset import discover_dataset
+from app.faces.face_validation import validate_face_dataset
 
 
 def _write_image(path: Path, value: int = 120) -> None:

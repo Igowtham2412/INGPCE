@@ -44,7 +44,7 @@ def _parser() -> argparse.ArgumentParser:
 
 async def _run(args: argparse.Namespace):
     from app import db
-    from app.face_dataset import import_face_dataset
+    from app.faces.face_dataset import import_face_dataset
 
     if args.dry_run:
         return await import_face_dataset(
@@ -73,7 +73,7 @@ def main() -> int:
     import json
 
     from app import config
-    from app.face_dataset import (
+    from app.faces.face_dataset import (
         ConsentError,
         FaceModelUnavailable,
         print_import_summary,
@@ -84,7 +84,7 @@ def main() -> int:
         print("--dry-run and --report-only are mutually exclusive", file=sys.stderr)
         return 2
     if args.report_only:
-        from app.face_validation import validate_face_dataset
+        from app.faces.face_validation import validate_face_dataset
 
         report = validate_face_dataset(
             args.dataset or Path(config.FACE_DATASET_PATH),

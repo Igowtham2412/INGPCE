@@ -29,7 +29,7 @@ from .compliance_engine import (
     prune_expired_cooldowns,
     violation_class_for,
 )
-from .face_recognition import violation_requires_face_recognition
+from .faces.face_recognition import violation_requires_face_recognition
 from .stream_handler import RTSPStream
 from .ws_hub import hub
 

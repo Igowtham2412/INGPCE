@@ -8,8 +8,8 @@ import cv2
 import numpy as np
 
 from app import config
-from app.face_dataset import ImageRejected, decrypt_face_crop, encrypt_embedding
-from app.face_recognition import (
+from app.faces.face_dataset import ImageRejected, decrypt_face_crop, encrypt_embedding
+from app.faces.face_recognition import (
     FaceRecognitionWorker,
     _best_face_from_crops,
     decide_face_match,
@@ -136,8 +136,8 @@ class FaceMatchTests(unittest.TestCase):
 class FaceRecognitionQueueTests(unittest.IsolatedAsyncioTestCase):
     async def test_blocking_work_uses_dedicated_face_worker_thread(self):
         worker = FaceRecognitionWorker()
-        with patch("app.face_recognition.config.FACE_MATCH_RETENTION_DAYS", 0), patch(
-            "app.face_recognition.db.claim_face_recognition_job",
+        with patch("app.faces.face_recognition.config.FACE_MATCH_RETENTION_DAYS", 0), patch(
+            "app.faces.face_recognition.db.claim_face_recognition_job",
             new=AsyncMock(return_value=None),
         ):
             await worker.start()
@@ -152,8 +152,8 @@ class FaceRecognitionQueueTests(unittest.IsolatedAsyncioTestCase):
     async def test_normal_frames_do_not_enqueue_recognition(self):
         worker = FaceRecognitionWorker()
         worker._running = True
-        with patch("app.face_recognition.config.FACE_ENABLED", True), patch(
-            "app.face_recognition.db.enqueue_face_recognition_job",
+        with patch("app.faces.face_recognition.config.FACE_ENABLED", True), patch(
+            "app.faces.face_recognition.db.enqueue_face_recognition_job",
             new=AsyncMock(),
         ) as enqueue:
             worker.observe(
@@ -175,8 +175,8 @@ class FaceRecognitionQueueTests(unittest.IsolatedAsyncioTestCase):
     async def test_eligible_types_queue_but_other_incidents_do_not(self):
         worker = FaceRecognitionWorker()
         worker._running = True
-        with patch("app.face_recognition.config.FACE_ENABLED", True), patch(
-            "app.face_recognition.db.enqueue_face_recognition_job",
+        with patch("app.faces.face_recognition.config.FACE_ENABLED", True), patch(
+            "app.faces.face_recognition.db.enqueue_face_recognition_job",
             new=AsyncMock(return_value=True),
         ) as enqueue:
             for incident_id, violation_type in (
@@ -197,8 +197,8 @@ class FaceRecognitionQueueTests(unittest.IsolatedAsyncioTestCase):
     async def test_feature_disabled_never_queues_incidents(self):
         worker = FaceRecognitionWorker()
         worker._running = True
-        with patch("app.face_recognition.config.FACE_ENABLED", False), patch(
-            "app.face_recognition.db.enqueue_face_recognition_job",
+        with patch("app.faces.face_recognition.config.FACE_ENABLED", False), patch(
+            "app.faces.face_recognition.db.enqueue_face_recognition_job",
             new=AsyncMock(),
         ) as enqueue:
             worker.enqueue_confirmed_incident(
@@ -212,8 +212,8 @@ class FaceRecognitionQueueTests(unittest.IsolatedAsyncioTestCase):
         worker = FaceRecognitionWorker()
         worker._running = True
         worker._enqueue_tasks = set(range(64))
-        with patch("app.face_recognition.config.FACE_ENABLED", True), patch(
-            "app.face_recognition.db.enqueue_face_recognition_job",
+        with patch("app.faces.face_recognition.config.FACE_ENABLED", True), patch(
+            "app.faces.face_recognition.db.enqueue_face_recognition_job",
             new=AsyncMock(),
         ) as enqueue:
             worker.enqueue_confirmed_incident(
@@ -240,24 +240,24 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
         worker = FaceRecognitionWorker(analyzer_factory=_Analyzer)
         worker._analyzer = _Analyzer()
         with patch(
-            "app.face_recognition._read_person_crop",
+            "app.faces.face_recognition._read_person_crop",
             return_value=(np.zeros((64, 64, 3), dtype=np.uint8), [10, 10, 74, 74]),
         ), patch(
-            "app.face_recognition.db.reuse_face_match_for_track",
+            "app.faces.face_recognition.db.reuse_face_match_for_track",
             new=AsyncMock(return_value=None),
         ), patch(
-            "app.face_recognition._encryption_key", return_value=b"k" * 32,
+            "app.faces.face_recognition._encryption_key", return_value=b"k" * 32,
         ), patch(
-            "app.face_recognition.db.list_face_enrollments",
+            "app.faces.face_recognition.db.list_face_enrollments",
             new=AsyncMock(return_value=[]),
         ), patch(
-            "app.face_recognition.db.list_face_embeddings",
+            "app.faces.face_recognition.db.list_face_embeddings",
             new=AsyncMock(return_value=[]),
         ), patch(
-            "app.face_recognition.db.complete_face_recognition_job",
+            "app.faces.face_recognition.db.complete_face_recognition_job",
             new=AsyncMock(),
         ) as complete, patch(
-            "app.face_recognition.db.write_audit_log", new=AsyncMock(),
+            "app.faces.face_recognition.db.write_audit_log", new=AsyncMock(),
         ):
             await worker._process_job({
                 "incident_id": 100,
@@ -289,15 +289,15 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
         worker = FaceRecognitionWorker(analyzer_factory=_Analyzer)
         worker._analyzer = _Analyzer()
         with patch(
-            "app.face_recognition._read_person_crop",
+            "app.faces.face_recognition._read_person_crop",
             return_value=(np.zeros((64, 64, 3), dtype=np.uint8), [0, 0, 64, 64]),
         ), patch(
-            "app.face_recognition.db.reuse_face_match_for_track",
+            "app.faces.face_recognition.db.reuse_face_match_for_track",
             new=AsyncMock(return_value=None),
         ), patch(
-            "app.face_recognition._encryption_key", return_value=key,
+            "app.faces.face_recognition._encryption_key", return_value=key,
         ), patch(
-            "app.face_recognition.db.list_face_enrollments",
+            "app.faces.face_recognition.db.list_face_enrollments",
             new=AsyncMock(return_value=[
                 {
                     "person_id": 1, "employee_code": "E001",
@@ -309,7 +309,7 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
                 },
             ]),
         ), patch(
-            "app.face_recognition.db.list_face_embeddings",
+            "app.faces.face_recognition.db.list_face_embeddings",
             new=AsyncMock(return_value=[
                 {
                     "person_id": 1, "active": True,
@@ -323,16 +323,16 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
                 },
             ]),
         ), patch(
-            "app.face_recognition.config.FACE_MATCH_THRESHOLD", 0.8,
+            "app.faces.face_recognition.config.FACE_MATCH_THRESHOLD", 0.8,
         ), patch(
-            "app.face_recognition.config.FACE_SUGGEST_THRESHOLD", 0.7,
+            "app.faces.face_recognition.config.FACE_SUGGEST_THRESHOLD", 0.7,
         ), patch(
-            "app.face_recognition.config.FACE_MIN_MARGIN", 0.1,
+            "app.faces.face_recognition.config.FACE_MIN_MARGIN", 0.1,
         ), patch(
-            "app.face_recognition.db.complete_face_recognition_job",
+            "app.faces.face_recognition.db.complete_face_recognition_job",
             new=AsyncMock(),
         ) as complete, patch(
-            "app.face_recognition.db.write_audit_log", new=AsyncMock(),
+            "app.faces.face_recognition.db.write_audit_log", new=AsyncMock(),
         ):
             await worker._process_job({
                 "incident_id": 103,
@@ -363,16 +363,16 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
         worker = FaceRecognitionWorker(analyzer_factory=_Analyzer)
         worker._analyzer = _Analyzer()
         with patch(
-            "app.face_recognition._read_person_crop",
+            "app.faces.face_recognition._read_person_crop",
             return_value=(np.zeros((64, 64, 3), dtype=np.uint8), [10, 10, 74, 74]),
         ), patch(
-            "app.face_recognition.db.reuse_face_match_for_track",
+            "app.faces.face_recognition.db.reuse_face_match_for_track",
             new=AsyncMock(return_value=None),
         ), patch(
-            "app.face_recognition.db.complete_face_recognition_job",
+            "app.faces.face_recognition.db.complete_face_recognition_job",
             new=AsyncMock(),
         ) as complete, patch(
-            "app.face_recognition.db.write_audit_log", new=AsyncMock(),
+            "app.faces.face_recognition.db.write_audit_log", new=AsyncMock(),
         ):
             await worker._process_job({
                 "incident_id": 101,
@@ -390,10 +390,10 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
             analyzer_factory=lambda: self.fail("model should not be loaded"),
         )
         with patch(
-            "app.face_recognition.db.reuse_face_match_for_track",
+            "app.faces.face_recognition.db.reuse_face_match_for_track",
             new=AsyncMock(return_value=100),
         ) as reuse, patch(
-            "app.face_recognition.db.write_audit_log", new=AsyncMock(),
+            "app.faces.face_recognition.db.write_audit_log", new=AsyncMock(),
         ) as audit:
             await worker._process_job({
                 "incident_id": 101,
