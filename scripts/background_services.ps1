@@ -177,7 +177,7 @@ while ($true) {
                 $ownedProcessRunning = $false
             }
             if (-not $ownedProcessRunning -and
-                -not (Test-ConfiguredDashboardRunning) -and
+                (-not (Test-ConfiguredDashboardRunning)) -and
                 (Get-Date) -ge $dashboardRetryAfter) {
                 Start-Dashboard
             }

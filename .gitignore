@@ -8,7 +8,15 @@ __pycache__/
 .coverage
 .coverage.*
 htmlcov/
-dataset/
+dataset/*
+!dataset/faces/
+dataset/faces/*
+!dataset/faces/.gitkeep
+!dataset/face_test_crops/
+dataset/face_test_crops/*
+!dataset/face_test_crops/.gitkeep
+!dataset/faces_manifest.example.csv
+!dataset/faces_manifest.example.xlsx
 evidence/
 snapshots/
 logs/

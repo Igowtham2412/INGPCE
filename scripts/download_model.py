@@ -1,5 +1,7 @@
 """download_model.py - fetch a pretrained PPE YOLO model from Hugging Face."""
-import argparse, os
+import argparse
+import os
+
 from huggingface_hub import hf_hub_download
 
 DEFAULT_OPTIONS = {

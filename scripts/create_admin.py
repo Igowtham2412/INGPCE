@@ -1,9 +1,9 @@
 """Create the first administrator without putting a password in command history."""
+import asyncio
 import getpass
 import os
 import re
 import sys
-import asyncio
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:

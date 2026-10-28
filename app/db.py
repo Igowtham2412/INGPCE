@@ -5,25 +5,60 @@ db.py — async PostgreSQL data layer (asyncpg, connection-pooled).
 frontend: it runs on EVERY app startup AND is exposed via
 POST /api/cameras/sync-seed (a dashboard button), and works per-camera:
   - ensures every area group in SEED_AREA_GROUPS exists (create if missing)
-  - creates missing configured cameras and updates their configured RTSP URL
+  - creates missing configured cameras without overwriting existing stream URLs
   - disables retired seed cameras without deleting their incident history
-This makes seeding idempotent and self-healing while preserving operator
-names, PPE settings, and records for existing cameras.
+This makes seeding idempotent while preserving operator-managed camera
+settings and records for existing cameras.
 """
 import asyncio
 import json
 import logging
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Any
+from urllib.parse import urlsplit
 
 import asyncpg
 
 from . import config
 
 logger = logging.getLogger("ppe.db")
+
+
+def _seed_credentials_refresh(
+    existing_url: str | None, configured_url: str | None,
+) -> str | None:
+    if not existing_url or not configured_url:
+        return None
+    existing = urlsplit(existing_url)
+    configured = urlsplit(configured_url)
+    same_endpoint = (
+        existing.scheme.lower(),
+        (existing.hostname or "").lower(),
+        existing.port,
+        existing.path,
+        existing.query,
+    ) == (
+        configured.scheme.lower(),
+        (configured.hostname or "").lower(),
+        configured.port,
+        configured.path,
+        configured.query,
+    )
+    if (
+        not same_endpoint
+        or configured.username is None
+        or not configured.password
+        or (
+            existing.username == configured.username
+            and existing.password == configured.password
+        )
+    ):
+        return None
+    return configured_url
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS area_groups (
@@ -38,12 +73,22 @@ CREATE TABLE IF NOT EXISTS cameras (
     camera_id TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     rtsp_url TEXT NOT NULL,
+    main_stream_url TEXT NOT NULL,
+    sub_stream_url TEXT NOT NULL,
     area_group_id BIGINT REFERENCES area_groups(id) ON DELETE SET NULL,
     required_ppe TEXT[] NOT NULL DEFAULT '{helmet,vest}',
     enabled BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE cameras ADD COLUMN IF NOT EXISTS main_stream_url TEXT;
+ALTER TABLE cameras ADD COLUMN IF NOT EXISTS sub_stream_url TEXT;
+UPDATE cameras
+SET main_stream_url = COALESCE(main_stream_url, rtsp_url),
+    sub_stream_url = COALESCE(sub_stream_url, rtsp_url)
+WHERE main_stream_url IS NULL OR sub_stream_url IS NULL;
+ALTER TABLE cameras ALTER COLUMN main_stream_url SET NOT NULL;
+ALTER TABLE cameras ALTER COLUMN sub_stream_url SET NOT NULL;
 
 CREATE TABLE IF NOT EXISTS violations (
     id BIGSERIAL PRIMARY KEY,
@@ -177,7 +222,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log (created_at DESC);
 """
 
-_pool: Optional[asyncpg.Pool] = None
+_pool: asyncpg.Pool | None = None
 
 
 def _run_schema_migrations() -> None:
@@ -266,14 +311,14 @@ def get_pool() -> asyncpg.Pool:
     return _pool
 
 
-async def sync_seed_data() -> Dict[str, Any]:
-    """Synchronize configured feed URLs and safely retire removed seed cameras."""
+async def sync_seed_data() -> dict[str, Any]:
+    """Add missing configured cameras and safely retire removed seed cameras."""
     groups_created = 0
     cameras_created = 0
     cameras_updated = 0
     cameras_disabled = 0
-    updated_camera_ids: List[str] = []
-    disabled_camera_ids: List[str] = []
+    updated_camera_ids: list[str] = []
+    disabled_camera_ids: list[str] = []
 
     existing_groups = await list_area_groups()
     group_name_to_id = {g["name"]: g["id"] for g in existing_groups}
@@ -286,22 +331,76 @@ async def sync_seed_data() -> Dict[str, Any]:
 
     existing_cameras = await list_cameras()
     cameras_by_id = {c["camera_id"]: c for c in existing_cameras}
-    newly_created_camera_ids: List[str] = []
+    newly_created_camera_ids: list[str] = []
 
     for cam in config.SEED_CAMERAS:
         camera_id = cam["camera_id"]
         existing = cameras_by_id.get(camera_id)
         if existing:
-            if existing["rtsp_url"] != cam["rtsp_url"]:
-                await update_camera(camera_id, rtsp_url=cam["rtsp_url"])
+            configured_main = cam.get("main_stream_url")
+            configured_sub = cam.get("sub_stream_url")
+            main_refresh = _seed_credentials_refresh(
+                existing.get("main_stream_url") or existing.get("rtsp_url"),
+                configured_main,
+            )
+            sub_refresh = _seed_credentials_refresh(
+                existing.get("sub_stream_url"),
+                configured_sub,
+            )
+            if main_refresh and sub_refresh:
+                await update_camera(
+                    camera_id,
+                    rtsp_url=main_refresh,
+                    main_stream_url=main_refresh,
+                    sub_stream_url=sub_refresh,
+                )
                 cameras_updated += 1
                 updated_camera_ids.append(camera_id)
+
+            required_ppe = list(existing.get("required_ppe") or [])
+            if (
+                "arc_flash_suit" in cam.get("required_ppe", [])
+                and "arc_flash_suit" not in required_ppe
+            ):
+                required_ppe.append("arc_flash_suit")
+                await update_camera(camera_id, required_ppe=required_ppe)
+                cameras_updated += 1
+                if camera_id not in updated_camera_ids:
+                    updated_camera_ids.append(camera_id)
+            if "main_stream_url" not in cam and "sub_stream_url" not in cam:
+                if existing.get("rtsp_url") != cam["rtsp_url"]:
+                    await update_camera(camera_id, rtsp_url=cam["rtsp_url"])
+                    cameras_updated += 1
+                    if camera_id not in updated_camera_ids:
+                        updated_camera_ids.append(camera_id)
             continue
+
+        inferred_main_url, inferred_sub_url = config.camera_stream_urls_for(
+            cam["rtsp_url"],
+        )
+        main_stream_url = cam.get("main_stream_url", inferred_main_url)
+        sub_stream_url = cam.get(
+            "sub_stream_url",
+            config.sub_stream_url_for(main_stream_url)
+            if "main_stream_url" in cam else inferred_sub_url,
+        )
         area_group_id = group_name_to_id.get(cam.get("area_group_name"))
-        await create_camera(
-            camera_id, cam["name"], cam["rtsp_url"], area_group_id,
+        camera_args = (
+            camera_id, cam["name"],
+            main_stream_url if (
+                "main_stream_url" in cam or "sub_stream_url" in cam
+            ) else cam["rtsp_url"],
+            area_group_id,
             cam.get("required_ppe", ["helmet", "vest"]),
         )
+        if "main_stream_url" in cam or "sub_stream_url" in cam:
+            await create_camera(
+                *camera_args,
+                main_stream_url=main_stream_url,
+                sub_stream_url=sub_stream_url,
+            )
+        else:
+            await create_camera(*camera_args)
         cameras_created += 1
         newly_created_camera_ids.append(camera_id)
         cameras_by_id[camera_id] = {"camera_id": camera_id}
@@ -326,7 +425,7 @@ async def sync_seed_data() -> Dict[str, Any]:
     }
 
 
-async def list_area_groups() -> List[Dict[str, Any]]:
+async def list_area_groups() -> list[dict[str, Any]]:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
             """SELECT ag.*, COUNT(c.id) as camera_count
@@ -337,7 +436,7 @@ async def list_area_groups() -> List[Dict[str, Any]]:
         return [dict(r) for r in rows]
 
 
-async def create_area_group(name: str, description: str = "") -> Dict[str, Any]:
+async def create_area_group(name: str, description: str = "") -> dict[str, Any]:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             "INSERT INTO area_groups (name, description) VALUES ($1,$2) RETURNING *",
@@ -346,7 +445,7 @@ async def create_area_group(name: str, description: str = "") -> Dict[str, Any]:
         return dict(row)
 
 
-async def update_area_group(group_id: int, **fields) -> Optional[Dict[str, Any]]:
+async def update_area_group(group_id: int, **fields) -> dict[str, Any] | None:
     if not fields:
         return None
     set_clauses, params = [], []
@@ -366,7 +465,7 @@ async def delete_area_group(group_id: int) -> bool:
         return result.endswith("1")
 
 
-async def list_cameras() -> List[Dict[str, Any]]:
+async def list_cameras() -> list[dict[str, Any]]:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
             """SELECT c.*, ag.name as area_group_name
@@ -377,7 +476,7 @@ async def list_cameras() -> List[Dict[str, Any]]:
         return [dict(r) for r in rows]
 
 
-async def list_camera_zones(camera_id: str, enabled_only: bool = True) -> List[Dict[str, Any]]:
+async def list_camera_zones(camera_id: str, enabled_only: bool = True) -> list[dict[str, Any]]:
     query = "SELECT * FROM camera_zones WHERE camera_id = $1"
     if enabled_only:
         query += " AND enabled = true"
@@ -392,7 +491,7 @@ async def list_camera_zones(camera_id: str, enabled_only: bool = True) -> List[D
 
 
 async def create_camera_zone(camera_id: str, name: str,
-                             polygon: List[List[float]], enabled: bool = True) -> Dict[str, Any]:
+                             polygon: list[list[float]], enabled: bool = True) -> dict[str, Any]:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             """INSERT INTO camera_zones (camera_id, name, polygon, enabled)
@@ -405,7 +504,7 @@ async def create_camera_zone(camera_id: str, name: str,
         return zone
 
 
-async def update_camera_zone(zone_id: int, camera_id: str, **fields) -> Optional[Dict[str, Any]]:
+async def update_camera_zone(zone_id: int, camera_id: str, **fields) -> dict[str, Any] | None:
     if not fields:
         return None
     set_clauses, params = [], []
@@ -441,7 +540,7 @@ async def delete_camera_zone(zone_id: int, camera_id: str) -> bool:
         return result.endswith("1")
 
 
-async def get_camera(camera_id: str) -> Optional[Dict[str, Any]]:
+async def get_camera(camera_id: str) -> dict[str, Any] | None:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             """SELECT c.*, ag.name as area_group_name
@@ -454,20 +553,42 @@ async def get_camera(camera_id: str) -> Optional[Dict[str, Any]]:
 
 
 async def create_camera(camera_id: str, name: str, rtsp_url: str,
-                         area_group_id: Optional[int], required_ppe: List[str],
-                         enabled: bool = True) -> Dict[str, Any]:
+                         area_group_id: int | None, required_ppe: list[str],
+                         enabled: bool = True,
+                         main_stream_url: str | None = None,
+                         sub_stream_url: str | None = None) -> dict[str, Any]:
+    if main_stream_url is None:
+        main_stream_url, inferred_sub_url = config.camera_stream_urls_for(rtsp_url)
+    else:
+        inferred_sub_url = config.sub_stream_url_for(main_stream_url)
+    sub_stream_url = sub_stream_url or inferred_sub_url
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
-            """INSERT INTO cameras (camera_id, name, rtsp_url, area_group_id, required_ppe, enabled)
-               VALUES ($1,$2,$3,$4,$5,$6) RETURNING *""",
-            camera_id, name, rtsp_url, area_group_id, required_ppe, enabled,
+            """INSERT INTO cameras (
+                   camera_id, name, rtsp_url, main_stream_url, sub_stream_url,
+                   area_group_id, required_ppe, enabled
+               )
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *""",
+            camera_id, name, rtsp_url, main_stream_url, sub_stream_url,
+            area_group_id, required_ppe, enabled,
         )
         return dict(row)
 
 
-async def update_camera(camera_id: str, **fields) -> Optional[Dict[str, Any]]:
+async def update_camera(camera_id: str, **fields) -> dict[str, Any] | None:
     if not fields:
         return None
+    if "rtsp_url" in fields and not {
+        "main_stream_url", "sub_stream_url",
+    }.intersection(fields):
+        main_stream_url, sub_stream_url = config.camera_stream_urls_for(
+            fields["rtsp_url"],
+        )
+        fields = {
+            **fields,
+            "main_stream_url": main_stream_url,
+            "sub_stream_url": sub_stream_url,
+        }
     set_clauses, params = [], []
     for key, value in fields.items():
         params.append(value)
@@ -486,11 +607,11 @@ async def delete_camera(camera_id: str) -> bool:
 
 
 async def log_violation(camera_id: str, camera_name: str, zone: str, track_id: int,
-                         violation_type: str, snapshot_path: Optional[str] = None,
-                         area_group_id: Optional[int] = None, area_group: Optional[str] = None,
-                         clean_snapshot_path: Optional[str] = None,
-                         detection_metadata: Optional[Dict[str, Any]] = None,
-                         cooldown_seconds: float = config.VIOLATION_COOLDOWN_SECONDS) -> Optional[int]:
+                         violation_type: str, snapshot_path: str | None = None,
+                         area_group_id: int | None = None, area_group: str | None = None,
+                         clean_snapshot_path: str | None = None,
+                         detection_metadata: dict[str, Any] | None = None,
+                         cooldown_seconds: float = config.VIOLATION_COOLDOWN_SECONDS) -> int | None:
     now = time.time()
     async with get_pool().acquire() as conn:
         async with conn.transaction():
@@ -521,12 +642,17 @@ async def log_violation(camera_id: str, camera_name: str, zone: str, track_id: i
 
 
 async def review_violation(violation_id: int, review_status: str,
-                           reviewed_by: Optional[str], review_comment: Optional[str],
-                           dataset_image_path: str, dataset_label_path: str) -> Optional[Dict[str, Any]]:
+                           reviewed_by: str | None, review_comment: str | None,
+                           dataset_image_path: str, dataset_label_path: str) -> dict[str, Any] | None:
     if review_status not in {"confirmed", "false_positive"}:
         raise ValueError("review_status must be confirmed or false_positive")
     async with get_pool().acquire() as conn:
         async with conn.transaction():
+            previous_feedback = await conn.fetch(
+                """SELECT dataset_image_path, dataset_label_path
+                   FROM violation_review_log WHERE violation_id = $1""",
+                violation_id,
+            )
             row = await conn.fetchrow(
                 """UPDATE violations
                    SET review_status = $2, reviewed_at = now(), reviewed_by = $3, review_comment = $4
@@ -541,7 +667,16 @@ async def review_violation(violation_id: int, review_status: str,
                    VALUES ($1,$2,$3,$4,$5)""",
                 violation_id, review_status, reviewed_by, dataset_image_path, dataset_label_path,
             )
-            return dict(row)
+            result = dict(row)
+            result["_superseded_feedback_paths"] = [
+                path
+                for feedback_row in previous_feedback
+                for path in (
+                    feedback_row["dataset_image_path"],
+                    feedback_row["dataset_label_path"],
+                )
+            ]
+            return result
 
 
 async def update_violation_video_path(violation_id: int, video_path: str) -> bool:
@@ -553,7 +688,7 @@ async def update_violation_video_path(violation_id: int, video_path: str) -> boo
         return result.endswith("1")
 
 
-async def get_user_by_login(login: str) -> Optional[Dict[str, Any]]:
+async def get_user_by_login(login: str) -> dict[str, Any] | None:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             """SELECT id, email, username, password_hash, role, is_active
@@ -566,40 +701,38 @@ async def get_user_by_login(login: str) -> Optional[Dict[str, Any]]:
         return dict(row) if row else None
 
 
-async def set_username(user_id: int, username: str) -> Optional[Dict[str, Any]]:
+async def set_username(user_id: int, username: str) -> dict[str, Any] | None:
     normalized = username.strip().lower()
     if not normalized or len(normalized) > 64:
         raise ValueError("username must contain between 1 and 64 characters")
-    async with get_pool().acquire() as conn:
-        async with conn.transaction():
-            conflicting_email = await conn.fetchval(
-                "SELECT EXISTS (SELECT 1 FROM users WHERE lower(email) = $1 AND id <> $2)",
-                normalized, user_id,
-            )
-            if conflicting_email:
-                raise ValueError("username conflicts with an existing user's email")
-            row = await conn.fetchrow(
-                """UPDATE users SET username = $1, updated_at = now()
+    async with get_pool().acquire() as conn, conn.transaction():
+        conflicting_email = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM users WHERE lower(email) = $1 AND id <> $2)",
+            normalized, user_id,
+        )
+        if conflicting_email:
+            raise ValueError("username conflicts with an existing user's email")
+        row = await conn.fetchrow(
+            """UPDATE users SET username = $1, updated_at = now()
                    WHERE id = $2 RETURNING id, email, username, role, is_active""",
-                normalized, user_id,
-            )
-            return dict(row) if row else None
+            normalized, user_id,
+        )
+        return dict(row) if row else None
 
 
 async def update_user_password(user_id: int, password_hash: str) -> bool:
-    async with get_pool().acquire() as conn:
-        async with conn.transaction():
-            result = await conn.execute(
-                "UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1",
-                user_id, password_hash,
-            )
-            if not result.endswith("1"):
-                return False
-            await conn.execute("DELETE FROM auth_sessions WHERE user_id = $1", user_id)
-            return True
+    async with get_pool().acquire() as conn, conn.transaction():
+        result = await conn.execute(
+            "UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1",
+            user_id, password_hash,
+        )
+        if not result.endswith("1"):
+            return False
+        await conn.execute("DELETE FROM auth_sessions WHERE user_id = $1", user_id)
+        return True
 
 
-async def create_user(email: str, password_hash: str, role: str) -> Dict[str, Any]:
+async def create_user(email: str, password_hash: str, role: str) -> dict[str, Any]:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             """INSERT INTO users (email, password_hash, role)
@@ -610,7 +743,7 @@ async def create_user(email: str, password_hash: str, role: str) -> Dict[str, An
         return dict(row)
 
 
-async def list_users() -> List[Dict[str, Any]]:
+async def list_users() -> list[dict[str, Any]]:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, email, username, role, is_active, created_at FROM users ORDER BY email"
@@ -618,7 +751,7 @@ async def list_users() -> List[Dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
-async def set_user_active(user_id: int, active: bool) -> Optional[Dict[str, Any]]:
+async def set_user_active(user_id: int, active: bool) -> dict[str, Any] | None:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             """UPDATE users SET is_active = $2, updated_at = now()
@@ -638,7 +771,7 @@ async def create_auth_session(session_id: str, user_id: int, csrf_token: str,
         )
 
 
-async def get_auth_session(session_id: str, expires_at) -> Optional[Dict[str, Any]]:
+async def get_auth_session(session_id: str, expires_at) -> dict[str, Any] | None:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             """SELECT s.session_id, s.csrf_token, s.expires_at,
@@ -707,31 +840,30 @@ async def create_user_invite(token_hash: str, email: str, role: str, expires_at)
         )
 
 
-async def accept_user_invite(token_hash: str, password_hash: str) -> Optional[Dict[str, Any]]:
-    async with get_pool().acquire() as conn:
-        async with conn.transaction():
-            invite = await conn.fetchrow(
-                """UPDATE user_invites SET accepted_at = now()
+async def accept_user_invite(token_hash: str, password_hash: str) -> dict[str, Any] | None:
+    async with get_pool().acquire() as conn, conn.transaction():
+        invite = await conn.fetchrow(
+            """UPDATE user_invites SET accepted_at = now()
                    WHERE token_hash = $1 AND accepted_at IS NULL AND expires_at > now()
                    RETURNING email, role""",
-                token_hash,
-            )
-            if invite is None:
-                return None
-            row = await conn.fetchrow(
-                """INSERT INTO users (email, password_hash, role)
+            token_hash,
+        )
+        if invite is None:
+            return None
+        row = await conn.fetchrow(
+            """INSERT INTO users (email, password_hash, role)
                    VALUES ($1, $2, $3)
                    RETURNING id, email, role, is_active""",
-                invite["email"], password_hash, invite["role"],
-            )
-            return dict(row)
+            invite["email"], password_hash, invite["role"],
+        )
+        return dict(row)
 
 
-async def write_audit_log(action: str, actor_user_id: Optional[int] = None,
-                          actor_email: Optional[str] = None,
-                          target_type: Optional[str] = None,
-                          target_id: Optional[str] = None,
-                          details: Optional[Dict[str, Any]] = None) -> None:
+async def write_audit_log(action: str, actor_user_id: int | None = None,
+                          actor_email: str | None = None,
+                          target_type: str | None = None,
+                          target_id: str | None = None,
+                          details: dict[str, Any] | None = None) -> None:
     async with get_pool().acquire() as conn:
         await conn.execute(
             """INSERT INTO audit_log
@@ -742,7 +874,7 @@ async def write_audit_log(action: str, actor_user_id: Optional[int] = None,
         )
 
 
-async def get_audit_log(limit: int = 100) -> List[Dict[str, Any]]:
+async def get_audit_log(limit: int = 100) -> list[dict[str, Any]]:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
             """SELECT id, actor_user_id, actor_email, action, target_type, target_id,
@@ -753,13 +885,766 @@ async def get_audit_log(limit: int = 100) -> List[Dict[str, Any]]:
         return [dict(row) for row in rows]
 
 
+async def upsert_face_enrollment(
+        employee_code: str, full_name: str, department: str | None,
+        consent_basis: str, consent_date: date | None,
+        enrolled_by: int | None) -> dict[str, Any]:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO face_enrollments (
+                   employee_code, full_name, department, consent_recorded,
+                   consent_basis, consent_date, enrolled_by
+               )
+               VALUES ($1, $2, $3, true, $4, $5, $6)
+               ON CONFLICT (employee_code) DO UPDATE SET
+                   full_name = EXCLUDED.full_name,
+                   department = EXCLUDED.department,
+                   consent_recorded = true,
+                   consent_basis = EXCLUDED.consent_basis,
+                   consent_date = EXCLUDED.consent_date,
+                   enrolled_by = COALESCE(EXCLUDED.enrolled_by, face_enrollments.enrolled_by),
+                   updated_at = now()
+               RETURNING person_id, employee_code, active, embedding_count""",
+            employee_code, full_name, department, consent_basis, consent_date,
+            enrolled_by,
+        )
+        return dict(row)
+
+
+async def list_face_enrollments() -> list[dict[str, Any]]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT person_id, employee_code, full_name, department,
+                      consent_recorded, consent_basis, consent_date, enrolled_by,
+                      enrolled_at, active, embedding_count
+               FROM face_enrollments ORDER BY employee_code"""
+        )
+        return [dict(row) for row in rows]
+
+
+async def count_active_face_enrollments() -> int:
+    async with get_pool().acquire() as conn:
+        return int(await conn.fetchval(
+            "SELECT count(*) FROM face_enrollments WHERE active",
+        ))
+
+
+async def get_face_enrollment(person_id: int) -> dict[str, Any] | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT person_id, employee_code, full_name, department,
+                      active, embedding_count
+               FROM face_enrollments WHERE person_id = $1""",
+            person_id,
+        )
+        return dict(row) if row else None
+
+
+async def get_face_embedding_by_hash(image_hash: str) -> dict[str, Any] | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT embedding_id, person_id, image_hash, active
+               FROM face_embeddings WHERE image_hash = $1""",
+            image_hash,
+        )
+        return dict(row) if row else None
+
+
+async def list_face_embeddings(
+        person_id: int | None = None) -> list[dict[str, Any]]:
+    query = """SELECT embedding_id, person_id, embedding, image_hash,
+                      quality_score, model_name, model_version, active
+               FROM face_embeddings"""
+    params = ()
+    if person_id is not None:
+        query += " WHERE person_id = $1"
+        params = (person_id,)
+    query += " ORDER BY person_id, embedding_id"
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(query, *params)
+        return [dict(row) for row in rows]
+
+
+async def insert_face_embedding(
+        person_id: int, embedding: bytes, quality_score: float,
+        image_hash: str, photo_path: str | None, model_name: str,
+        model_version: str, source: str = "dataset import") -> int | None:
+    async with get_pool().acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            """INSERT INTO face_embeddings (
+                       person_id, embedding, source, quality_score, image_hash,
+                       photo_path, model_name, model_version
+                   )
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                   ON CONFLICT (image_hash) DO NOTHING
+                   RETURNING embedding_id""",
+            person_id, embedding, source, quality_score, image_hash,
+            photo_path, model_name, model_version,
+        )
+        if row is None:
+            return None
+        await conn.execute(
+            """UPDATE face_enrollments
+                   SET embedding_count = (
+                       SELECT count(*) FROM face_embeddings
+                       WHERE person_id = $1 AND active
+                   ), updated_at = now()
+                   WHERE person_id = $1""",
+            person_id,
+        )
+        return int(row["embedding_id"])
+
+
+async def create_face_import_run(
+        status: str, actor_user_id: int | None,
+        summary: dict[str, Any], report_path: str | None) -> int:
+    if status not in {"completed", "failed"}:
+        raise ValueError("Invalid face import run status")
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO face_import_runs
+                   (status, actor_user_id, summary, report_path)
+               VALUES ($1, $2, $3::jsonb, $4)
+               RETURNING id""",
+            status, actor_user_id, json.dumps(summary), report_path,
+        )
+        return int(row["id"])
+
+
+async def enqueue_face_recognition_job(incident_id: int) -> bool:
+    async with get_pool().acquire() as conn, conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(64182, 2097)")
+        existing = await conn.fetchval(
+            "SELECT 1 FROM face_recognition_jobs WHERE incident_id = $1",
+            incident_id,
+        )
+        if existing:
+            return False
+        pending_jobs = await conn.fetchval(
+            """SELECT count(*) FROM face_recognition_jobs
+                   WHERE status IN ('pending', 'processing')"""
+        )
+        if int(pending_jobs) >= config.FACE_JOB_QUEUE_MAX:
+            logger.warning(
+                "Face-recognition queue reached capacity; incident job deferred"
+            )
+            return False
+        row = await conn.fetchrow(
+            """INSERT INTO face_recognition_jobs (incident_id)
+                   VALUES ($1)
+                   ON CONFLICT (incident_id) DO NOTHING
+                   RETURNING incident_id""",
+            incident_id,
+        )
+        if row is None:
+            return False
+        await conn.execute(
+            """INSERT INTO incident_face_matches (
+                       incident_id, status, violation_type
+                   )
+                   SELECT id, 'Queued', violation_type
+                   FROM violations WHERE id = $1
+                   ON CONFLICT (incident_id) DO UPDATE SET
+                       status = 'Queued', matched_person_id = NULL,
+                       similarity = NULL, margin_to_second = NULL,
+                       face_quality = '{}'::jsonb, face_bbox = NULL,
+                       face_crop = NULL, top3_candidates = '[]'::jsonb,
+                       violation_type = EXCLUDED.violation_type,
+                       reused_from_track = false,
+                       processed_at = NULL""",
+            incident_id,
+        )
+        return True
+
+
+async def claim_face_recognition_job() -> dict[str, Any] | None:
+    async with get_pool().acquire() as conn, conn.transaction():
+        job = await conn.fetchrow(
+            """SELECT j.incident_id, j.attempt_count
+                   FROM face_recognition_jobs AS j
+                   WHERE j.next_attempt_at <= now()
+                     AND (
+                         j.status = 'pending'
+                         OR (j.status = 'processing'
+                             AND j.locked_at < now() - interval '5 minutes')
+                     )
+                   ORDER BY j.next_attempt_at, j.created_at
+                   FOR UPDATE OF j SKIP LOCKED
+                   LIMIT 1"""
+        )
+        if job is None:
+            return None
+        await conn.execute(
+            """UPDATE face_recognition_jobs
+                   SET status = 'processing', attempt_count = attempt_count + 1,
+                       locked_at = now(), updated_at = now()
+                   WHERE incident_id = $1""",
+            job["incident_id"],
+        )
+        await conn.execute(
+            """INSERT INTO incident_face_matches (
+                       incident_id, status, violation_type
+                   )
+                   SELECT id, 'Processing', violation_type
+                   FROM violations WHERE id = $1
+                   ON CONFLICT (incident_id) DO UPDATE SET
+                       status = 'Processing', matched_person_id = NULL,
+                       similarity = NULL, margin_to_second = NULL,
+                       face_quality = '{}'::jsonb, face_bbox = NULL,
+                       face_crop = NULL, top3_candidates = '[]'::jsonb,
+                       violation_type = EXCLUDED.violation_type,
+                       reused_from_track = false,
+                       processed_at = NULL""",
+            job["incident_id"],
+        )
+        incident = await conn.fetchrow(
+            """SELECT id, camera_id, track_id, violation_type,
+                          clean_snapshot_path, snapshot_path, detection_metadata
+                   FROM violations WHERE id = $1""",
+            job["incident_id"],
+        )
+        if incident is None:
+            await conn.execute(
+                """UPDATE face_recognition_jobs
+                       SET status = 'failed', locked_at = NULL, updated_at = now(),
+                           last_error_code = 'incident_missing'
+                       WHERE incident_id = $1""",
+                job["incident_id"],
+            )
+            return None
+        return {**dict(job), **dict(incident)}
+
+async def reuse_face_match_for_track(
+        incident_id: int, camera_id: str, track_id: int,
+        reuse_seconds: float, violation_types: list[str],
+) -> int | None:
+    if reuse_seconds <= 0 or not violation_types:
+        return None
+    async with get_pool().acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            """WITH current_incident AS (
+                   SELECT id, violation_type, epoch_time
+                   FROM violations WHERE id = $1
+               ), prior_match AS (
+                   SELECT m.*
+                   FROM incident_face_matches AS m
+                   JOIN violations AS prior ON prior.id = m.incident_id
+                   CROSS JOIN current_incident AS current
+                   WHERE prior.camera_id = $2
+                     AND prior.track_id = $3
+                     AND prior.id <> current.id
+                     AND prior.epoch_time <= current.epoch_time
+                     AND prior.epoch_time >= current.epoch_time - $4
+                     AND m.violation_type = ANY($5::text[])
+                     AND m.status IN (
+                         'Identified', 'Suggested', 'Not identified', 'No face found'
+                     )
+                     AND m.reused_from_track = false
+                     AND m.review_decision IS DISTINCT FROM 'Rejected'
+                   ORDER BY prior.epoch_time DESC, m.processed_at DESC
+                   LIMIT 1
+               ), copied_match AS (
+                   INSERT INTO incident_face_matches (
+                       incident_id, status, matched_person_id, similarity,
+                       margin_to_second, face_quality, face_bbox, face_crop,
+                       top3_candidates, model_name, model_version, processed_at,
+                       violation_type, reused_from_track
+                   )
+                   SELECT current.id, prior.status, prior.matched_person_id,
+                          prior.similarity, prior.margin_to_second,
+                          prior.face_quality || jsonb_build_object(
+                              'reused_from_track', true,
+                              'source_incident_id', prior.incident_id
+                          ),
+                          prior.face_bbox, prior.face_crop, prior.top3_candidates,
+                          prior.model_name, prior.model_version, now(),
+                          current.violation_type, true
+                   FROM current_incident AS current
+                   CROSS JOIN prior_match AS prior
+                   ON CONFLICT (incident_id) DO UPDATE SET
+                       status = EXCLUDED.status,
+                       matched_person_id = EXCLUDED.matched_person_id,
+                       similarity = EXCLUDED.similarity,
+                       margin_to_second = EXCLUDED.margin_to_second,
+                       face_quality = EXCLUDED.face_quality,
+                       face_bbox = EXCLUDED.face_bbox,
+                       face_crop = EXCLUDED.face_crop,
+                       top3_candidates = EXCLUDED.top3_candidates,
+                       model_name = EXCLUDED.model_name,
+                       model_version = EXCLUDED.model_version,
+                       processed_at = EXCLUDED.processed_at,
+                       violation_type = EXCLUDED.violation_type,
+                       reused_from_track = true,
+                       review_decision = NULL,
+                       reviewed_by = NULL,
+                       reviewed_at = NULL,
+                       review_comment = NULL
+                   RETURNING incident_id
+               )
+               SELECT prior.incident_id
+               FROM prior_match AS prior
+               JOIN copied_match AS copied ON true""",
+            incident_id, camera_id, track_id, reuse_seconds,
+            violation_types,
+        )
+        if row is None:
+            return None
+        await conn.execute(
+            """UPDATE face_recognition_jobs
+                   SET status = 'complete', locked_at = NULL,
+                       last_error_code = NULL, updated_at = now()
+                   WHERE incident_id = $1""",
+            incident_id,
+        )
+        return int(row["incident_id"])
+
+
+async def complete_face_recognition_job(
+        incident_id: int, status: str, matched_person_id: int | None,
+        similarity: float | None, margin_to_second: float | None,
+        face_quality: dict[str, Any], face_bbox: list[int] | None,
+        top3_candidates: list[dict[str, Any]], model_name: str,
+        model_version: str, face_crop: bytes | None = None) -> None:
+    if status not in {"Identified", "Suggested", "Not identified", "No face found"}:
+        raise ValueError("Invalid completed face-recognition status")
+    async with get_pool().acquire() as conn, conn.transaction():
+        await conn.execute(
+            """INSERT INTO incident_face_matches (
+                       incident_id, status, matched_person_id, similarity,
+                       margin_to_second, face_quality, face_bbox, face_crop,
+                       top3_candidates, model_name, model_version, processed_at
+                   )
+                   VALUES (
+                       $1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,
+                       $10,$11,now()
+                   )
+                   ON CONFLICT (incident_id) DO UPDATE SET
+                       status = EXCLUDED.status,
+                       matched_person_id = EXCLUDED.matched_person_id,
+                       similarity = EXCLUDED.similarity,
+                       margin_to_second = EXCLUDED.margin_to_second,
+                       face_quality = EXCLUDED.face_quality,
+                       face_bbox = EXCLUDED.face_bbox,
+                       face_crop = EXCLUDED.face_crop,
+                       top3_candidates = EXCLUDED.top3_candidates,
+                       model_name = EXCLUDED.model_name,
+                       model_version = EXCLUDED.model_version,
+                       processed_at = now()""",
+            incident_id, status, matched_person_id, similarity,
+            margin_to_second, json.dumps(face_quality),
+            json.dumps(face_bbox) if face_bbox is not None else None,
+            face_crop, json.dumps(top3_candidates), model_name, model_version,
+        )
+        await conn.execute(
+            """UPDATE face_recognition_jobs
+                   SET status = 'complete', locked_at = NULL, last_error_code = NULL,
+                       updated_at = now()
+                   WHERE incident_id = $1""",
+            incident_id,
+        )
+
+
+async def fail_face_recognition_job(incident_id: int, error_code: str) -> None:
+    async with get_pool().acquire() as conn, conn.transaction():
+        await conn.execute(
+            """INSERT INTO incident_face_matches (
+                       incident_id, status, face_quality, processed_at
+                   )
+                   VALUES ($1, 'Error', $2::jsonb, now())
+                   ON CONFLICT (incident_id) DO UPDATE SET
+                       status = 'Error', face_quality = EXCLUDED.face_quality,
+                       face_crop = NULL,
+                       processed_at = now()""",
+            incident_id, json.dumps({"error_code": error_code}),
+        )
+        await conn.execute(
+            """UPDATE face_recognition_jobs
+                   SET status = 'failed', locked_at = NULL,
+                       last_error_code = $2, updated_at = now()
+                   WHERE incident_id = $1""",
+            incident_id, error_code,
+        )
+
+
+async def get_face_match(incident_id: int) -> dict[str, Any] | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT m.*, e.employee_code AS matched_employee_code,
+                      e.full_name AS matched_full_name,
+                      e.department AS matched_department,
+                      e.active AS matched_person_active
+               FROM incident_face_matches AS m
+               LEFT JOIN face_enrollments AS e
+                 ON e.person_id = m.matched_person_id
+               WHERE m.incident_id = $1""",
+            incident_id,
+        )
+        return dict(row) if row else None
+
+
+async def get_face_match_availability(incident_ids: list[int]) -> set[int]:
+    if not incident_ids:
+        return set()
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT incident_id FROM incident_face_matches
+               WHERE incident_id = ANY($1::bigint[])""",
+            incident_ids,
+        )
+        return {int(row["incident_id"]) for row in rows}
+
+async def list_face_matches(
+        violation_type: str | None = None,
+        limit: int = 100, offset: int = 0,
+) -> list[dict[str, Any]]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT m.incident_id, m.violation_type, m.status,
+                      m.similarity, m.margin_to_second, m.reused_from_track,
+                      m.review_decision, m.reviewed_at, m.processed_at,
+                      v.camera_id, v.camera_name, v.epoch_time,
+                      e.employee_code, e.full_name, e.department
+               FROM incident_face_matches AS m
+               JOIN violations AS v ON v.id = m.incident_id
+               LEFT JOIN face_enrollments AS e
+                 ON e.person_id = m.matched_person_id
+               WHERE ($1::text IS NULL OR m.violation_type = $1)
+               ORDER BY m.processed_at DESC NULLS LAST, m.incident_id DESC
+               LIMIT $2 OFFSET $3""",
+            violation_type, limit, offset,
+        )
+        return [dict(row) for row in rows]
+
+
+async def get_face_match_for_email(incident_id: int) -> dict[str, Any] | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT m.status, m.similarity, m.review_decision,
+                      e.full_name
+               FROM incident_face_matches AS m
+               JOIN face_enrollments AS e
+                 ON e.person_id = m.matched_person_id
+               WHERE m.incident_id = $1
+                 AND m.status = 'Identified' AND e.active""",
+            incident_id,
+        )
+        return dict(row) if row else None
+
+
+async def get_face_import_runs(limit: int = 50) -> list[dict[str, Any]]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, status, summary, started_at, completed_at
+               FROM face_import_runs ORDER BY started_at DESC LIMIT $1""",
+            limit,
+        )
+        results = [dict(row) for row in rows]
+        for result in results:
+            if isinstance(result.get("summary"), str):
+                result["summary"] = json.loads(result["summary"])
+        return results
+
+
+async def get_face_import_run(run_id: int) -> dict[str, Any] | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT id, status, summary, report_path, started_at, completed_at
+               FROM face_import_runs WHERE id = $1""",
+            run_id,
+        )
+        if row is None:
+            return None
+        result = dict(row)
+        if isinstance(result.get("summary"), str):
+            result["summary"] = json.loads(result["summary"])
+        return result
+
+
+async def remove_face_enrollment(
+        person_id: int, permanently: bool = False) -> dict[str, Any] | None:
+    async with get_pool().acquire() as conn, conn.transaction():
+        person = await conn.fetchrow(
+            "SELECT person_id, employee_code, active FROM face_enrollments "
+            "WHERE person_id = $1 FOR UPDATE",
+            person_id,
+        )
+        if person is None:
+            return None
+        photos = await conn.fetch(
+            "SELECT photo_path FROM face_embeddings "
+            "WHERE person_id = $1 AND photo_path IS NOT NULL",
+            person_id,
+        )
+        await conn.execute(
+            """UPDATE incident_face_matches AS m
+                   SET top3_candidates = COALESCE((
+                           SELECT jsonb_agg(candidates.candidate)
+                           FROM jsonb_array_elements(m.top3_candidates)
+                                AS candidates(candidate)
+                           WHERE candidates.candidate->>'person_id' IS NULL
+                              OR (candidates.candidate->>'person_id')::bigint <> $1
+                       ), '[]'::jsonb),
+                       status = CASE WHEN m.matched_person_id = $1
+                                     THEN 'Not identified' ELSE m.status END,
+                       matched_person_id = CASE WHEN m.matched_person_id = $1
+                                                THEN NULL ELSE m.matched_person_id END,
+                       review_decision = CASE WHEN m.matched_person_id = $1
+                                              THEN NULL ELSE m.review_decision END,
+                       face_crop = CASE WHEN m.matched_person_id = $1
+                                        THEN NULL ELSE m.face_crop END,
+                       reviewed_by = CASE WHEN m.matched_person_id = $1
+                                          THEN NULL ELSE m.reviewed_by END,
+                       reviewed_at = CASE WHEN m.matched_person_id = $1
+                                          THEN NULL ELSE m.reviewed_at END,
+                       review_comment = CASE WHEN m.matched_person_id = $1
+                                             THEN NULL ELSE m.review_comment END
+                   WHERE m.matched_person_id = $1
+                      OR EXISTS (
+                           SELECT 1
+                           FROM jsonb_array_elements(m.top3_candidates)
+                                AS candidates(candidate)
+                           WHERE candidates.candidate->>'person_id' = $1::text
+                      )""",
+            person_id,
+        )
+        await conn.execute(
+            "DELETE FROM face_embeddings WHERE person_id = $1", person_id,
+        )
+        if permanently:
+            await conn.execute(
+                "DELETE FROM face_enrollments WHERE person_id = $1",
+                person_id,
+            )
+        else:
+            await conn.execute(
+                """UPDATE face_enrollments
+                       SET active = false, embedding_count = 0, updated_at = now()
+                       WHERE person_id = $1""",
+                person_id,
+            )
+        return {
+            "person_id": int(person["person_id"]),
+            "employee_code": person["employee_code"],
+            "permanently_deleted": permanently,
+            "photo_paths": [row["photo_path"] for row in photos],
+        }
+
+
+async def review_face_match(
+        incident_id: int, decision: str, reviewer_id: int | None,
+        comment: str | None, person_id: int | None = None,
+) -> dict[str, Any] | None:
+    if decision not in {"Confirmed", "Rejected", "Reassigned"}:
+        raise ValueError("Invalid face review decision")
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            match = await conn.fetchrow(
+                """SELECT status, matched_person_id, similarity, top3_candidates
+                   FROM incident_face_matches
+                   WHERE incident_id = $1 FOR UPDATE""",
+                incident_id,
+            )
+            if match is None:
+                return None
+            matched_person_id = match["matched_person_id"]
+            similarity = match["similarity"]
+            status = match["status"]
+            if decision == "Confirmed":
+                if status not in {"Identified", "Suggested"} or matched_person_id is None:
+                    raise ValueError("Only a suggested or identified match can be confirmed")
+                status = "Identified"
+            elif decision == "Rejected":
+                matched_person_id = None
+                similarity = None
+                status = "Not identified"
+            else:
+                if person_id is None:
+                    raise ValueError("Reassignment requires an enrolled person")
+                person = await conn.fetchrow(
+                    """SELECT person_id FROM face_enrollments
+                       WHERE person_id = $1 AND active FOR SHARE""",
+                    person_id,
+                )
+                if person is None:
+                    raise ValueError("Selected employee is not actively enrolled")
+                matched_person_id = int(person["person_id"])
+                status = "Identified"
+                candidates = match["top3_candidates"] or []
+                if isinstance(candidates, str):
+                    candidates = json.loads(candidates)
+                similarity = next(
+                    (
+                        candidate.get("similarity")
+                        for candidate in candidates
+                        if int(candidate.get("person_id", -1)) == matched_person_id
+                    ),
+                    None,
+                )
+            row = await conn.fetchrow(
+                """UPDATE incident_face_matches
+                   SET status = $2, matched_person_id = $3, similarity = $4,
+                       review_decision = $5, reviewed_by = $6, reviewed_at = now(),
+                       review_comment = $7,
+                       face_crop = CASE WHEN $5 = 'Rejected'
+                                        THEN NULL ELSE face_crop END
+                   WHERE incident_id = $1
+                   RETURNING incident_id, status, matched_person_id, similarity,
+                             margin_to_second, top3_candidates, review_decision,
+                             reviewed_by, reviewed_at, review_comment""",
+                incident_id, status, matched_person_id, similarity, decision,
+                reviewer_id, comment,
+            )
+            return dict(row)
+
+
+async def requeue_face_recognition_job(incident_id: int) -> bool:
+    async with get_pool().acquire() as conn, conn.transaction():
+        incident = await conn.fetchrow(
+            """SELECT violation_type FROM violations WHERE id = $1 FOR UPDATE""",
+            incident_id,
+        )
+        if (
+            incident is None
+            or incident["violation_type"] not in config.FACE_VIOLATION_TYPES
+        ):
+            return False
+        await conn.execute(
+            """INSERT INTO face_recognition_jobs (
+                       incident_id, status, attempt_count, next_attempt_at,
+                       locked_at, last_error_code, updated_at
+                   )
+                   VALUES ($1, 'pending', 0, now(), NULL, NULL, now())
+                   ON CONFLICT (incident_id) DO UPDATE SET
+                       status = 'pending', attempt_count = 0,
+                       next_attempt_at = now(), locked_at = NULL,
+                       last_error_code = NULL, updated_at = now()""",
+            incident_id,
+        )
+        await conn.execute(
+            """INSERT INTO incident_face_matches (
+                       incident_id, status, violation_type
+                   )
+                   SELECT id, 'Queued', violation_type
+                   FROM violations WHERE id = $1
+                   ON CONFLICT (incident_id) DO UPDATE SET
+                       status = 'Queued', matched_person_id = NULL,
+                       similarity = NULL, margin_to_second = NULL,
+                       face_quality = '{}'::jsonb, face_bbox = NULL,
+                       face_crop = NULL, top3_candidates = '[]'::jsonb,
+                       violation_type = EXCLUDED.violation_type,
+                       reused_from_track = false,
+                       model_name = NULL,
+                       model_version = NULL, processed_at = NULL,
+                       review_decision = NULL, reviewed_by = NULL,
+                       reviewed_at = NULL, review_comment = NULL""",
+            incident_id,
+        )
+        return True
+
+
+async def requeue_face_recognition_batch(limit: int = 100) -> list[int]:
+    async with get_pool().acquire() as conn, conn.transaction():
+        rows = await conn.fetch(
+            """SELECT v.id
+                   FROM violations AS v
+                   JOIN incident_face_matches AS m ON m.incident_id = v.id
+                   LEFT JOIN face_recognition_jobs AS j ON j.incident_id = v.id
+                   WHERE v.violation_type = ANY($1::text[])
+                     AND m.status IN ('Error', 'No face found')
+                     AND (j.status IS NULL OR j.status NOT IN ('pending', 'processing'))
+                   ORDER BY m.processed_at, v.id
+                   LIMIT $2
+                   FOR UPDATE OF v SKIP LOCKED""",
+            sorted(config.FACE_VIOLATION_TYPES), limit,
+        )
+        incident_ids = [int(row["id"]) for row in rows]
+        for incident_id in incident_ids:
+            await conn.execute(
+                """INSERT INTO face_recognition_jobs (
+                           incident_id, status, attempt_count, next_attempt_at,
+                           locked_at, last_error_code, updated_at
+                       )
+                       VALUES ($1, 'pending', 0, now(), NULL, NULL, now())
+                       ON CONFLICT (incident_id) DO UPDATE SET
+                           status = 'pending', attempt_count = 0,
+                           next_attempt_at = now(), locked_at = NULL,
+                           last_error_code = NULL, updated_at = now()""",
+                incident_id,
+            )
+            await conn.execute(
+                """UPDATE incident_face_matches
+                       SET status = 'Queued', matched_person_id = NULL,
+                           similarity = NULL, margin_to_second = NULL,
+                           face_quality = '{}'::jsonb, face_bbox = NULL,
+                           top3_candidates = '[]'::jsonb, model_name = NULL,
+                           model_version = NULL, processed_at = NULL,
+                           review_decision = NULL, reviewed_by = NULL,
+                           reviewed_at = NULL, review_comment = NULL
+                       WHERE incident_id = $1""",
+                incident_id,
+            )
+        return incident_ids
+
+
+async def get_face_repeat_violations(
+        since_epoch: float | None = None,
+        department: str | None = None,
+        employee_code: str | None = None,
+        violation_type: str | None = None,
+) -> list[dict[str, Any]]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT e.person_id, e.employee_code, e.full_name, e.department,
+                      v.violation_type,
+                      count(*) AS confirmed_violations,
+                      max(v.epoch_time) AS last_violation_epoch
+               FROM incident_face_matches AS m
+               JOIN face_enrollments AS e ON e.person_id = m.matched_person_id
+               JOIN violations AS v ON v.id = m.incident_id
+               WHERE m.review_decision IN ('Confirmed', 'Reassigned')
+                 AND e.active
+                 AND ($1::double precision IS NULL OR v.epoch_time >= $1)
+                 AND ($2::text IS NULL OR e.department = $2)
+                 AND ($3::text IS NULL OR e.employee_code = $3)
+                 AND v.violation_type = ANY($4::text[])
+                 AND ($5::text IS NULL OR v.violation_type = $5)
+               GROUP BY e.person_id, e.employee_code, e.full_name, e.department,
+                        v.violation_type
+               ORDER BY confirmed_violations DESC, e.employee_code
+               LIMIT 500""",
+            since_epoch, department, employee_code,
+            sorted(config.FACE_VIOLATION_TYPES), violation_type,
+        )
+        return [dict(row) for row in rows]
+
+
+async def delete_expired_face_match_records(cutoff: datetime) -> int:
+    async with get_pool().acquire() as conn, conn.transaction():
+        await conn.execute(
+            """DELETE FROM face_recognition_jobs
+                   WHERE incident_id IN (
+                       SELECT incident_id FROM incident_face_matches
+                       WHERE COALESCE(processed_at, created_at) < $1
+                         AND status <> 'Processing'
+                   )""",
+            cutoff,
+        )
+        result = await conn.execute(
+            """DELETE FROM incident_face_matches
+                   WHERE COALESCE(processed_at, created_at) < $1
+                     AND status <> 'Processing'""",
+            cutoff,
+        )
+        return int(result.rsplit(" ", 1)[-1])
+
+
 async def mark_alert_dispatched(violation_id: int):
     async with get_pool().acquire() as conn:
         await conn.execute("UPDATE violations SET alert_dispatched = true WHERE id = $1", violation_id)
 
 
 async def enqueue_alert_job(violation_id: int, rule_id: int, channel: str,
-                            payload: Dict[str, Any]) -> None:
+                            payload: dict[str, Any]) -> None:
     async with get_pool().acquire() as conn:
         await conn.execute(
             """INSERT INTO alert_outbox
@@ -770,7 +1655,7 @@ async def enqueue_alert_job(violation_id: int, rule_id: int, channel: str,
         )
 
 
-async def claim_alert_job() -> Optional[Dict[str, Any]]:
+async def claim_alert_job() -> dict[str, Any] | None:
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
@@ -797,12 +1682,11 @@ async def claim_alert_job() -> Optional[Dict[str, Any]]:
 
 async def finish_alert_job(job_id: int, violation_id: int, rule_id: int,
                            channel: str, success: bool, attempt_count: int,
-                           max_attempts: int, error: Optional[str]) -> None:
+                           max_attempts: int, error: str | None) -> None:
     retry_delay = min(2 ** max(attempt_count - 1, 0), 300)
-    async with get_pool().acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                """UPDATE alert_outbox
+    async with get_pool().acquire() as conn, conn.transaction():
+        await conn.execute(
+            """UPDATE alert_outbox
                    SET status = CASE
                            WHEN $2 THEN 'sent'
                                WHEN $3::integer >= $4::integer THEN 'dead'
@@ -815,27 +1699,27 @@ async def finish_alert_job(job_id: int, violation_id: int, rule_id: int,
                        END,
                        locked_at = NULL, last_error = $6, updated_at = now()
                    WHERE id = $1""",
-                job_id, success, attempt_count, max_attempts, retry_delay, error,
-            )
-            await conn.execute(
-                """INSERT INTO alert_dispatch_log
+            job_id, success, attempt_count, max_attempts, retry_delay, error,
+        )
+        await conn.execute(
+            """INSERT INTO alert_dispatch_log
                    (violation_id, rule_id, channel, success)
                    VALUES ($1, $2, $3, $4)""",
-                violation_id, rule_id, channel, success,
-            )
-            await conn.execute(
-                """UPDATE violations
+            violation_id, rule_id, channel, success,
+        )
+        await conn.execute(
+            """UPDATE violations
                    SET alert_dispatched = true
                    WHERE id = $1 AND NOT EXISTS (
                        SELECT 1 FROM alert_outbox
                        WHERE violation_id = $1
                          AND status NOT IN ('sent', 'dead')
                    )""",
-                violation_id,
-            )
+            violation_id,
+        )
 
 
-async def log_alert_dispatch(violation_id: int, rule_id: Optional[int], channel: str, success: bool):
+async def log_alert_dispatch(violation_id: int, rule_id: int | None, channel: str, success: bool):
     async with get_pool().acquire() as conn:
         await conn.execute(
             """INSERT INTO alert_dispatch_log (violation_id, rule_id, channel, success)
@@ -844,17 +1728,19 @@ async def log_alert_dispatch(violation_id: int, rule_id: Optional[int], channel:
         )
 
 
-async def get_violation_by_id(violation_id: int) -> Optional[Dict[str, Any]]:
+async def get_violation_by_id(violation_id: int) -> dict[str, Any] | None:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM violations WHERE id = $1", violation_id)
         return dict(row) if row else None
 
 
-async def get_recent_violations(limit: int = 50, camera_id: Optional[str] = None,
-                                 violation_type: Optional[str] = None,
-                                 area_group_id: Optional[int] = None,
-                                 since_epoch: Optional[float] = None,
-                                 offset: int = 0) -> List[Dict[str, Any]]:
+async def get_recent_violations(limit: int = 50, camera_id: str | None = None,
+                                 violation_type: str | None = None,
+                                 area_group_id: int | None = None,
+                                 since_epoch: float | None = None,
+                                 offset: int = 0,
+                                 employee_code: str | None = None,
+                                 department: str | None = None) -> list[dict[str, Any]]:
     query = "SELECT * FROM violations WHERE 1=1"
     params = []
     if since_epoch is not None:
@@ -870,6 +1756,20 @@ async def get_recent_violations(limit: int = 50, camera_id: Optional[str] = None
     if area_group_id:
         params.append(area_group_id)
         query += f" AND area_group_id = ${len(params)}"
+    if employee_code is not None or department is not None:
+        query += """ AND EXISTS (
+            SELECT 1 FROM incident_face_matches AS fm
+            JOIN face_enrollments AS fe ON fe.person_id = fm.matched_person_id
+            WHERE fm.incident_id = violations.id
+              AND fm.review_decision IN ('Confirmed', 'Reassigned')
+              AND fe.active"""
+        if employee_code is not None:
+            params.append(employee_code)
+            query += f" AND fe.employee_code = ${len(params)}"
+        if department is not None:
+            params.append(department)
+            query += f" AND fe.department = ${len(params)}"
+        query += ")"
     params.extend((limit, offset))
     query += f" ORDER BY epoch_time DESC, id DESC LIMIT ${len(params) - 1} OFFSET ${len(params)}"
 
@@ -878,7 +1778,7 @@ async def get_recent_violations(limit: int = 50, camera_id: Optional[str] = None
         return [dict(r) for r in rows]
 
 
-async def delete_violations_before(cutoff_epoch: float) -> Dict[str, int]:
+async def delete_violations_before(cutoff_epoch: float) -> dict[str, int]:
     async with get_pool().acquire() as conn:
         async with conn.transaction():
             rows = await conn.fetch(
@@ -926,7 +1826,7 @@ async def delete_violations_before(cutoff_epoch: float) -> Dict[str, int]:
     }
 
 
-async def get_compliance_stats(window_hours: int = 24) -> Dict[str, Any]:
+async def get_compliance_stats(window_hours: int = 24) -> dict[str, Any]:
     cutoff = time.time() - window_hours * 3600
     async with get_pool().acquire() as conn:
         total = await conn.fetchval("SELECT COUNT(*) FROM violations WHERE epoch_time >= $1", cutoff)
@@ -938,6 +1838,7 @@ async def get_compliance_stats(window_hours: int = 24) -> Dict[str, Any]:
                        WHEN 'boots' THEN 'no_boots'
                        WHEN 'goggles' THEN 'no_goggles'
                        WHEN 'mask' THEN 'no_mask'
+                       WHEN 'arc_flash_suit' THEN 'no_arc_flash_suit'
                        ELSE violation_type
                    END AS violation_type,
                    COUNT(*) as c FROM violations
@@ -999,9 +1900,9 @@ async def update_camera_status(camera_id: str, camera_name: str, zone: str,
 async def get_camera_status_history(
     start: datetime,
     end: datetime,
-    area_group_id: Optional[int] = None,
-    camera_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    area_group_id: int | None = None,
+    camera_id: str | None = None,
+) -> dict[str, Any]:
     async with get_pool().acquire() as conn:
         await conn.execute(
             """DELETE FROM camera_status_samples
@@ -1080,7 +1981,7 @@ async def get_camera_status_history(
         }
 
 
-async def get_camera_statuses() -> List[Dict[str, Any]]:
+async def get_camera_statuses() -> list[dict[str, Any]]:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch("SELECT * FROM camera_status")
         return [dict(r) for r in rows]
@@ -1091,7 +1992,7 @@ async def delete_camera_status(camera_id: str):
         await conn.execute("DELETE FROM camera_status WHERE camera_id = $1", camera_id)
 
 
-async def list_rules(enabled_only: bool = False) -> List[Dict[str, Any]]:
+async def list_rules(enabled_only: bool = False) -> list[dict[str, Any]]:
     query = "SELECT * FROM alert_rules"
     if enabled_only:
         query += " WHERE enabled = true"
@@ -1102,7 +2003,7 @@ async def list_rules(enabled_only: bool = False) -> List[Dict[str, Any]]:
 
 
 async def create_rule(name, camera_id, zone, violation_type, min_severity,
-                       channels, cooldown_seconds, email_recipients, enabled=True) -> Dict[str, Any]:
+                       channels, cooldown_seconds, email_recipients, enabled=True) -> dict[str, Any]:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             """INSERT INTO alert_rules
@@ -1115,7 +2016,7 @@ async def create_rule(name, camera_id, zone, violation_type, min_severity,
         return dict(row)
 
 
-async def update_rule(rule_id: int, **fields) -> Optional[Dict[str, Any]]:
+async def update_rule(rule_id: int, **fields) -> dict[str, Any] | None:
     if not fields:
         return None
     set_clauses, params = [], []

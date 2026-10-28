@@ -1,8 +1,12 @@
 """build_powerbi_dataset.py - PostgreSQL -> CSV extractor for Power BI."""
-import argparse, csv, os
+import argparse
+import csv
+import os
 from collections import defaultdict
+
 import psycopg2
 import psycopg2.extras
+
 
 def export_table(conn, query, out_path):
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:

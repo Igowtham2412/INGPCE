@@ -1,12 +1,87 @@
-# INGPCE Industrial Safety Operations
+# INGPCE Safety Monitoring — Executive Overview and Handover
 
-Real-time PPE monitoring for configured CCTV/NVR streams. The application
-combines camera video, PPE detection, incident evidence, PostgreSQL history,
-camera health, and rule-based incident email alerts delivered **only through
-Microsoft Power Automate**.
+## Executive overview
 
-This README is the operational guide for a new maintainer: setup, configuration,
-testing, production handover, support, and recovery.
+INGPCE is a camera-based safety-support system for industrial operations. It
+turns configured CCTV/NVR video into a live operations dashboard, searchable
+incident evidence, camera-health information, and email notifications through
+Microsoft Power Automate.
+
+### What the system does
+
+- Monitors configured camera feeds and tracks people across incoming frames.
+- Looks for missing hardhats and visible mobile phones near tracked people.
+- Saves incident snapshots and short evidence clips, and keeps incident
+  history for review and reporting.
+- Shows live camera status, playback where the recorder supports it, and
+  operational analytics in a browser dashboard.
+- Sends configured helmet and phone-detection alerts—with an annotated image—
+  through the organization’s Power Automate email flow.
+
+### How an alert reaches the team
+
+**Camera video → local AI detection → tracked incident and evidence → matching
+alert rule → Power Automate → email recipient.**
+
+The application runs the vision models on the application computer; it does
+not send camera frames to a cloud AI service. Power Automate receives incident
+details and the selected evidence image only for configured alerts. A detected
+phone means a phone was seen near a tracked person; it does not prove the
+person was using it. Automated detections are decision-support signals and
+should be reviewed by a person before consequential action.
+
+### Business value
+
+- Gives safety and operations teams a common view of configured cameras,
+  incidents, and camera availability.
+- Preserves image/video evidence and incident history to support follow-up.
+- Routes selected alerts to operational email without requiring an SMTP
+  mailbox password in the application.
+- Provides a foundation for measuring trends and improving models against
+  reviewed examples from the actual site.
+
+### Important limitations and decisions
+
+- Detection quality depends on camera angle, lighting, distance, occlusion,
+  model quality, and local validation. No “best in the world” accuracy claim
+  is made; test against labeled footage from the site before relying on results.
+- The current development host has a CUDA-enabled PyTorch runtime and an
+  RTX 4070. Higher-resolution detection and the additional phone model consume
+  compute; production camera capacity must still be measured under the site's
+  real load.
+- The current helmet model is a general PPE model, not yet fine-tuned or
+  independently measured against a site-specific held-out dataset.
+- Phone-object detection identifies a visible phone near a person; confirming
+  phone use would require a separately designed and validated behavior model.
+- Camera use, evidence retention, access, employee notice, and any response
+  based on an alert must follow company policy and applicable law.
+
+### Current deployment at a glance
+
+| Area | Current setup |
+|---|---|
+| Application | Windows-hosted local dashboard and API |
+| Cameras | Configured CCTV/NVR streams, accessed over RTSP |
+| AI processing | Local PPE model plus local YOLO26 phone-object model |
+| Tracking | ByteTrack person tracking with temporal observation checks |
+| Data | PostgreSQL incident history and local evidence files |
+| Email | Microsoft Power Automate flow and Outlook connector |
+| External access | Optional Cloudflare quick tunnel; its URL may change after restart |
+| Operational owner | Assign a named application, database, camera, and flow owner during handover |
+
+### CEO demonstration path
+
+1. Open the dashboard and show the Live Wall and Camera Status.
+2. Open Incidents to show how an event is retained with its image evidence.
+3. Show an approved, supervised example of a missing-helmet incident and its
+   email notification.
+4. Explain that a phone alert reports a visible phone near a person, not
+   confirmed use.
+5. Close with the current validation status, operational owner, data
+   retention/privacy controls, and the plan to measure site accuracy.
+
+This README also contains the detailed technical setup, testing, operations,
+recovery, and maintainer handover instructions.
 
 ## 1. System overview
 
@@ -15,7 +90,19 @@ testing, production handover, support, and recovery.
 - Live camera wall with filters, full-screen viewing, and reconnect controls.
 - Recorded playback for supported Hikvision NVR streams.
 - PPE incident detection, snapshots, short evidence clips, review, and model
-  feedback export.
+  feedback export. Missing-helmet detection uses a larger inference image and
+  a lower class-specific confidence threshold, with temporal confirmation.
+- Missing-helmet and phone-detected incident snapshots and clips are stored in
+  separate `helmet_violations` and `phone_detected` folders under `snapshots/`
+  and `evidence/clips/`. Existing records can be organized with
+  `python scripts/organize_violation_evidence.py` to preview, then rerun with
+  `--apply` to update their database paths and move their files.
+- Person tracking and phone-object detection. A visible phone is associated
+  with a tracked person and reported as **Phone detected near person**; this
+  does not establish that the person is using it.
+- Safety vest detection is supported by the configured PPE model's `Safety
+  Vest` and `NO-Safety Vest` classes. It is included by default for seeded
+  cameras and can be selected in **Edit Camera → Required PPE**.
 - Camera and area-group management; seed camera synchronization.
 - Analytics and camera status history.
 - Configurable incident rules with matching by camera, area/zone, violation
@@ -38,8 +125,8 @@ testing, production handover, support, and recovery.
    retried with backoff and eventually moved to the outbox `dead` state.
 
 The application does not send incident email itself. It sends the flow
-recipient list, subject, and text body; it does **not** upload camera images or
-clips to the flow. Shift-summary email reports are not included in this build.
+recipient list, subject, text body, and annotated JPEG for missing-helmet and
+phone-detected incidents. It does not upload video clips to the flow.
 
 ### Main components
 
@@ -49,7 +136,7 @@ clips to the flow. Shift-summary email reports are not included in this build.
 | `app/config.py` | Environment variables and seed camera/area configuration |
 | `app/camera_manager.py` | Camera worker lifecycle and reconnect/watchdog behavior |
 | `app/stream_handler.py` | Camera capture and frame streaming |
-| `app/detector.py`, `app/compliance_engine.py` | PPE inference and violation decisions |
+| `app/detector.py`, `app/compliance_engine.py` | PPE/phone inference, person tracking, and violation decisions |
 | `app/rules_engine.py` | Rule evaluation and cooldowns |
 | `app/alert_manager.py` | Durable alert outbox and Power Automate delivery |
 | `app/db.py` | PostgreSQL schema, queries, seed synchronization |
@@ -119,6 +206,8 @@ Set at minimum:
   `POSTGRES_PASSWORD`
 - NVR usernames/passwords for each configured NVR host
 - `PPE_MODEL_PATH` if the model is not at the default `models\best.pt`
+- `PPE_PHONE_MODEL_PATH` if the phone model is not at
+  `models\yolo26m.pt`
 - `PPE_POWER_AUTOMATE_WEBHOOK_URL` after creating the flow (see section 5)
 - `PPE_AUTH_ENABLED` and a unique `PPE_SESSION_SECRET` before any remote
   access
@@ -142,14 +231,348 @@ and the related account/flow credential.
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\download_model.py
+.\.venv\Scripts\python.exe scripts\download_phone_model.py
 .\.venv\Scripts\python.exe -m app.main
 ```
+
+The existing PPE weights are a YOLOv8n model trained for PPE classes. The
+additional YOLO26m model is pretrained on COCO and supplies its `cell phone`
+class; the PPE model remains responsible for helmet decisions. The phone
+weights are downloaded from Ultralytics the first time the download script is
+run and saved under `models\`, which is excluded from source control. Check
+the model and Ultralytics license terms before commercial redistribution.
+Phone detections are associated with tracked people and confirmed over multiple
+frames on all cameras.
+
+Arc flash suit is included by default only for the MCC camera; other cameras
+can still select it in the camera editor. Seed synchronization adds the MCC
+requirement to that existing camera while preserving other PPE and
+operator-managed stream settings. The active PPE weights must include an
+`Arc Flash Suit` class; in `explicit_negative` mode they also need a
+`NO-Arc Flash Suit` / `no_arc_flash_suit` class to report missing suits. The
+current `best.pt` in this workspace does not include either suit class, so
+affected status remains **unknown** (no false missing-suit alert) until
+compatible weights are trained and installed. Use reviewed, validated model
+weights before relying on suit alerts.
+
+### Optional employee face dataset import
+
+Face recognition is disabled by default. The implementation uses local
+InsightFace/ArcFace processing; it does not send images to a cloud service and
+does not download model files automatically. The InsightFace library code is
+MIT-licensed, but InsightFace's [official model README](https://github.com/deepinsight/insightface/blob/master/python-package/README.md)
+and [model zoo](https://github.com/deepinsight/insightface/blob/master/model_zoo/README.md)
+state that pretrained model weights, including `buffalo_l`, are for
+non-commercial research only. Those weights are not permitted for this
+commercial industrial-safety use without separate written authorization.
+
+The optional face runtime is separate from the normal application install.
+With the existing Python 3.12 virtual environment, install the CUDA 13 /
+cuDNN 9 GPU runtime using:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File scripts\install_face_stack.ps1
+```
+
+The script installs pinned InsightFace, ONNX, NumPy, OpenCV, and ONNX Runtime
+packages, then checks that CUDA is an available ONNX Runtime provider. Use
+`-Cpu` to install the CPU-only runtime instead:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File scripts\install_face_stack.ps1 -Cpu
+```
+
+The GPU installer deliberately restores the GPU ONNX Runtime files after
+installing InsightFace because InsightFace also declares a CPU `onnxruntime`
+dependency. This is necessary to avoid the CPU package overwriting the GPU
+provider files. ONNX Runtime 1.30.0 is selected because its official
+compatibility table lists CUDA 13.0/cuDNN 9.x and compatibility with PyTorch
+CUDA 13.x. This does not install or fetch any pretrained face models. The
+regular application requirements do not include these optional packages; the
+application continues to start with face recognition disabled if they are
+absent.
+
+Model loading and downloading require the explicit local setting
+`PPE_FACE_LICENSE_ACCEPTED=true`. Leave it false until the organization has
+reviewed the applicable model terms and secured permission. Do not assume the
+MIT license for package code also grants commercial rights to model weights.
+
+After authorization, get a model ZIP and its independently trusted SHA-256
+digest from the authorized supplier. The model name and root are configurable
+using `PPE_FACE_MODEL_NAME` and `PPE_FACE_MODEL_DIR`. The downloader will not
+access the URL while the license flag is false:
+
+```powershell
+$env:PPE_FACE_LICENSE_ACCEPTED = "true"
+.\.venv\Scripts\python.exe scripts\download_face_model.py `
+  --url "https://authorized-model-supplier.example/model.zip" `
+  --sha256 "<64-character-trusted-sha256>"
+```
+
+The downloader requires HTTPS, verifies the archive digest before extraction,
+rejects unsafe ZIP paths, and refuses to overwrite an existing pack. It does
+not select a model or imply that the supplier's terms permit this use. Do not
+set the flag until authorization is actually reviewed.
+
+Alternatives are (1) obtain commercial authorization for the InsightFace
+weights, (2) choose a face model with terms that explicitly permit this use,
+or (3) purchase a vendor SDK licensed for industrial deployment. A vendor SDK
+with written deployment and support terms is recommended for review, but the
+organization must choose and approve its own option.
+
+The configured dataset path (`PPE_FACE_DATASET_PATH`, default
+`dataset\faces`) supports employee folders with a CSV or Excel manifest:
+
+See [DATASET_GUIDE.md](./DATASET_GUIDE.md) for photo guidance and the
+validate/import/calibrate/pilot command sequence.
+
+Employee folders should be named `<EMPLOYEE_CODE>_<Full Name>` and contain
+JPG, JPEG, or PNG photos. A single `employees.csv` or `employees.xlsx`
+manifest may sit in the dataset root alongside these folders. Use one row per
+photo, with `employee_code`, `full_name`, `department`, `image_path`,
+`consent_recorded`, and `consent_reference` columns. Image paths are relative
+to the manifest and must remain inside the dataset directory. Optional
+`consent_basis` and `consent_date` columns retain the recorded consent source
+and date. The Excel manifest reader is included in the optional face install.
+
+Folder-only imports require a documented bulk-consent confirmation. CSV or
+Excel imports require `consent_recorded=true` for each employee; alternatively
+pass the confirming person's name, consent date, and internal reference to
+record a bulk consent basis. The importer
+blocks unconsented rows, hashes images for idempotency, encrypts accepted
+embeddings, and writes a private per-person report to
+`PPE_FACE_REPORT_DIR`. Original photos are not copied unless
+`PPE_FACE_KEEP_PHOTOS=true`.
+
+Generate a separate 32-byte AES key locally and put its URL-safe base64 value
+in `PPE_FACE_ENCRYPTION_KEY`:
+
+```powershell
+.\.venv\Scripts\python.exe -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())"
+```
+
+Keep that key in the approved local secret store; losing it makes stored
+embeddings unreadable. With the authorized model provisioned, run a folder
+import with explicit bulk consent:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\import_face_dataset.py `
+  --consent-name "Safety Manager" --consent-date 2026-10-26 `
+  --consent-reference "approved-consent-record"
+```
+
+For a CSV that has `consent_recorded=true` for every row, the consent flags
+can provide the recorded basis without bulk-consent arguments. The script
+prints counts and a private report location, never image paths. It also flags
+cross-employee embedding similarities and within-employee outliers for review;
+it does not remove flagged records.
+
+### Offline face threshold calibration
+
+Calibration uses the same authorized local model and consented primary
+dataset. Leave-one-out results are estimates from enrolled photos, not camera
+accuracy claims. For incident evaluation, provide real, consented crops grouped by camera,
+violation type, and identity, for example
+`CAM01\missing_vest\E001\*.jpg` and
+`CAM01\missing_vest\not_in_dataset\*.jpg`. Supported type folders are
+`missing_helmet`/`no_helmet`, `missing_vest`/`no_vest`, and
+`phone_detected`. The older employee-only and camera/employee layouts remain
+supported but report an `unspecified_type` group. Each known label must match
+an enrolled employee code. `not_in_dataset` crops are evaluation-only and
+must never be added to the enrollment dataset.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\calibrate_face_thresholds.py `
+  --incident-crops dataset\face_incident_calibration `
+  --target-far 0.001
+```
+
+Pass the same bulk-consent arguments as the import command when using folder
+references without per-row CSV consent records. The report includes per-camera
+genuine/impostor score counts, empirical true/false accept and not-identified
+rates, recommended strict and suggestion thresholds, and a score histogram
+CSV. Incident reports provide true-accept, false-accept, and not-identified
+rates per violation type and per camera, as well as overall rates per type.
+They also report the observed quality-score distribution to support optional
+additional per-type floors configured with
+`PPE_FACE_QUALITY_MIN_BY_VIOLATION` (a JSON map from type to 0–1 minimum).
+These floors only reject lower-quality faces; do not lower match thresholds
+for difficult images. At the default 0.1% target, at least 1,000 impostor score samples are
+needed even to satisfy the tool's minimum sample-count check; this is not a
+guarantee of statistical confidence. Thresholds are recommendations only and
+do not modify application configuration. Do not claim performance or enable
+identification until representative, consented footage from the actual
+cameras has been evaluated and reviewed.
+
+When `PPE_FACE_ENABLED=true`, the application queues recognition only after an
+eligible, temporally confirmed violation has been stored. Eligibility is
+configured by `PPE_FACE_VIOLATION_TYPES`, defaulting to
+`missing_helmet,missing_vest,phone_detected`, which map to stored types
+`no_helmet`, `no_vest`, and `phone_detected`. Unknown configuration values are
+warned about and ignored. `PPE_FACE_TRACK_REUSE_SECONDS` defaults to 120:
+within that window, incidents from the same camera and ByteTrack ID reuse one
+completed result instead of running the model again. The original analysis
+considers the buffered full-person crops and incident evidence; no usable face
+is recorded as no face/not identified, never guessed.
+Face recognition is not run or displayed on the live wall. A bounded,
+short-lived person-crop buffer is keyed by camera and ByteTrack ID; face
+detection and matching are not performed on normal frames, and buffered crops
+are not stored on disk. The incident gallery shows match availability to
+operators; only Admin/Safety Manager users can view names, candidates, crops,
+and review controls. The independent
+worker uses a dedicated single-thread executor (lowered to below-normal
+priority on Windows) and bounded capture/enqueue buffers, so alert creation
+and delivery do not wait for recognition. The persisted pending/processing
+queue is capped by `PPE_FACE_JOB_QUEUE_MAX` (default 500); at capacity, new
+recognition work is deferred rather than slowing detection. The default match and
+suggestion thresholds are both `1.0` (fail-closed); set them only from a
+reviewed calibration. `PPE_FACE_MATCH_STRATEGY` may be `max` or `top_k_mean`,
+and calibration uses the configured strategy. Provider and processing time
+are recorded with the result so actual GPU/CPU cost can be measured; this
+workspace has not been measured on production cameras.
+Run `scripts\benchmark_face_pipeline.py` for model-free queue/crop/matching
+microbenchmarks, reported with violation-type and camera labels. After model
+authorization and provisioning, it can measure local inference on a synthetic
+or explicitly consented sample; InsightFace exposes detection and embedding in
+one call, so the tool reports combined latency. `scripts\benchmark_live_impact.py`
+compares the PPE detector and annotated-tile encoding on synthetic paced frames
+or a local recorded video while a bounded, simulated face-job worker runs; it
+reports camera-to-detection and camera-to-tile-ready latency plus simulated
+job counts by violation type. It does not measure WebSocket delivery or a real
+camera and is not a production performance claim.
+Match and review records are automatically
+removed after `PPE_FACE_MATCH_RETENTION_DAYS` (default 365; set `0` to disable
+automatic expiry). Original enrollment photos remain off by default.
+For `Identified` and `Suggested` results, the selected face crop is encrypted
+in the match record and available only to Admin/Safety Manager reviewers.
+Below-threshold crops are not retained separately. Suggested crops remain
+encrypted while awaiting human review; rejecting a match, deleting/withdrawing
+its enrollment, or match-record expiry removes the stored crop. Before enabling
+this feature, obtain an approved written policy, provide employee notice,
+document consent, and complete legal review under applicable law (including
+India's DPDP Act 2023 where applicable). A match is decision support only;
+require human review before any disciplinary action.
+`PPE_FACE_INCLUDE_IN_EMAIL=false` keeps the existing Power Automate schema and
+message unchanged; when enabled, an email receives optional match fields only
+for an `Identified` result, with pending-review wording until a reviewer
+confirms or reassigns it.
 
 The application loads `.env`, applies pending Alembic migrations, synchronizes
 seed cameras/area groups, starts camera workers, and starts the alert outbox
 worker. A ready server prints `STARTUP COMPLETE - application is ready.`
 
 Open <http://127.0.0.1:8080/>. Stop the foreground server with Ctrl+C.
+
+Inference device selection defaults to `PPE_DEVICE=auto`: a CUDA-enabled
+PyTorch installation uses the first NVIDIA GPU, otherwise inference falls back
+to CPU. Set `PPE_DEVICE=cpu` to force CPU. If the installed PyTorch package is
+CPU-only, install a CUDA-enabled wheel compatible with your Python and NVIDIA
+driver. On supported Windows NVIDIA hosts, `requirements.txt` selects the
+CUDA 13 PyTorch wheels. To repair an existing environment that already has the
+CPU-only PyTorch wheel, run:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install --no-deps --force-reinstall torch==2.14.1+cu130 torchvision==0.29.1+cu130 --index-url https://download.pytorch.org/whl/cu130
+.\.venv\Scripts\python.exe -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU fallback')"
+```
+
+The CUDA PyTorch wheel is large. This accuracy-oriented configuration uses
+`PPE_IMG_SIZE=960` and a lower `no_helmet` confidence threshold while
+retaining multi-frame confirmation. A higher inference resolution and a
+second, medium-sized object detector increase compute; on CPU, expect reduced
+camera inference throughput. Measure per-camera latency and dropped-frame
+behavior before enabling all cameras. For systems with a supported NVIDIA
+GPU, `PPE_DEVICE=auto` uses it when the installed PyTorch build supports CUDA.
+On CPU, the app sets PyTorch's inference thread count to four by default;
+`PPE_CPU_THREADS` controls this value. Tune it against the host and camera
+count to avoid excessive inference-thread oversubscription.
+Do not treat a larger model or lower threshold as proven more accurate until
+evaluated against representative, labeled footage from these cameras.
+
+### Camera stream and inference settings
+
+Each camera uses one shared sub-stream RTSP capture for the Live Wall and
+detection, falling back to its configured main stream only when the sub-stream
+cannot open or stops delivering frames. The browser receives visible tiles
+over one multiplexed WebSocket, with JPEG frames encoded once and reused for
+subscribers. Opening
+a camera's full-screen viewer opens its configured main stream on demand;
+recorded evidence requests the NVR playback URL built from that main stream.
+Existing camera rows remain supported through their legacy `rtsp_url` value.
+For cameras/NVRs that provide a supported HTTP video-preview endpoint, you
+can enter that exact, device-documented HTTP stream URL in the sub-stream URL
+field; the capture backend uses FFmpeg for either RTSP or HTTP. Do not replace
+an RTSP URL with the NVR's web-console URL or assume a universal HTTP path:
+preview endpoints and digest-auth support vary by model and firmware. The
+main-stream URL used for time-range evidence playback must still be a
+Hikvision-compatible RTSP channel; if main-stream playback is unavailable,
+the existing buffered sub-stream evidence fallback is used. Switching
+transport cannot repair a wrong channel, failed credentials, or an NVR
+session limit.
+
+The relevant optional settings and defaults are:
+
+| Setting | Default | Purpose |
+| --- | ---: | --- |
+| `PPE_DEVICE` | `auto` | Select `auto`, `cuda`, or `cpu`; unavailable CUDA falls back to CPU with a warning. |
+| `PPE_DETECT_FPS` | `5` | Maximum scheduled detection rate per camera; overdue frames are skipped. |
+| `PPE_CAMERA_FRAME_TIMEOUT_SECONDS` | `10` | Time without a captured frame before the watchdog requests reconnect. |
+| `PPE_CAMERA_MAX_SIMULTANEOUS_RECONNECTS` | `4` | Limits concurrent RTSP reconnect attempts; the default helps camera feeds start promptly without opening every feed at once. |
+| `PPE_CAMERA_RECONNECT_INITIAL_SECONDS` | `2` | Initial exponential reconnect delay. |
+| `PPE_CAMERA_RECONNECT_MAX_SECONDS` | `60` | Maximum reconnect delay. |
+| `PPE_TILE_FPS` | `8` | Live Wall frame-rate cap (maximum 10 FPS). |
+| `PPE_TILE_WIDTH` | `640` | Maximum Live Wall JPEG width in pixels. |
+| `PPE_JPEG_QUALITY` | `70` | JPEG quality for shared Live Wall frames. |
+| `PPE_FULLSCREEN_FPS` | `12` | Full-screen main-stream delivery rate (maximum 15 FPS). |
+| `PPE_FULLSCREEN_WIDTH` | `1920` | Maximum full-screen JPEG width in pixels. |
+
+`GET /api/health` includes per-camera capture/detection FPS, latest-frame age,
+reconnect count, and inference duration. The Live Wall's **STREAM DIAGNOSTICS**
+panel displays these values while it is open.
+
+The COCO phone class detects visible phone objects, not the behavior of using
+one. A phone incident is created only after it is associated with the existing
+person track and observed across multiple frames. The dashboard and email
+therefore say “Phone detected near person,” not “phone use confirmed.”
+
+The shipped PPE model card reports 68.5% recall on its own validation set;
+that score is not a measurement for this site's cameras. The local review
+dataset must include confirmed helmet violations and a separate labeled
+validation set before model fine-tuning or threshold tuning can be claimed to
+improve recall. See the model card's [limitations and
+metrics](https://huggingface.co/Hansung-Cho/yolov8-ppe-detection) and the
+official [YOLO26 documentation](https://docs.ultralytics.com/models/yolo26/).
+
+For site-specific PPE tuning, gather reviewed examples from the affected
+cameras and different distances, lighting, and helmet appearances. Include
+confirmed missing-helmet cases as well as false positives, correct the
+model-assisted labels, and keep a separate manually labeled validation set:
+
+In the Violations gallery, use **Correct false alert** to distinguish a
+non-person detection from a real person whose PPE was recognized incorrectly.
+For PPE corrections, select the visible PPE and draw a box around it; for a
+non-person detection, the saved crop is labeled as background. These reviewed
+corrections are training examples only: they do not update the active model.
+Training remains a separate, deliberate step and requires a separate
+manually labeled validation set before considering a candidate for deployment.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\build_feedback_dataset.py `
+  --dataset dataset\feedback --validation-dir dataset\validation
+.\.venv\Scripts\python.exe scripts\train.py `
+  --data dataset\feedback\data.yaml --base-model models\best.pt `
+  --imgsz 960 --device cpu
+.\.venv\Scripts\yolo.exe detect val `
+  model=runs\ppe_train\ppe_model\weights\best.pt `
+  data=dataset\feedback\data.yaml imgsz=960 device=cpu
+```
+
+Review per-class recall and precision on the held-out validation data before
+promoting a candidate model. Do not use the same images for training and
+validation, and do not use automated detection alone for disciplinary
+decisions.
 
 ### 3.5 Create the first administrator
 
@@ -196,11 +619,19 @@ Review migrated rule recipients and test delivery before relying on each rule.
 Historical shift-report database tables from older revisions are retained for
 data preservation, but the application no longer reads or writes them.
 
-Seed camera configuration lives in `app/config.py`; database-backed camera
-records are what the dashboard displays. On every startup, configured camera
-seeds are synchronized. The Cameras tab also has **Sync Default Cameras**.
-Camera names, custom cameras, PPE options, and existing incident history are
-database data; use a database backup before bulk edits.
+Seed camera configuration lives in `app/config.py`; it supplies defaults for
+cameras missing from the database. Existing camera stream URLs edited in the
+Cameras tab are operator-managed and are not overwritten during startup or
+**Sync Default Cameras**. If an existing seeded camera still has the same
+RTSP host, port, channel path, and query as its configured seed, synchronization
+refreshes its credentials from the local environment without changing the
+operator-selected endpoint. Camera names, custom cameras, PPE options, other
+stream URLs, and existing incident history remain database data; use a database
+backup before bulk edits.
+
+The default setup uses the configured NVR channel feeds only. Legacy `D1`–`D20`
+direct-camera feeds are retired and disabled on synchronization; their records
+and incident history are retained.
 
 Check database connectivity without starting camera workers:
 
@@ -223,29 +654,37 @@ by the flow's Outlook connector, not in the app.
    its authentication; it does not obtain Microsoft Entra OAuth tokens. If
    the tenant requires tenant-authenticated OAuth instead of signed-URL
    access, stop here and have the integration extended for that auth mode.
-4. In **Request Body JSON Schema**, choose **Use sample payload to generate
-   schema** and paste:
+4. In **Request Body JSON Schema**, use this schema. Image properties are
+   optional so the dashboard's image-free test message is accepted:
 
    ```json
    {
-     "event_type": "test",
-     "subject": "INGPCE Power Automate Test",
-     "body": "INGPCE Power Automate test message\nRecipient: safety.team@example.com\nSent at: 2026-10-16T03:30:00Z",
-     "camera_name": "TEST",
-     "zone": "Power Automate setup",
-     "violation": "Test message",
-     "occurred_at": "2026-10-16T03:30:00Z",
-     "recipients": ["safety.team@example.com"],
-     "image_name": "helmet_violation.jpg",
-     "image_content_type": "image/jpeg",
-     "image_content_bytes": "base64-encoded-image-data"
+     "type": "object",
+     "properties": {
+       "event_type": {"type": "string"},
+       "subject": {"type": "string"},
+       "body": {"type": "string"},
+       "camera_name": {"type": "string"},
+       "zone": {"type": "string"},
+       "violation": {"type": "string"},
+       "occurred_at": {"type": "string"},
+       "recipients": {"type": "array", "items": {"type": "string"}},
+       "image_name": {"type": "string"},
+       "image_content_type": {"type": "string"},
+       "image_content_bytes": {"type": "string"}
+     },
+     "required": [
+       "event_type", "subject", "body", "camera_name", "zone",
+       "violation", "occurred_at", "recipients"
+     ]
    }
    ```
 
-   Real incident requests use `event_type: "ppe_violation"` and include the
-   camera, zone, violation, timestamp, and configured recipient list. They
-   also contain the annotated helmet-violation JPEG as base64 in
-   `image_content_bytes`. Test messages do not include an image.
+   Real incident requests use `event_type: "ppe_violation"` and include either
+   `violation: "Missing Helmet"` or `violation: "Phone Detected Near Person"`.
+   Both include the annotated JPEG as base64 in `image_content_bytes`;
+   `image_name` distinguishes the image type. Dashboard test messages use
+   `event_type: "test"` and do not include an image.
 5. Add **Office 365 Outlook → Send an email (V2)** and create its connection
    using the approved sender mailbox:
    - **To**: expression `join(triggerBody()?['recipients'], ';')`
@@ -257,7 +696,7 @@ by the flow's Outlook connector, not in the app.
      `ppe_violation` branch of a Condition. In the other branch, add a
      separate **Send an email (V2)** action for the test message without an
      attachment. Incident emails must include the attached JPEG. The app
-     won't send a helmet incident without a readable evidence image.
+     won't send an incident without a readable evidence image.
 6. Add a **Response** action after the email action. Return status code `200`
    only after the email action succeeds. Return a non-2xx status on failure.
    Save the flow and turn it on.
@@ -299,9 +738,8 @@ test message and should only target an approved test mailbox.
 
 In **Alert Rules**, create or edit a rule:
 
-- Choose the camera/zone filters and cooldown. Power Automate alerts are
-  restricted to **Missing Helmet** violations; other violation types are
-  never emailed.
+- Choose the camera/zone filters, violation type (**Missing Helmet** or
+  **Phone Detected Near Person**), and cooldown.
 - Enable **Power Automate Email**.
 - Enter one or more destination addresses in **Email Recipients**, separated
   by commas.
@@ -375,6 +813,35 @@ automated tests do not verify physical cameras, a real flow, or email
 delivery. Run the manual Power Automate test above after configuring the real
 tenant connection.
 
+### Manual Live Wall test
+
+Run the following checks first at `http://127.0.0.1:8080`, then repeat the
+browser checks through the Cloudflare quick tunnel with authentication enabled:
+
+1. Enable one camera. Confirm a tile appears within a few seconds, opens
+   full-screen on the main stream, and recovers from an unplug/reconnect
+   without a rapid reconnect loop.
+2. Enable four cameras and leave the wall open for at least 30 minutes. Check
+   that tiles continue updating, no tile is starved by inference, and
+   filtering the wall does not leave stale WebSocket subscriptions.
+3. Enable all configured cameras. Check detection and incident creation on
+   approved sample footage, and confirm a known NVR interval plays back and
+   evidence clips are written. Verify the RTSP connection/session count at
+   the NVR: one shared sub-stream per managed camera, plus only on-demand
+   full-screen and NVR playback connections.
+4. In Task Manager (or `nvidia-smi` where installed), record CPU and GPU use.
+   Use **STREAM DIAGNOSTICS** for capture FPS, detection FPS, frame age,
+   reconnect count, and inference milliseconds. Measure first-frame time and
+   end-to-end latency with a visible clock or time-coded scene.
+
+Record actual before/after results on the host; do not infer physical-camera
+performance from unit tests:
+
+| Scenario | First frame | End-to-end latency | Capture FPS | Detection FPS | CPU | GPU |
+| --- | --- | --- | --- | --- | --- | --- |
+| Before, one/four/all cameras | Measure | Measure | Measure | Measure | Measure | Measure |
+| After, one/four/all cameras | Measure | Measure | Measure | Measure | Measure | Measure |
+
 ### Pre-handover acceptance
 
 - [ ] The documented Python version and dependencies are installed.
@@ -388,9 +855,10 @@ tenant connection.
 - [ ] The flow is on, the signed URL is private, and its owner/backup owner
       are recorded in the organization's secure secrets inventory.
 - [ ] A real test email is confirmed in both flow run history and mailbox.
-- [ ] A supervised missing-helmet incident email arrives with its annotated
-      JPEG attached; non-helmet violations do not trigger Power Automate email.
-- [ ] Helmet alert rule recipients, camera/zone filters, and cooldowns are reviewed.
+- [ ] Supervised missing-helmet and phone-detected incident emails arrive
+      with their annotated JPEGs attached.
+- [ ] Helmet and phone alert rule recipients, camera/zone filters, and
+      cooldowns are reviewed.
 - [ ] Outbox retries, dead-letter monitoring, application logs, and DB backups
       have an assigned operational owner.
 - [ ] A second maintainer can restart the task, find logs, and restore a

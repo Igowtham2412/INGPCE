@@ -1,11 +1,16 @@
 """check_db_connection.py - standalone DB connection diagnostic."""
-import sys, os, asyncio
+import asyncio
+import os
+import sys
+
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_THIS_DIR)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 import asyncpg
+
 from app import config
+
 
 async def main():
     print("=" * 70)
@@ -38,8 +43,8 @@ async def main():
     if len(rows) < len(config.SEED_CAMERAS):
         print(f"\n      NOTE: config.py defines {len(config.SEED_CAMERAS)} seed cameras but only")
         print(f"      {len(rows)} are in the database. Run this to add the missing ones:")
-        print(f"        curl -X POST http://localhost:8080/api/cameras/sync-seed")
-        print(f"      (or click 'Sync Default Cameras' in the dashboard's Cameras tab)")
+        print("        curl -X POST http://localhost:8080/api/cameras/sync-seed")
+        print("      (or click 'Sync Default Cameras' in the dashboard's Cameras tab)")
 
     await conn.close()
     print("\n" + "=" * 70)

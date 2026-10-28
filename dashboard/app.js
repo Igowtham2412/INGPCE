@@ -7,12 +7,14 @@ const API = {
   stats: "/api/stats", rules: "/api/rules", syncSeed: "/api/cameras/sync-seed",
 };
 const state = {
-  cameras: [], areaGroups: [], rules: [], wsEventsConnected: false, videoSockets: {},
+  cameras: [], areaGroups: [], rules: [], wsEventsConnected: false,
+  wallVideoSocket: null, wallVideoReconnectTimer: null,
   violationGallery: [], violationGalleryIndex: 0, violationGalleryOffset: 0, cameraViewerId: null,
   cameraStatusReport: null,
   cameraStatusAbortController: null, cameraStatusDebounceTimer: null,
   analyticsStats: null, analyticsWindowHours: 24, analyticsResizeTimer: null,
   canManageAlertDelivery: false,
+  canReviewFaceMatches: false,
   wallColumns: 4,
   playbackActive: false,
 };
@@ -30,6 +32,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupRuleModal();
   setupLightbox();
   setupViolationsGallery();
+  setupFaceMatches();
   setupCameraViewer();
   setupCameraModal();
   setupGroupsModal();
@@ -91,7 +94,9 @@ async function initializeAuthentication() {
   if (session.authenticated) {
     installCsrfFetch(session.csrf_token);
     state.canManageAlertDelivery = ["admin", "manager"].includes(session.user.role);
+    state.canReviewFaceMatches = ["admin", "manager"].includes(session.user.role);
     document.getElementById("alertDeliveryTab").hidden = !state.canManageAlertDelivery;
+    document.getElementById("faceMatchesTab").hidden = !state.canReviewFaceMatches;
     if (session.user.role !== "admin") {
       document.getElementById("btnCleanOldViolations").hidden = true;
     }
@@ -136,6 +141,12 @@ function escapeHtml(str) {
 }
 
 function formatViolationLabel(violationType) {
+  const labels = {
+    no_helmet: "Missing Helmet",
+    no_vest: "Missing Safety Vest",
+    phone_detected: "Phone Detected Near Person",
+  };
+  if (labels[violationType]) return labels[violationType];
   const item = (violationType || "").replace(/^no_/, "").replace(/_/g, " ");
   return item ? `Missing ${item}` : "Violation";
 }
@@ -401,16 +412,8 @@ function populateViolationCameraFilter() {
 
 function renderFeedsGroupedByArea() {
   const container = document.getElementById("feedsByGroup");
+  closeVideoWall();
   container.innerHTML = "";
-
-  const activeCameraIds = new Set(
-    state.cameras.filter((camera) => camera.enabled).map((camera) => camera.camera_id),
-  );
-  Object.keys(state.videoSockets).forEach((cameraId) => {
-    if (activeCameraIds.has(cameraId)) return;
-    state.videoSockets[cameraId].close();
-    delete state.videoSockets[cameraId];
-  });
 
   const groups = {};
   state.cameras.filter((cam) => cam.enabled).forEach((cam) => {
@@ -440,7 +443,6 @@ function renderFeedsGroupedByArea() {
       try {
         const tile = buildCameraTile(cam);
         grid.appendChild(tile);
-        connectVideoStream(cam.camera_id);
       } catch (err) {
         console.error(`Failed to render tile for camera ${cam && cam.camera_id}:`, err);
         const errorTile = document.createElement("div");
@@ -450,6 +452,7 @@ function renderFeedsGroupedByArea() {
       }
     });
   });
+  connectVideoWall();
   applyLiveWallFilters();
 }
 
@@ -572,7 +575,7 @@ async function reconnectSingleCamera(cameraId) {
   try {
     await fetch(`${API.cameras}/${cameraId}/refresh`, { method: "POST" });
     await new Promise((r) => setTimeout(r, 1000));
-    connectVideoStream(cameraId);
+    connectVideoStream(cameraId, true);
     await refreshCameraStatuses();
   } catch (e) {
     console.error(`Reconnect failed for ${cameraId}:`, e);
@@ -592,8 +595,6 @@ function setupReconnectAll() {
         await new Promise((r) => setTimeout(r, 150));
       }
       await new Promise((r) => setTimeout(r, 1500));
-      state.cameras.filter((camera) => camera.enabled)
-        .forEach((cam) => connectVideoStream(cam.camera_id));
       await loadCameras();
     } finally {
       btn.disabled = false;
@@ -602,63 +603,98 @@ function setupReconnectAll() {
   });
 }
 
-function connectVideoStream(cameraId) {
-  if (state.videoSockets[cameraId]) {
-    try { state.videoSockets[cameraId].close(); } catch (e) {}
+function closeVideoStream(cameraId) {
+  closeVideoWall();
+}
+
+function connectVideoStream(cameraId, replaceExisting = false) {
+  connectVideoWall(replaceExisting);
+}
+
+function closeVideoWall() {
+  if (state.wallVideoReconnectTimer) {
+    clearTimeout(state.wallVideoReconnectTimer);
+    state.wallVideoReconnectTimer = null;
   }
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/ws/video/${cameraId}`);
-  ws.binaryType = "arraybuffer";
-  state.videoSockets[cameraId] = ws;
-
-  const canvas = document.getElementById(`canvas-${cameraId}`);
-  if (!canvas) return;
-  const placeholder = document.getElementById(`placeholder-${cameraId}`);
-  const ctx = canvas.getContext("2d", { alpha: false });
-
-  /* Lock canvas buffer to 1920×1080 once */
-  canvas.width = 1920;
-  canvas.height = 1080;
-
-  let latestBitmap = null;
-  let rafId = null;
-
-  function drawFrame() {
-    rafId = null;
-    if (!latestBitmap) return;
-    ctx.drawImage(latestBitmap, 0, 0, 1920, 1080);
-    if (state.cameraViewerId === cameraId) {
-      const viewer = document.getElementById("cameraViewerCanvas");
-      if (viewer && document.getElementById("cameraViewerBackdrop").classList.contains("open")) {
-        viewer.getContext("2d").drawImage(latestBitmap, 0, 0, viewer.width, viewer.height);
-      }
+  const ws = state.wallVideoSocket;
+  state.wallVideoSocket = null;
+  if (ws) {
+    ws.onclose = null;
+    ws.onerror = null;
+    try { ws.close(); } catch (error) {
+      console.error("Could not close the live wall stream:", error);
     }
-    latestBitmap.close();
-    latestBitmap = null;
   }
+}
+
+function connectVideoWall(replaceExisting = false) {
+  const cameraIds = state.cameras
+    .filter((camera) => camera.enabled && document.getElementById(`canvas-${camera.camera_id}`))
+    .map((camera) => camera.camera_id);
+  if (!cameraIds.length) {
+    closeVideoWall();
+    return;
+  }
+
+  const existing = state.wallVideoSocket;
+  if (existing && !replaceExisting
+      && [WebSocket.CONNECTING, WebSocket.OPEN].includes(existing.readyState)) return;
+  closeVideoWall();
+
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const params = new URLSearchParams({ camera_ids: cameraIds.join(",") });
+  const ws = new WebSocket(`${proto}://${location.host}/ws/video?${params}`);
+  ws.binaryType = "arraybuffer";
+  state.wallVideoSocket = ws;
 
   ws.onmessage = async (event) => {
     try {
-      const blob = new Blob([event.data], { type: "image/jpeg" });
+      const packet = new DataView(event.data);
+      if (packet.byteLength < 2) return;
+      const idLength = packet.getUint16(0);
+      if (packet.byteLength <= idLength + 2) return;
+      const cameraId = new TextDecoder().decode(
+        new Uint8Array(event.data, 2, idLength),
+      );
+      const canvas = document.getElementById(`canvas-${cameraId}`);
+      if (!canvas) return;
+      const blob = new Blob([event.data.slice(idLength + 2)], { type: "image/jpeg" });
       const bitmap = await createImageBitmap(blob);
-      /* Drop previous undisplayed frame to keep only latest */
-      if (latestBitmap) latestBitmap.close();
-      latestBitmap = bitmap;
-      if (!rafId) rafId = requestAnimationFrame(drawFrame);
+      if (state.wallVideoSocket !== ws) {
+        bitmap.close();
+        return;
+      }
+      if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+      }
+      canvas.getContext("2d", { alpha: false }).drawImage(bitmap, 0, 0);
+      bitmap.close();
+      const placeholder = document.getElementById(`placeholder-${cameraId}`);
       if (placeholder) placeholder.style.display = "none";
-    } catch (e) { /* stray partial frame - next one recovers */ }
+    } catch (error) {
+      console.warn("Could not decode a live wall frame:", error);
+    }
   };
 
   ws.onclose = () => {
-    if (rafId) cancelAnimationFrame(rafId);
-    if (latestBitmap) { latestBitmap.close(); latestBitmap = null; }
-    if (document.getElementById(`placeholder-${cameraId}`)) {
-      const p = document.getElementById(`placeholder-${cameraId}`);
-      p.style.display = "block"; p.textContent = "RECONNECTING…";
-    }
-    setTimeout(() => { if (document.getElementById(`canvas-${cameraId}`)) connectVideoStream(cameraId); }, 2000);
+    if (state.wallVideoSocket !== ws) return;
+    state.wallVideoSocket = null;
+    cameraIds.forEach((cameraId) => {
+      const placeholder = document.getElementById(`placeholder-${cameraId}`);
+      if (placeholder) {
+        placeholder.style.display = "block";
+        placeholder.textContent = "RECONNECTING…";
+      }
+    });
+    state.wallVideoReconnectTimer = setTimeout(() => {
+      state.wallVideoReconnectTimer = null;
+      connectVideoWall();
+    }, 2000);
   };
-  ws.onerror = () => ws.close();
+  ws.onerror = () => {
+    if (state.wallVideoSocket === ws) ws.close();
+  };
 }
 
 async function refreshCameraStatuses() {
@@ -702,10 +738,14 @@ async function refreshCameraConnection(cameraId) {
   const btn = document.querySelector(`[data-refresh-cam="${cameraId}"]`);
   if (btn) { btn.textContent = "Refreshing…"; btn.disabled = true; }
   try {
-    await fetch(`${API.cameras}/${cameraId}/refresh`, { method: "POST" });
+    const response = await fetch(`${API.cameras}/${cameraId}/refresh`, { method: "POST" });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
     await new Promise(r => setTimeout(r, 800));
-    connectVideoStream(cameraId);
-    await loadCameras();
+    connectVideoStream(cameraId, true);
+    await refreshCameraStatuses();
   } finally { if (btn) { btn.textContent = "↻ Refresh"; btn.disabled = false; } }
 }
 
@@ -720,12 +760,108 @@ async function deleteCamera(cameraId) {
 // ---------------------------------------------------------------
 function setupCameraModal() {
   const backdrop = document.getElementById("cameraModalBackdrop");
+  const areaGroup = document.getElementById("camAreaGroup");
+  const setArcFlashSuitDefault = () => {
+    const selectedGroup = areaGroup.selectedOptions[0]?.textContent.trim();
+    document.getElementById("ppeArcFlashSuit").checked = selectedGroup === "MCC";
+  };
   document.getElementById("btnNewCamera").addEventListener("click", () => openCameraModal(null));
   document.getElementById("btnCancelCamera").addEventListener("click", () => backdrop.classList.remove("open"));
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) backdrop.classList.remove("open"); });
+  areaGroup.addEventListener("change", setArcFlashSuitDefault);
   document.getElementById("cameraForm").addEventListener("submit", async (e) => {
-    e.preventDefault(); await saveCamera(); backdrop.classList.remove("open"); await loadCameras();
+    e.preventDefault();
+    try {
+      const { camera, isEdit } = await saveCamera();
+      if (isEdit) {
+        updateEditedCamera(camera);
+      } else {
+        await loadCameras();
+      }
+    } catch (error) {
+      alert(`Failed to save camera: ${error.message}`);
+      return;
+    }
+    backdrop.classList.remove("open");
   });
+}
+
+function updateEditedCamera(camera) {
+  const index = state.cameras.findIndex((item) => item.camera_id === camera.camera_id);
+  if (index < 0) {
+    throw new Error(`Camera ${camera.camera_id} is no longer in the camera list`);
+  }
+  camera.connected ??= state.cameras[index].connected;
+  camera.worker_running ??= state.cameras[index].worker_running;
+  state.cameras[index] = camera;
+
+  const tile = document.getElementById(`tile-${camera.camera_id}`);
+  const groupName = camera.area_group_name || "Unassigned";
+  if (!camera.enabled) {
+    const oldGroup = tile?.closest(".feed-group");
+    closeVideoStream(camera.camera_id);
+    tile?.remove();
+    if (oldGroup && !oldGroup.querySelector(".camera-tile")) oldGroup.remove();
+  } else if (tile) {
+    const currentGroup = tile.closest(".feed-group");
+    if (currentGroup?.dataset.area !== groupName) {
+      tile.remove();
+      if (currentGroup && !currentGroup.querySelector(".camera-tile")) {
+        currentGroup.remove();
+      }
+      getOrCreateFeedGroup(groupName).querySelector(".camera-grid").appendChild(tile);
+    }
+    tile.setAttribute("aria-label", `Open live view for ${camera.name}`);
+    tile.querySelector(".tile-cam-name").textContent = camera.name;
+    const status = tile.querySelector(`#status-${camera.camera_id}`);
+    status.className = `tile-status ${camera.connected ? "online" : "offline"}`;
+    status.querySelector("span:last-child").textContent =
+      camera.connected ? "ONLINE" : "OFFLINE";
+  } else if (camera.enabled) {
+    getOrCreateFeedGroup(groupName)
+      .querySelector(".camera-grid")
+      .appendChild(buildCameraTile(camera));
+    connectVideoStream(camera.camera_id);
+  }
+
+  document.querySelectorAll("#feedsByGroup .feed-group").forEach((group) => {
+    const count = group.querySelectorAll(".camera-tile").length;
+    if (!count) {
+      group.remove();
+      return;
+    }
+    group.querySelector(".feed-group-count").textContent =
+      `${count} FEED${count !== 1 ? "S" : ""}`;
+  });
+  if (!document.querySelector("#feedsByGroup .feed-group")) {
+    document.getElementById("feedsByGroup").innerHTML =
+      '<div class="event-empty">No active cameras configured. Enable a camera from the Cameras tab.</div>';
+  }
+
+  renderCamerasTable();
+  populateViolationCameraFilter();
+  populateWallCameraFilter();
+  populatePlaybackCameraSelect();
+  populateCameraStatusCameraFilter();
+  document.getElementById("statCamerasOnline").textContent =
+    `${state.cameras.filter((item) => item.enabled && item.connected).length}/${state.cameras.filter((item) => item.enabled).length}`;
+  connectVideoWall(true);
+  applyLiveWallFilters();
+}
+
+function getOrCreateFeedGroup(groupName) {
+  const container = document.getElementById("feedsByGroup");
+  let group = [...container.querySelectorAll(".feed-group")]
+    .find((element) => element.dataset.area === groupName);
+  if (group) return group;
+
+  container.querySelector(".event-empty")?.remove();
+  group = document.createElement("div");
+  group.className = "feed-group";
+  group.dataset.area = groupName;
+  group.innerHTML = `<div class="feed-group-header"><h4>${escapeHtml(groupName)}</h4><span class="feed-group-count">0 FEEDS</span></div><div class="camera-grid" style="--wall-columns:${state.wallColumns}"></div>`;
+  container.appendChild(group);
+  return group;
 }
 
 async function openCameraModal(cameraId) {
@@ -743,6 +879,7 @@ async function openCameraModal(cameraId) {
     const ppe = cam.required_ppe || [];
     document.getElementById("ppeHelmet").checked = ppe.includes("helmet");
     document.getElementById("ppeVest").checked = ppe.includes("vest");
+    document.getElementById("ppeArcFlashSuit").checked = ppe.includes("arc_flash_suit");
     document.getElementById("ppeMask").checked = ppe.includes("mask");
     document.getElementById("ppeGloves").checked = ppe.includes("gloves");
     document.getElementById("ppeBoots").checked = ppe.includes("boots");
@@ -751,6 +888,7 @@ async function openCameraModal(cameraId) {
     document.getElementById("cameraForm").reset(); idField.value = "";
     document.getElementById("ppeHelmet").checked = true; document.getElementById("ppeVest").checked = true;
     document.getElementById("camEnabled").checked = true;
+    setArcFlashSuitDefault();
   }
   backdrop.classList.add("open");
 }
@@ -761,6 +899,7 @@ async function saveCamera() {
   const requiredPpe = [];
   if (document.getElementById("ppeHelmet").checked) requiredPpe.push("helmet");
   if (document.getElementById("ppeVest").checked) requiredPpe.push("vest");
+  if (document.getElementById("ppeArcFlashSuit").checked) requiredPpe.push("arc_flash_suit");
   if (document.getElementById("ppeMask").checked) requiredPpe.push("mask");
   if (document.getElementById("ppeGloves").checked) requiredPpe.push("gloves");
   if (document.getElementById("ppeBoots").checked) requiredPpe.push("boots");
@@ -768,11 +907,20 @@ async function saveCamera() {
   const areaGroupVal = document.getElementById("camAreaGroup").value;
   if (isEdit) {
     const payload = { name: document.getElementById("camName").value, rtsp_url: document.getElementById("camRtspUrl").value, area_group_id: areaGroupVal ? parseInt(areaGroupVal, 10) : null, required_ppe: requiredPpe, enabled: document.getElementById("camEnabled").checked };
-    await fetch(`${API.cameras}/${cameraId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const res = await fetch(`${API.cameras}/${cameraId}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error.detail || `HTTP ${res.status}`);
+    }
+    return { camera: await res.json(), isEdit: true };
   } else {
     const payload = { camera_id: cameraId, name: document.getElementById("camName").value, rtsp_url: document.getElementById("camRtspUrl").value, area_group_id: areaGroupVal ? parseInt(areaGroupVal, 10) : null, required_ppe: requiredPpe, enabled: document.getElementById("camEnabled").checked };
     const res = await fetch(API.cameras, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-    if (!res.ok) { const err = await res.json(); alert(`Failed to add camera: ${err.detail || res.statusText}`); }
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error.detail || `HTTP ${res.status}`);
+    }
+    return { camera: await res.json(), isEdit: false };
   }
 }
 
@@ -833,6 +981,69 @@ function setupViolationsGallery() {
   document.getElementById("violationAgeFilter").addEventListener("change", () => loadViolationsGallery());
   document.getElementById("btnCleanOldViolations").addEventListener("click", cleanOldViolations);
   document.getElementById("violationsGallery").addEventListener("click", async (event) => {
+    const faceButton = event.target.closest("[data-face-match-open]");
+    if (faceButton) {
+      event.stopPropagation();
+      const card = faceButton.closest(".violation-card");
+      const panel = card.querySelector("[data-face-match-panel]");
+      if (panel.hidden) {
+        panel.hidden = false;
+        await loadFaceMatchPanel(Number(faceButton.dataset.faceMatchOpen), panel);
+      } else {
+        panel.hidden = true;
+      }
+      return;
+    }
+
+    const faceReviewButton = event.target.closest("[data-face-review]");
+    const reassignButton = event.target.closest("[data-face-reassign]");
+    const reprocessButton = event.target.closest("[data-face-reprocess]");
+    if (faceReviewButton || reassignButton || reprocessButton) {
+      event.stopPropagation();
+      const button = faceReviewButton || reassignButton || reprocessButton;
+      const panel = button.closest("[data-face-match-panel]");
+      const incidentId = Number(button.dataset.incidentId);
+      const buttons = panel.querySelectorAll("button, select");
+      buttons.forEach((item) => { item.disabled = true; });
+      try {
+        let response;
+        if (reprocessButton) {
+          response = await fetch(`/api/face/incidents/${incidentId}/reprocess`, {
+            method: "POST",
+          });
+        } else {
+          const decision = faceReviewButton
+            ? faceReviewButton.dataset.faceReview
+            : "Reassigned";
+          const payload = { decision };
+          if (reassignButton) {
+            payload.person_id = Number(panel.querySelector("[data-face-person]").value);
+          }
+          response = await fetch(`/api/violations/${incidentId}/face-review`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+        }
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+          throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+        if (reprocessButton) {
+          panel.innerHTML = `<p class="face-match-status">Face match queued for processing.</p>`;
+        } else {
+          await loadFaceMatchPanel(incidentId, panel);
+        }
+      } catch (error) {
+        panel.insertAdjacentHTML(
+          "afterbegin",
+          `<p class="face-match-error">${escapeHtml(error.message)}</p>`,
+        );
+        buttons.forEach((item) => { item.disabled = false; });
+      }
+      return;
+    }
+
     const button = event.target.closest("[data-review]");
     if (!button) return;
     event.stopPropagation();
@@ -935,13 +1146,23 @@ async function loadViolationsGallery(append = false) {
       const snapshotUrl = row.snapshot_url;
       const detectedAt = row.detected_at ? new Date(row.detected_at).toLocaleString() : "";
       const reviewStatus = row.review_status || "unreviewed";
-      card.innerHTML = `<div class="thumb-wrap">${snapshotUrl ? `<img src="${snapshotUrl}" alt="${escapeHtml(label)}" loading="lazy" />` : `<div class="thumb-placeholder">No image</div>`}<span class="thumb-badge">${label.toUpperCase()}</span></div><div class="card-meta"><div class="card-cam">${escapeHtml(row.camera_name || row.camera_id)}</div><div class="card-time">${escapeHtml(row.area_group || row.zone || "")} · ${detectedAt}</div><div class="review-status">${escapeHtml(reviewStatus.replace("_", " "))}</div><div class="review-actions"><button type="button" class="icon-btn" data-review="${row.id}" data-review-status="confirmed">Confirm</button><button type="button" class="icon-btn danger" data-review="${row.id}" data-review-status="false_positive">False positive</button>${row.clean_snapshot_url ? `<a class="icon-btn" href="${row.clean_snapshot_url}" target="_blank" rel="noopener">Clean</a>` : ""}${row.video_url ? `<a class="icon-btn" href="${row.video_url}" target="_blank" rel="noopener">Clip</a>` : ""}</div></div>`;
+      const faceEligible = ["no_helmet", "no_vest", "phone_detected"].includes(row.violation_type);
+      const faceMatchStatus = faceEligible && row.face_recognition_enabled
+        ? (row.face_match_available
+          ? "Face match available"
+          : (state.canReviewFaceMatches ? "Face match pending" : ""))
+        : "";
+      card.innerHTML = `<div class="thumb-wrap">${snapshotUrl ? `<img src="${snapshotUrl}" alt="${escapeHtml(label)}" loading="lazy" />` : `<div class="thumb-placeholder">No image</div>`}<span class="thumb-badge">${label.toUpperCase()}</span></div><div class="card-meta"><div class="card-cam">${escapeHtml(row.camera_name || row.camera_id)}</div><div class="card-time">${escapeHtml(row.area_group || row.zone || "")} · ${detectedAt}</div><div class="review-status">${escapeHtml(reviewStatus.replace("_", " "))}</div>${faceMatchStatus ? `<div class="face-match-availability">${faceMatchStatus}${state.canReviewFaceMatches ? ` <button type="button" class="icon-btn" data-face-match-open="${row.id}">View face match</button>` : ""}</div>` : ""}<div class="face-match-panel" data-face-match-panel hidden></div><div class="review-actions"><button type="button" class="icon-btn" data-review="${row.id}" data-review-status="confirmed">Confirm</button><button type="button" class="icon-btn danger" data-review="${row.id}" data-review-status="false_positive">False positive</button>${row.clean_snapshot_url ? `<a class="icon-btn" href="${row.clean_snapshot_url}" target="_blank" rel="noopener">Clean</a>` : ""}${row.video_url ? `<a class="icon-btn" href="${row.video_url}" target="_blank" rel="noopener">Clip</a>` : ""}</div></div>`;
       if (snapshotUrl) {
         card.setAttribute("role", "button");
         card.tabIndex = 0;
-        const openIncident = () => openViolationLightbox(snapshotUrl);
-        card.addEventListener("click", openIncident);
+        card.addEventListener("click", (event) => {
+          if (!event.target.closest("button, a, select")) {
+            openViolationLightbox(snapshotUrl);
+          }
+        });
         card.addEventListener("keydown", (event) => {
+          if (event.target.closest("button, a, select")) return;
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
             openIncident();
@@ -953,6 +1174,220 @@ async function loadViolationsGallery(append = false) {
       console.error("Failed to render a violation card:", err);
     }
   });
+}
+
+async function loadFaceMatchPanel(incidentId, panel) {
+  panel.innerHTML = `<p class="face-match-status">Loading face-match details…</p>`;
+  try {
+    const response = await fetch(`/api/violations/${incidentId}/face-match`);
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    const match = await response.json();
+    const candidates = Array.isArray(match.top3_candidates) ? match.top3_candidates : [];
+    const reviewed = ["Confirmed", "Reassigned"].includes(match.review_decision);
+    const hasCandidate = ["Identified", "Suggested"].includes(match.status)
+      && match.matched_full_name;
+    const heading = hasCandidate
+      ? `${reviewed ? "Reviewer-confirmed" : "Possible match (pending review)"}: ${escapeHtml(match.matched_full_name)}`
+      : escapeHtml(match.status || "No match details");
+    const similarity = match.similarity !== null && match.similarity !== undefined
+      && Number.isFinite(Number(match.similarity))
+      ? ` · Similarity ${(Number(match.similarity) * 100).toFixed(1)}%`
+      : "";
+    const crop = match.face_crop_available
+      ? `<img class="face-match-crop" src="/api/violations/${incidentId}/face-crop" alt="Incident face crop" loading="lazy" />`
+      : "";
+    const candidateList = candidates.length
+      ? `<ul class="face-match-candidates">${candidates.map((candidate) =>
+        `<li>${escapeHtml(candidate.full_name || "Enrolled candidate")} · ${(Number(candidate.similarity) * 100).toFixed(1)}%</li>`,
+      ).join("")}</ul>`
+      : "";
+    let actions = "";
+    if (!reviewed && ["Identified", "Suggested"].includes(match.status)) {
+      actions += `<button type="button" class="icon-btn" data-face-review="Confirmed" data-incident-id="${incidentId}">Confirm match</button><button type="button" class="icon-btn danger" data-face-review="Rejected" data-incident-id="${incidentId}">Reject match</button>`;
+      const enrollmentsResponse = await fetch("/api/face/enrollments");
+      if (!enrollmentsResponse.ok) {
+        const error = await enrollmentsResponse.json().catch(() => ({ detail: `HTTP ${enrollmentsResponse.status}` }));
+        throw new Error(error.detail || `HTTP ${enrollmentsResponse.status}`);
+      }
+      const enrollments = await enrollmentsResponse.json();
+      const activeEnrollments = enrollments.filter((person) => person.active);
+      if (activeEnrollments.length) {
+        actions += `<div class="face-reassign"><select data-face-person aria-label="Select enrolled person">${activeEnrollments.map((person) =>
+          `<option value="${person.person_id}">${escapeHtml(person.full_name)} (${escapeHtml(person.employee_code)})</option>`,
+        ).join("")}</select><button type="button" class="icon-btn" data-face-reassign data-incident-id="${incidentId}">Reassign</button></div>`;
+      }
+    }
+    if (["Not available", "Error", "No face found", "Not identified"].includes(match.status)) {
+      actions += `<button type="button" class="icon-btn" data-face-reprocess data-incident-id="${incidentId}">Reprocess</button>`;
+    }
+    const reviewLabel = reviewed ? `Reviewed: ${escapeHtml(match.review_decision)}` : "";
+    panel.innerHTML = `<div class="face-match-heading">${heading}${similarity}</div>${reviewLabel ? `<div class="face-match-review">${reviewLabel}</div>` : ""}${crop}${candidateList}${actions ? `<div class="face-match-actions">${actions}</div>` : ""}`;
+  } catch (error) {
+    panel.innerHTML = `<p class="face-match-error">Could not load face-match details: ${escapeHtml(error.message)}</p>`;
+  }
+}
+
+function setupFaceMatches() {
+  document.getElementById("faceViolationTypeFilter").addEventListener(
+    "change", loadFaceMatches,
+  );
+  document.getElementById("btnRefreshFaceMatches").addEventListener(
+    "click", loadFaceMatches,
+  );
+  document.getElementById("faceAnalyticsTypeFilter").addEventListener(
+    "change", loadFaceAnalytics,
+  );
+  document.getElementById("faceAnalyticsWindow").addEventListener(
+    "change", loadFaceAnalytics,
+  );
+  document.getElementById("btnRefreshFaceAnalytics").addEventListener(
+    "click", loadFaceAnalytics,
+  );
+  document.getElementById("btnRefreshFaceStatus").addEventListener(
+    "click", loadFaceRecognitionStatus,
+  );
+  document.querySelectorAll("[data-face-subtab]").forEach((button) => {
+    button.addEventListener("click", () => {
+      document.querySelectorAll("[data-face-subtab]").forEach((item) => {
+        item.classList.toggle("active", item === button);
+      });
+      document.querySelectorAll(".face-subtab-pane").forEach((panel) => {
+        const active = panel.id === `face-panel-${button.dataset.faceSubtab}`;
+        panel.hidden = !active;
+        panel.classList.toggle("active", active);
+      });
+      if (button.dataset.faceSubtab === "matches") loadFaceMatches();
+      if (button.dataset.faceSubtab === "analytics") loadFaceAnalytics();
+      if (button.dataset.faceSubtab === "status") loadFaceRecognitionStatus();
+    });
+  });
+}
+
+async function loadFaceMatches() {
+  const body = document.getElementById("faceMatchesBody");
+  body.innerHTML = `<tr><td colspan="7" class="empty-state">Loading face matches…</td></tr>`;
+  const params = new URLSearchParams({ limit: "100" });
+  const type = document.getElementById("faceViolationTypeFilter").value;
+  if (type) params.set("violation_type", type);
+  try {
+    const response = await fetch(`/api/face/matches?${params}`);
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    const matches = await response.json();
+    body.replaceChildren();
+    if (!matches.length) {
+      body.innerHTML = `<tr><td colspan="7" class="empty-state">No face matches for this filter.</td></tr>`;
+      return;
+    }
+    matches.forEach((match) => {
+      const row = document.createElement("tr");
+      const fields = [
+        match.epoch_time ? new Date(Number(match.epoch_time) * 1000).toLocaleString() : "—",
+        `#${match.incident_id}`,
+        match.camera_name || match.camera_id || "—",
+        formatViolationLabel(match.violation_type),
+        faceMatchDisplayStatus(match),
+        match.review_decision || "Pending review",
+        match.reused_from_track ? "Reused from track" : "Processed",
+      ];
+      fields.forEach((value, index) => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        if (index === 3) cell.className = "face-violation-badge";
+        if (index === 4 && match.similarity != null) {
+          cell.title = `Similarity ${(Number(match.similarity) * 100).toFixed(1)}%`;
+        }
+        row.appendChild(cell);
+      });
+      body.appendChild(row);
+    });
+  } catch (error) {
+    body.innerHTML = `<tr><td colspan="7" class="face-match-error">Could not load face matches: ${escapeHtml(error.message)}</td></tr>`;
+  }
+}
+
+function faceMatchDisplayStatus(match) {
+  if (["Identified", "Suggested"].includes(match.status) && match.full_name) {
+    return ["Confirmed", "Reassigned"].includes(match.review_decision)
+      ? `Reviewer-confirmed: ${match.full_name}`
+      : `Possible match (pending review): ${match.full_name}`;
+  }
+  return match.status || "Not available";
+}
+
+async function loadFaceAnalytics() {
+  const body = document.getElementById("faceAnalyticsBody");
+  body.innerHTML = `<tr><td colspan="5" class="empty-state">Loading confirmed-match analytics…</td></tr>`;
+  const params = new URLSearchParams({
+    window_hours: document.getElementById("faceAnalyticsWindow").value,
+  });
+  const type = document.getElementById("faceAnalyticsTypeFilter").value;
+  if (type) params.set("violation_type", type);
+  try {
+    const response = await fetch(`/api/face/analytics?${params}`);
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    const records = await response.json();
+    body.replaceChildren();
+    if (!records.length) {
+      body.innerHTML = `<tr><td colspan="5" class="empty-state">No reviewer-confirmed matches for this period.</td></tr>`;
+      return;
+    }
+    records.forEach((record) => {
+      const row = document.createElement("tr");
+      [
+        `${record.full_name} (${record.employee_code})`,
+        record.department || "—",
+        formatViolationLabel(record.violation_type),
+        String(record.confirmed_violations),
+        record.last_violation_epoch
+          ? new Date(Number(record.last_violation_epoch) * 1000).toLocaleString()
+          : "—",
+      ].forEach((value, index) => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        if (index === 2) cell.className = "face-violation-badge";
+        row.appendChild(cell);
+      });
+      body.appendChild(row);
+    });
+  } catch (error) {
+    body.innerHTML = `<tr><td colspan="5" class="face-match-error">Could not load face analytics: ${escapeHtml(error.message)}</td></tr>`;
+  }
+}
+
+async function loadFaceRecognitionStatus() {
+  const container = document.getElementById("faceRecognitionStatus");
+  container.textContent = "Loading face-recognition status…";
+  try {
+    const response = await fetch("/api/face/status");
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    const status = await response.json();
+    const enabled = document.createElement("p");
+    enabled.textContent = `Feature: ${status.feature_enabled ? "Enabled" : "Disabled"}`;
+    const types = document.createElement("p");
+    const labels = status.enabled_violation_types.map(formatViolationLabel);
+    types.textContent = `Eligible types: ${labels.length ? labels.join(", ") : "None configured"}`;
+    const reuse = document.createElement("p");
+    reuse.textContent = `Same-track result reuse window: ${status.track_reuse_seconds} seconds`;
+    const quality = document.createElement("p");
+    const qualityEntries = Object.entries(status.quality_min_by_violation || {})
+      .map(([type, value]) => `${formatViolationLabel(type)}: ${value}`);
+    quality.textContent = `Additional quality minimums: ${qualityEntries.length ? qualityEntries.join(", ") : "None"}`;
+    container.replaceChildren(enabled, types, reuse, quality);
+  } catch (error) {
+    container.textContent = `Could not load face-recognition status: ${error.message}`;
+  }
 }
 
 // ---------------------------------------------------------------
@@ -1590,6 +2025,7 @@ function setupTabs() {
       if (btn.dataset.tab === "violations") loadViolationsGallery();
       if (btn.dataset.tab === "cameras") renderCamerasTable();
       if (btn.dataset.tab === "camera-status") loadCameraStatusReport();
+      if (btn.dataset.tab === "face-matches") loadFaceMatches();
       if (btn.dataset.tab === "playback") populatePlaybackCameraSelect();
     });
   });

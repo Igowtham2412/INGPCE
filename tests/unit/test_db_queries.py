@@ -1,4 +1,5 @@
 import unittest
+from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.db import get_camera_status_history, get_recent_violations
@@ -41,9 +42,9 @@ class CameraStatusHistoryQueryTests(unittest.IsolatedAsyncioTestCase):
         pool = MagicMock()
         pool.acquire.return_value.__aenter__.return_value = connection
 
-        from datetime import datetime, timezone
-        start = datetime(2026, 10, 14, tzinfo=timezone.utc)
-        end = datetime(2026, 10, 15, tzinfo=timezone.utc)
+        from datetime import datetime
+        start = datetime(2026, 10, 14, tzinfo=UTC)
+        end = datetime(2026, 10, 15, tzinfo=UTC)
         with patch("app.db.get_pool", return_value=pool):
             result = await get_camera_status_history(start, end)
 

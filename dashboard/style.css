@@ -358,6 +358,22 @@ body::after { content: none; }
   font-family: var(--font-mono); text-transform: uppercase; transition: all 0.15s; }
 .icon-btn:hover { color: var(--accent-green); border-color: var(--accent-green); }
 .icon-btn.danger:hover { color: var(--accent-red); border-color: var(--accent-red); }
+.face-recognition-notice { margin: 8px 0 12px; color: var(--text-secondary); font-size: 10px; line-height: 1.5; }
+.face-match-availability, .face-match-status, .face-match-review { color: var(--accent-cyan); font: 10px var(--font-mono); }
+.face-match-panel { margin-top: 8px; padding: 9px; border: 1px solid var(--border-panel); border-radius: var(--radius); }
+.face-match-heading { color: var(--text-primary); font-size: 11px; line-height: 1.5; }
+.face-match-crop { display: block; width: 96px; height: 96px; margin-top: 8px; border-radius: 4px; object-fit: cover; }
+.face-match-candidates { margin: 8px 0; padding-left: 18px; color: var(--text-secondary); font: 10px var(--font-mono); }
+.face-match-actions, .face-reassign { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 8px; }
+.face-reassign select { max-width: 220px; }
+.face-match-error { color: var(--accent-red); font-size: 10px; }
+.face-match-subnav { display: flex; gap: 6px; margin: 0 0 12px; border-bottom: 1px solid var(--border-panel); }
+.face-subtab-btn { padding: 8px 12px; border: 0; border-bottom: 2px solid transparent; background: transparent;
+  color: var(--text-secondary); font: 10px var(--font-mono); cursor: pointer; }
+.face-subtab-btn.active { color: var(--accent-green); border-bottom-color: var(--accent-green); }
+.face-subtab-pane[hidden] { display: none; }
+.face-violation-badge { color: var(--accent-amber); font-weight: 700; }
+.face-status-content { display: grid; gap: 4px; padding: 12px 0; color: var(--text-secondary); font-size: 11px; }
 .ops-btn { background: transparent; border: 1px solid var(--accent-green); color: var(--accent-green);
   font-weight: 700; padding: 6px 14px; border-radius: var(--radius); cursor: pointer;
   font-size: 10px; font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 1px; transition: all 0.15s; }
@@ -448,6 +464,7 @@ body::after { content: none; }
 .ops-modal .form-row { display: flex; gap: 12px; }
 .ops-modal .chk-label { flex-direction: row; align-items: center; gap: 7px; }
 .ops-modal .ppe-checks { display: flex; flex-wrap: wrap; gap: 12px; }
+.ops-modal .form-hint { margin: -4px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
 .modal-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .lightbox-inner, .camera-viewer { position: relative; display: flex; align-items: center; justify-content: center; width: min(1100px, 94vw); max-height: 90vh; }
 .lightbox-inner { padding: 42px 56px 52px; }

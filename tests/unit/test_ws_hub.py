@@ -5,6 +5,14 @@ from app.ws_hub import WebSocketHub
 
 
 class WebSocketHubTests(unittest.IsolatedAsyncioTestCase):
+    async def test_video_subscriber_presence_tracks_subscriptions(self):
+        hub = WebSocketHub()
+        self.assertFalse(hub.has_video_subscribers("CAM01"))
+        subscriber = await hub.subscribe_video("CAM01")
+        self.assertTrue(hub.has_video_subscribers("CAM01"))
+        await hub.unsubscribe_video("CAM01", subscriber)
+        self.assertFalse(hub.has_video_subscribers("CAM01"))
+
     async def test_video_subscribers_receive_frame_and_unsubscribe(self):
         hub = WebSocketHub()
         subscriber = await hub.subscribe_video("CAM01")

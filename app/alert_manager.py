@@ -17,6 +17,11 @@ _VIOLATION_LABELS = {
     "no_helmet": "Missing Helmet", "no_vest": "Missing Safety Vest",
     "no_gloves": "Missing Gloves", "no_boots": "Missing Safety Boots",
     "no_goggles": "Missing Goggles", "no_mask": "Missing Mask",
+    "no_arc_flash_suit": "Missing Arc Flash Suit",
+    "phone_detected": "Phone Detected Near Person",
+}
+_POWER_AUTOMATE_VIOLATIONS = {
+    "no_helmet", "no_arc_flash_suit", "phone_detected",
 }
 
 
@@ -65,9 +70,15 @@ class AlertManager:
         if isinstance(payload, str):
             payload = json.loads(payload)
         violation_type = payload.get("violation_type")
-        if violation_type is None and payload.get("label") == _VIOLATION_LABELS["no_helmet"]:
-            violation_type = "no_helmet"
-        if violation_type != "no_helmet":
+        if violation_type is None:
+            violation_type = next(
+                (
+                    key for key in _POWER_AUTOMATE_VIOLATIONS
+                    if payload.get("label") == _VIOLATION_LABELS[key]
+                ),
+                None,
+            )
+        if violation_type not in _POWER_AUTOMATE_VIOLATIONS:
             await db.finish_alert_job(
                 job_id=job["id"],
                 violation_id=job["violation_id"],
@@ -76,13 +87,39 @@ class AlertManager:
                 success=False,
                 attempt_count=config.ALERT_OUTBOX_MAX_ATTEMPTS,
                 max_attempts=config.ALERT_OUTBOX_MAX_ATTEMPTS,
-                error="Suppressed: Power Automate sends helmet violations only",
+                error="Suppressed: Power Automate only sends helmet and phone detections",
             )
             return
         success = False
         error = None
         try:
-            success = await self._dispatch(
+            face_match = None
+            if config.FACE_INCLUDE_IN_EMAIL:
+                try:
+                    match = await db.get_face_match_for_email(
+                        int(job["violation_id"]),
+                    )
+                except Exception as face_exc:
+                    logger.warning(
+                        "Optional face-match email details unavailable (%s)",
+                        type(face_exc).__name__,
+                    )
+                else:
+                    if match is not None:
+                        reviewed = match.get("review_decision") in {
+                            "Confirmed", "Reassigned",
+                        }
+                        face_match = {
+                            "employee_name": match["full_name"],
+                            "similarity": match["similarity"],
+                            "reviewed": reviewed,
+                            "wording": (
+                                f"Confirmed employee match: {match['full_name']} (reviewed)"
+                                if reviewed else
+                                f"Possible match: {match['full_name']} (pending review)"
+                            ),
+                        }
+            dispatch_args = (
                 job["channel"],
                 payload["camera_name"],
                 payload["zone"],
@@ -91,6 +128,10 @@ class AlertManager:
                 payload.get("snapshot_path"),
                 violation_type,
             )
+            if face_match is not None:
+                success = await self._dispatch(*dispatch_args, face_match)
+            else:
+                success = await self._dispatch(*dispatch_args)
             if not success:
                 error = "Provider returned an unsuccessful delivery result"
         except Exception as exc:
@@ -112,7 +153,8 @@ class AlertManager:
     async def handle_violation(self, violation_id: int, camera_id: str, camera_name: str,
                                 zone: str, track_id: int, violation_type: str,
                                 snapshot_path: Optional[str] = None) -> List[MatchedAlert]:
-        if not config.ALERTS_ENABLED or violation_type != "no_helmet":
+        if (not config.ALERTS_ENABLED
+                or violation_type not in _POWER_AUTOMATE_VIOLATIONS):
             return []
 
         event = ViolationEvent(camera_id, camera_name, zone, track_id, violation_type)
@@ -154,29 +196,33 @@ class AlertManager:
         recipients: List[str],
         snapshot_path: Optional[str],
         violation_type: Optional[str] = None,
+        face_match: Optional[dict] = None,
     ) -> bool:
         if channel != "power_automate":
             logger.warning("Unsupported alert channel '%s'", channel)
             return False
-        if violation_type != "no_helmet":
-            logger.warning("Power Automate only delivers helmet violation alerts")
+        if violation_type not in _POWER_AUTOMATE_VIOLATIONS:
+            logger.warning(
+                "Power Automate does not support this violation type",
+            )
             return False
         if not recipients:
             logger.warning("Power Automate alert matched but no recipients configured")
             return False
         if not snapshot_path:
-            logger.error("Helmet violation alert has no evidence image")
+            logger.error("Power Automate incident alert has no evidence image")
             return False
         occurred_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         body = (
-            "Helmet Violation Detected\n"
+            "Safety Detection Alert\n"
             f"Camera: {camera_name}\n"
             f"Zone: {zone}\n"
             f"Violation: {label}\n"
             f"Time: {occurred_at}"
         )
-        return await asyncio.to_thread(
-            self._send_power_automate,
+        if face_match is not None:
+            body += f"\n{face_match['wording']}"
+        send_args = (
             recipients,
             f"PPE Compliance Violation: {label}",
             body,
@@ -188,6 +234,9 @@ class AlertManager:
             snapshot_path,
             violation_type,
         )
+        if face_match is not None:
+            send_args += (face_match,)
+        return await asyncio.to_thread(self._send_power_automate, *send_args)
 
     def _send_power_automate(
         self,
@@ -201,6 +250,7 @@ class AlertManager:
         event_type: str = "ppe_violation",
         snapshot_path: Optional[str] = None,
         violation_type: Optional[str] = None,
+        face_match: Optional[dict] = None,
     ) -> bool:
         webhook_url = config.POWER_AUTOMATE_WEBHOOK_URL
         if not webhook_url:
@@ -227,29 +277,47 @@ class AlertManager:
             "recipients": recipients,
         }
         if event_type == "ppe_violation":
-            if violation_type != "no_helmet":
-                logger.warning("Power Automate only delivers helmet violation alerts")
+            if violation_type not in _POWER_AUTOMATE_VIOLATIONS:
+                logger.warning("Power Automate only delivers helmet and phone alerts")
                 return False
             if not snapshot_path:
-                logger.error("Helmet violation alert has no evidence image")
+                logger.error("Power Automate incident alert has no evidence image")
                 return False
             try:
                 with open(snapshot_path, "rb") as image_file:
                     image_bytes = image_file.read()
             except OSError as exc:
                 logger.error(
-                    "Could not read helmet violation evidence image (%s)",
+                    "Could not read incident evidence image (%s)",
                     type(exc).__name__,
                 )
                 return False
             if not image_bytes:
-                logger.error("Helmet violation evidence image is empty")
+                logger.error("Incident evidence image is empty")
                 return False
             payload.update({
-                "image_name": "helmet_violation.jpg",
+                "image_name": (
+                    "helmet_violation.jpg"
+                    if violation_type == "no_helmet"
+                    else (
+                        "arc_flash_suit_violation.jpg"
+                        if violation_type == "no_arc_flash_suit"
+                        else "phone_detected.jpg"
+                    )
+                ),
                 "image_content_type": "image/jpeg",
                 "image_content_bytes": base64.b64encode(image_bytes).decode("ascii"),
             })
+            if face_match is not None:
+                payload["face_match"] = {
+                    "employee_name": face_match["employee_name"],
+                    "similarity": face_match["similarity"],
+                    "status": (
+                        "Reviewed" if face_match["reviewed"]
+                        else "Possible match (pending review)"
+                    ),
+                    "wording": face_match["wording"],
+                }
 
         try:
             response = requests.post(

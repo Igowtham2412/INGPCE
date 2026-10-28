@@ -1,7 +1,10 @@
 """seed_rules.py - inserts starter alert rules. Run once after first boot."""
-import asyncio, sys, os
+import asyncio
+import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from app import db, config
+from app import config, db
 
 RULES = [
     {"name": "Any Zone - Missing Helmet", "camera_id": None, "zone": None,

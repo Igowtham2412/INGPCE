@@ -1,5 +1,5 @@
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 
 from app import config
 from app.main import _hikvision_playback_url, app
-
 
 CAMERA = {
     "camera_id": "CAM01",
@@ -82,7 +81,7 @@ class CameraPlaybackApiTests(unittest.TestCase):
             parse_qs(opened_url.query)["endtime"],
             [(
                 datetime.fromisoformat("2025-01-02T03:14:05")
-                .astimezone(timezone.utc)
+                .astimezone(UTC)
                 .strftime("%Y%m%dt%H%M%Sz")
                 .lower()
             )],
@@ -110,6 +109,7 @@ class CameraPlaybackApiTests(unittest.TestCase):
         self.assertEqual(missing.status_code, 404)
 
         from datetime import datetime
+
         from fastapi import HTTPException
 
         with self.assertRaises(HTTPException) as error:

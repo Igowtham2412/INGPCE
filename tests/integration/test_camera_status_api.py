@@ -1,5 +1,5 @@
 import unittest
-from datetime import timezone
+from datetime import UTC
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -32,8 +32,8 @@ class CameraStatusFilterApiTests(unittest.TestCase):
         start, end, group_id, camera_id = get_history.await_args.args
         self.assertEqual(group_id, 12)
         self.assertEqual(camera_id, "CAM01")
-        self.assertEqual(start.tzinfo, timezone.utc)
-        self.assertEqual(end.tzinfo, timezone.utc)
+        self.assertEqual(start.tzinfo, UTC)
+        self.assertEqual(end.tzinfo, UTC)
 
     def test_all_values_are_forwarded_as_none(self):
         with patch(

@@ -5,7 +5,6 @@ queuing, guaranteeing the dashboard always shows the most recent state.
 """
 import asyncio
 import logging
-from typing import Dict, Set
 
 logger = logging.getLogger("ppe.ws_hub")
 
@@ -28,8 +27,8 @@ class _LatestOnlyQueue:
 
 class WebSocketHub:
     def __init__(self):
-        self._video_subscribers: Dict[str, Set[_LatestOnlyQueue]] = {}
-        self._event_subscribers: Set[_LatestOnlyQueue] = set()
+        self._video_subscribers: dict[str, set[_LatestOnlyQueue]] = {}
+        self._event_subscribers: set[_LatestOnlyQueue] = set()
         self._lock = asyncio.Lock()
 
     async def subscribe_video(self, camera_id: str) -> _LatestOnlyQueue:
@@ -52,6 +51,9 @@ class WebSocketHub:
             return
         for q in list(subs):
             await q.put(jpeg_bytes)
+
+    def has_video_subscribers(self, camera_id: str) -> bool:
+        return bool(self._video_subscribers.get(camera_id))
 
     async def subscribe_events(self) -> _LatestOnlyQueue:
         q = _LatestOnlyQueue()

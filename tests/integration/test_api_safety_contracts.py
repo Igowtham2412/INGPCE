@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import AsyncMock, patch
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -38,6 +39,47 @@ class ApiSafetyContractsTests(unittest.TestCase):
         self.assertNotIn("should-not-leak", response.text)
         self.assertNotIn("Traceback", response.text)
 
+    def test_rules_database_datetimes_are_json_serialized(self):
+        created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        with patch(
+            "app.main.db.list_rules",
+            AsyncMock(return_value=[{"id": 7, "created_at": created_at}]),
+        ):
+            response = self.client.get("/api/rules")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            datetime.fromisoformat(response.json()[0]["created_at"]),
+            created_at,
+        )
+
+    def test_rule_create_and_update_serialize_database_datetimes(self):
+        created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        rule = {"id": 7, "name": "Helmet rule", "created_at": created_at}
+        alert_manager = Mock()
+        alert_manager.rules_engine.force_refresh = AsyncMock()
+
+        with (
+            patch("app.main.db.create_rule", AsyncMock(return_value=rule)),
+            patch("app.main.db.update_rule", AsyncMock(return_value=rule)),
+            patch("app.main._alert_manager", alert_manager),
+        ):
+            created = self.client.post("/api/rules", json={"name": "Helmet rule"})
+            updated = self.client.put(
+                "/api/rules/7", json={"name": "Updated helmet rule"},
+            )
+
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(
+            datetime.fromisoformat(created.json()["created_at"]),
+            created_at,
+        )
+        self.assertEqual(
+            datetime.fromisoformat(updated.json()["created_at"]),
+            created_at,
+        )
+
     def test_invalid_values_and_unbounded_limits_are_rejected(self):
         zone = self.client.post(
             "/api/cameras/CAM01/zones",
@@ -50,6 +92,21 @@ class ApiSafetyContractsTests(unittest.TestCase):
         self.assertEqual(status.status_code, 422)
         self.assertEqual(violations.status_code, 422)
         self.assertEqual(stats.status_code, 422)
+
+    def test_invalid_camera_rtsp_url_is_rejected_without_echoing_url(self):
+        with patch("app.main.db.get_camera", new=AsyncMock()) as get_camera:
+            response = self.client.put(
+                "/api/cameras/CAM01",
+                json={"rtsp_url": "https://operator:do-not-echo@camera.example/live"},
+            )
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"],
+            "Enter a valid RTSP URL with the rtsp:// scheme, host, and stream path",
+        )
+        self.assertNotIn("do-not-echo", response.text)
+        get_camera.assert_not_awaited()
 
     def test_violation_filter_is_bound_and_missing_evidence_is_not_found(self):
         with (

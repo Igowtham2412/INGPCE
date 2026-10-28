@@ -8,7 +8,6 @@ from urllib.parse import parse_qs, urlparse
 
 from playwright.async_api import async_playwright
 
-
 DASHBOARD_DIR = Path(__file__).resolve().parents[2] / "dashboard"
 GROUPS = [
     {"id": 11, "name": "North Area", "camera_count": 1},
@@ -199,7 +198,7 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await page.locator("#analyticsTotal").inner_text(), "12")
                 self.assertEqual(await page.locator("#analyticsCameras").inner_text(), "1/2")
                 self.assertEqual(await page.locator("#analyticsTopArea").inner_text(), "North Area")
-                self.assertIn("Missing helmet", await page.locator("#typeLegend").inner_text())
+                self.assertIn("Missing Helmet", await page.locator("#typeLegend").inner_text())
                 self.assertEqual(
                     await page.locator("#cameraRankList .analytics-rank-row").count(),
                     2,
@@ -301,6 +300,112 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                     ["safety@example.test"],
                 )
                 self.assertEqual(page_errors, [])
+            finally:
+                await browser.close()
+
+    async def test_editing_camera_preserves_other_live_wall_tiles_and_sockets(self):
+        cameras = [
+            {
+                "camera_id": "CAM01", "name": "CAM01", "enabled": True,
+                "connected": True, "worker_running": True,
+                "area_group_id": 11, "area_group_name": "North Area",
+                "rtsp_url": "rtsp://192.168.1.20/Streaming/Channels/101",
+                "required_ppe": ["helmet", "vest"],
+            },
+            {
+                "camera_id": "CAM02", "name": "CAM02", "enabled": True,
+                "connected": True, "worker_running": True,
+                "area_group_id": 22, "area_group_name": "South Area",
+                "rtsp_url": "rtsp://192.168.1.21/Streaming/Channels/101",
+                "required_ppe": ["helmet", "vest"],
+            },
+        ]
+
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch()
+            page = await browser.new_page()
+            await page.add_init_script("""
+                (() => {
+                  window.__cameraWebSockets = [];
+                  class TestWebSocket {
+                    static CONNECTING = 0;
+                    static OPEN = 1;
+                    static CLOSING = 2;
+                    static CLOSED = 3;
+                    constructor(url) {
+                      this.url = url;
+                      this.readyState = TestWebSocket.OPEN;
+                      window.__cameraWebSockets.push(url);
+                    }
+                    close() {
+                      this.readyState = TestWebSocket.CLOSED;
+                      if (this.onclose) this.onclose({target: this});
+                    }
+                  }
+                  window.WebSocket = TestWebSocket;
+                })();
+            """)
+
+            async def mock_api(route):
+                request = route.request
+                path = urlparse(request.url).path
+                if path == "/api/auth/me":
+                    body = {"auth_required": False, "authenticated": False}
+                elif path == "/api/area-groups":
+                    body = GROUPS
+                elif path == "/api/cameras":
+                    body = cameras
+                elif path == "/api/cameras/CAM01" and request.method == "GET":
+                    body = cameras[0]
+                elif path == "/api/cameras/CAM01" and request.method == "PUT":
+                    cameras[0] = {**cameras[0], **request.post_data_json}
+                    body = cameras[0]
+                elif path == "/api/stats":
+                    body = {
+                        "window_hours": 24, "total_violations": 0,
+                        "hourly": [], "by_type": [], "by_area_group": [],
+                        "by_camera": [],
+                    }
+                elif path == "/api/rules":
+                    body = []
+                else:
+                    body = {}
+                await route.fulfill(
+                    status=200, content_type="application/json",
+                    body=json.dumps(body),
+                )
+
+            await page.route("**/api/**", mock_api)
+            try:
+                await page.goto(self.base_url)
+                await page.locator("#tile-CAM02").wait_for()
+                await page.evaluate(
+                    "window.__originalCamera2Tile = document.getElementById('tile-CAM02')",
+                )
+                socket_count_before = await page.evaluate(
+                    "window.__cameraWebSockets.filter(url => url.includes('/ws/video/')).length",
+                )
+
+                await page.locator('[data-tab="cameras"]').click()
+                await page.locator('[data-edit-cam="CAM01"]').click()
+                await page.locator("#camName").fill("CAM01 Updated")
+                await page.locator("#cameraForm button[type=submit]").click()
+                await page.wait_for_function(
+                    "() => !document.getElementById('cameraModalBackdrop').classList.contains('open')",
+                )
+
+                tile_was_preserved = await page.evaluate(
+                    "window.__originalCamera2Tile === document.getElementById('tile-CAM02')",
+                )
+                socket_count_after = await page.evaluate(
+                    "window.__cameraWebSockets.filter(url => url.includes('/ws/video/')).length",
+                )
+                self.assertTrue(tile_was_preserved)
+                self.assertEqual(socket_count_after, socket_count_before)
+                self.assertEqual(
+                    await page.locator("#tile-CAM01 .tile-cam-name").inner_text(),
+                    "CAM01 Updated",
+                )
             finally:
                 await browser.close()
 

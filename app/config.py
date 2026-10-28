@@ -1,13 +1,15 @@
 """Central settings and the configured seed list for camera feeds."""
-import os
 import json
-from typing import List, Dict
+import logging
+import os
+import re
 from math import isfinite
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 
 load_dotenv()
+logger = logging.getLogger("ppe.config")
 
 def _env(key: str, default: str = "") -> str:
     return os.environ.get(key, default)
@@ -15,7 +17,57 @@ def _env(key: str, default: str = "") -> str:
 def _env_bool(key: str, default: bool) -> bool:
     return _env(key, str(default)).lower() in ("1", "true", "yes")
 
-def _json_env(key: str) -> Dict:
+def _face_violation_types() -> frozenset[str]:
+    aliases = {
+        "missing_helmet": "no_helmet",
+        "no_helmet": "no_helmet",
+        "missing_vest": "no_vest",
+        "no_vest": "no_vest",
+        "phone_detected": "phone_detected",
+    }
+    configured = _env(
+        "PPE_FACE_VIOLATION_TYPES",
+        "missing_helmet,missing_vest,phone_detected",
+    )
+    selected = set()
+    for raw_value in configured.split(","):
+        value = raw_value.strip().lower()
+        if not value:
+            continue
+        violation_type = aliases.get(value)
+        if violation_type is None:
+            logger.warning(
+                "Ignoring unknown PPE_FACE_VIOLATION_TYPES value %r", value,
+            )
+            continue
+        selected.add(violation_type)
+    return frozenset(selected)
+
+def _face_quality_min_by_violation() -> dict[str, float]:
+    aliases = {
+        "missing_helmet": "no_helmet", "no_helmet": "no_helmet",
+        "missing_vest": "no_vest", "no_vest": "no_vest",
+        "phone_detected": "phone_detected",
+    }
+    configured = _json_env("PPE_FACE_QUALITY_MIN_BY_VIOLATION")
+    thresholds = {}
+    for raw_type, raw_threshold in configured.items():
+        violation_type = aliases.get(str(raw_type).strip().lower())
+        if violation_type is None:
+            logger.warning(
+                "Ignoring unknown PPE_FACE_QUALITY_MIN_BY_VIOLATION key %r",
+                raw_type,
+            )
+            continue
+        if (not isinstance(raw_threshold, (int, float))
+                or not 0 <= raw_threshold <= 1):
+            raise ValueError(
+                "PPE_FACE_QUALITY_MIN_BY_VIOLATION values must be between 0 and 1"
+            )
+        thresholds[violation_type] = float(raw_threshold)
+    return thresholds
+
+def _json_env(key: str) -> dict:
     raw = _env(key)
     if not raw:
         return {}
@@ -24,7 +76,7 @@ def _json_env(key: str) -> Dict:
         raise ValueError(f"{key} must be a JSON object")
     return value
 
-def _camera_rois() -> Dict[str, List[List[float]]]:
+def _camera_rois() -> dict[str, list[list[float]]]:
     rois = _json_env("PPE_CAMERA_ROIS")
     validated = {}
     for camera_id, polygon in rois.items():
@@ -45,11 +97,42 @@ def _rtsp_url(host: str, channel: int) -> str:
     password = quote(_env(f"{nvr_prefix}_PASSWORD", _env("PPE_CAMERA_PASSWORD")), safe="")
     return f"rtsp://{username}:{password}@{host}:554/Streaming/Channels/{channel}"
 
+def sub_stream_url_for(main_url: str) -> str:
+    parsed = urlsplit(main_url)
+    match = re.fullmatch(
+        r"(/Streaming/Channels/\d+)01/?", parsed.path, flags=re.IGNORECASE,
+    )
+    if not match:
+        return main_url
+    return urlunsplit(parsed._replace(path=f"{match.group(1)}02"))
+
+def main_stream_url_for(sub_url: str) -> str:
+    parsed = urlsplit(sub_url)
+    match = re.fullmatch(
+        r"(/Streaming/Channels/\d+)02/?", parsed.path, flags=re.IGNORECASE,
+    )
+    if not match:
+        return sub_url
+    return urlunsplit(parsed._replace(path=f"{match.group(1)}01"))
+
+def camera_stream_urls_for(rtsp_url: str) -> tuple[str, str]:
+    parsed = urlsplit(rtsp_url)
+    match = re.fullmatch(
+        r"(/Streaming/Channels/\d+)(01|02)/?",
+        parsed.path,
+        flags=re.IGNORECASE,
+    )
+    if match and match.group(2) == "02":
+        return main_stream_url_for(rtsp_url), rtsp_url
+    if match and match.group(2) == "01":
+        return rtsp_url, sub_stream_url_for(rtsp_url)
+    return rtsp_url, rtsp_url
+
 # ---------------------------------------------------------------------------
 # 1. SEED DATA - synced on startup AND via the dashboard's "Sync Default
 #    Cameras" button / POST /api/cameras/sync-seed
 # ---------------------------------------------------------------------------
-SEED_AREA_GROUPS: List[Dict] = [
+SEED_AREA_GROUPS: list[dict] = [
     {"name": "Substation",        "description": "High-voltage electrical substation"},
     {"name": "MCC",                "description": "Motor control center rooms"},
     {"name": "SYLOC",               "description": "SYLOC processing area"},
@@ -61,7 +144,7 @@ SEED_AREA_GROUPS: List[Dict] = [
     {"name": "Process",                   "description": "Chemical process areas (e.g. Caustic)"},
 ]
 
-SEED_CAMERAS: List[Dict] = [
+SEED_CAMERAS: list[dict] = [
     {"camera_id": "CAM01", "name": "CAM01", "rtsp_url": _rtsp_url("192.169.0.65", 101),
      "required_ppe": ["helmet", "vest"]},
     {"camera_id": "CAM02", "name": "CAM02", "rtsp_url": _rtsp_url("192.169.0.65", 201),
@@ -71,7 +154,7 @@ SEED_CAMERAS: List[Dict] = [
     {"camera_id": "CAM06", "name": "CAM06", "rtsp_url": _rtsp_url("192.169.0.65", 601),
      "required_ppe": ["helmet", "vest"]},
     {"camera_id": "CAM07", "name": "CAM07", "rtsp_url": _rtsp_url("192.169.0.65", 701),
-     "required_ppe": ["helmet", "vest"]},
+     "required_ppe": ["helmet", "vest", "arc_flash_suit"]},
     {"camera_id": "CAM08", "name": "CAM08", "rtsp_url": _rtsp_url("192.169.0.65", 801),
      "required_ppe": ["helmet", "vest"]},
     {"camera_id": "CAM09", "name": "CAM09", "rtsp_url": _rtsp_url("192.169.0.65", 901),
@@ -107,23 +190,105 @@ SEED_CAMERAS: List[Dict] = [
     {"camera_id": "CAM24", "name": "CAM24", "rtsp_url": _rtsp_url("192.168.100.65", 1502),
      "required_ppe": ["helmet", "vest"]},
 ]
-RETIRED_SEED_CAMERA_IDS = ["CAM03", "CAM04"]
+for _camera in SEED_CAMERAS:
+    (
+        _camera["main_stream_url"],
+        _camera["sub_stream_url"],
+    ) = camera_stream_urls_for(_camera["rtsp_url"])
+RETIRED_SEED_CAMERA_IDS = [
+    "CAM03", "CAM04",
+    *(f"D{camera_number}" for camera_number in range(1, 21)),
+]
 
 # ---------------------------------------------------------------------------
 # 2. MODEL SETTINGS
 # ---------------------------------------------------------------------------
 MODEL_PATH: str = _env("PPE_MODEL_PATH", "models/best.pt")
-DEVICE: str = _env("PPE_DEVICE", "cpu")
+PHONE_MODEL_PATH: str = _env("PPE_PHONE_MODEL_PATH", "models/yolo26m.pt")
+DEVICE: str = _env("PPE_DEVICE", "auto")
+CPU_INFERENCE_THREADS: int = int(_env("PPE_CPU_THREADS", "4"))
+FACE_ENABLED: bool = _env_bool("PPE_FACE_ENABLED", False)
+FACE_VIOLATION_TYPES: frozenset[str] = _face_violation_types()
+FACE_TRACK_REUSE_SECONDS: float = float(
+    _env("PPE_FACE_TRACK_REUSE_SECONDS", "120")
+)
+FACE_QUALITY_MIN_BY_VIOLATION: dict[str, float] = (
+    _face_quality_min_by_violation()
+)
+FACE_DATASET_PATH: str = _env("PPE_FACE_DATASET_PATH", "dataset/faces")
+FACE_MODEL_NAME: str = _env("PPE_FACE_MODEL_NAME", "buffalo_l")
+FACE_MODEL_DIR: str = _env("PPE_FACE_MODEL_DIR", "models")
+FACE_LICENSE_ACCEPTED: bool = _env_bool(
+    "PPE_FACE_LICENSE_ACCEPTED", False,
+)
+FACE_REPORT_DIR: str = _env("PPE_FACE_REPORT_DIR", "dataset/faces/reports")
+FACE_KEEP_PHOTOS: bool = _env_bool("PPE_FACE_KEEP_PHOTOS", False)
+FACE_PHOTO_DIR: str = _env("PPE_FACE_PHOTO_DIR", "dataset/faces/enrolled_photos")
+FACE_ENCRYPTION_KEY: str = _env("PPE_FACE_ENCRYPTION_KEY")
+FACE_MIN_SIZE: int = int(_env("PPE_FACE_MIN_SIZE", "80"))
+FACE_MIN_SHARPNESS: float = float(_env("PPE_FACE_MIN_SHARPNESS", "40"))
+FACE_MIN_DETECTION_SCORE: float = float(_env("PPE_FACE_MIN_DETECTION_SCORE", "0.6"))
+FACE_MAX_YAW: float = float(_env("PPE_FACE_MAX_YAW", "35"))
+FACE_MAX_PITCH: float = float(_env("PPE_FACE_MAX_PITCH", "30"))
+FACE_OUTLIER_THRESHOLD: float = float(_env("PPE_FACE_OUTLIER_THRESHOLD", "0.35"))
+FACE_CROSS_ID_DUPLICATE_THRESHOLD: float = float(
+    _env("PPE_FACE_CROSS_ID_DUPLICATE_THRESHOLD", "0.85")
+)
+FACE_MATCH_THRESHOLD: float = float(_env("PPE_FACE_MATCH_THRESHOLD", "1.0"))
+FACE_SUGGEST_THRESHOLD: float = float(_env("PPE_FACE_SUGGEST_THRESHOLD", "1.0"))
+FACE_MIN_MARGIN: float = float(_env("PPE_FACE_MIN_MARGIN", "0.10"))
+FACE_MATCH_STRATEGY: str = _env("PPE_FACE_MATCH_STRATEGY", "max").lower()
+FACE_MATCH_TOP_K: int = int(_env("PPE_FACE_MATCH_TOP_K", "3"))
+FACE_BUFFER_FRAMES: int = int(_env("PPE_FACE_BUFFER_FRAMES", "4"))
+FACE_BUFFER_TTL_SECONDS: float = float(_env("PPE_FACE_BUFFER_TTL_SECONDS", "10"))
+FACE_JOB_POLL_SECONDS: float = float(_env("PPE_FACE_JOB_POLL_SECONDS", "1"))
+FACE_JOB_QUEUE_MAX: int = int(_env("PPE_FACE_JOB_QUEUE_MAX", "500"))
+FACE_MATCH_RETENTION_DAYS: int = int(_env("PPE_FACE_MATCH_RETENTION_DAYS", "365"))
+FACE_INCLUDE_IN_EMAIL: bool = _env_bool("PPE_FACE_INCLUDE_IN_EMAIL", False)
+if (FACE_MIN_SIZE < 1 or FACE_MIN_SHARPNESS < 0
+        or not 0 <= FACE_MIN_DETECTION_SCORE <= 1
+        or FACE_MAX_YAW <= 0 or FACE_MAX_PITCH <= 0
+        or not -1 <= FACE_OUTLIER_THRESHOLD <= 1
+        or not -1 <= FACE_CROSS_ID_DUPLICATE_THRESHOLD <= 1
+        or not isfinite(FACE_MATCH_THRESHOLD)
+        or not isfinite(FACE_SUGGEST_THRESHOLD)
+        or not -1 <= FACE_MATCH_THRESHOLD <= 1
+        or not -1 <= FACE_SUGGEST_THRESHOLD <= FACE_MATCH_THRESHOLD
+        or not 0 <= FACE_MIN_MARGIN <= 2
+        or FACE_MATCH_STRATEGY not in {"max", "top_k_mean"}
+        or FACE_MATCH_TOP_K < 1
+        or not 1 <= FACE_BUFFER_FRAMES <= 8
+        or not isfinite(FACE_TRACK_REUSE_SECONDS)
+        or FACE_TRACK_REUSE_SECONDS < 0
+        or any(not isfinite(value) for value in FACE_QUALITY_MIN_BY_VIOLATION.values())
+        or not isfinite(FACE_BUFFER_TTL_SECONDS)
+        or not 0 < FACE_BUFFER_TTL_SECONDS <= 30
+        or not isfinite(FACE_JOB_POLL_SECONDS)
+        or not 0 < FACE_JOB_POLL_SECONDS <= 60
+        or not 1 <= FACE_JOB_QUEUE_MAX <= 10000
+        or FACE_MATCH_RETENTION_DAYS < 0):
+    raise ValueError("Invalid optional face-recognition settings")
 CONFIDENCE_THRESHOLD: float = float(_env("PPE_CONF_THRESHOLD", "0.45"))
 IOU_THRESHOLD: float = float(_env("PPE_IOU_THRESHOLD", "0.45"))
-INFERENCE_IMG_SIZE: int = int(_env("PPE_IMG_SIZE", "640"))
+INFERENCE_IMG_SIZE: int = int(_env("PPE_IMG_SIZE", "960"))
+PHONE_CONFIDENCE_THRESHOLD: float = float(_env("PPE_PHONE_CONFIDENCE", "0.15"))
 FRAME_SKIP: int = int(_env("PPE_FRAME_SKIP", "2"))
-CLASS_CONFIDENCE_THRESHOLDS: Dict[str, float] = {
-    str(name): float(value) for name, value in _json_env("PPE_CLASS_CONFIDENCE").items()
+DETECT_FPS: float = float(_env("PPE_DETECT_FPS", "5"))
+CLASS_CONFIDENCE_THRESHOLDS: dict[str, float] = {
+    "no_helmet": 0.25,
+    "phone": PHONE_CONFIDENCE_THRESHOLD,
+    **{
+        str(name): float(value)
+        for name, value in _json_env("PPE_CLASS_CONFIDENCE").items()
+    },
 }
 if any(not 0 <= value <= 1 for value in CLASS_CONFIDENCE_THRESHOLDS.values()):
     raise ValueError("PPE_CLASS_CONFIDENCE values must be between 0 and 1")
-CLASS_BOX_FILTERS: Dict[str, Dict[str, float]] = {}
+if not 0 <= PHONE_CONFIDENCE_THRESHOLD <= 1:
+    raise ValueError("PPE_PHONE_CONFIDENCE must be between 0 and 1")
+if CPU_INFERENCE_THREADS < 1:
+    raise ValueError("PPE_CPU_THREADS must be at least 1")
+CLASS_BOX_FILTERS: dict[str, dict[str, float]] = {}
 for _name, _filter in _json_env("PPE_CLASS_BOX_FILTERS").items():
     if not isinstance(_filter, dict):
         raise ValueError(f"PPE_CLASS_BOX_FILTERS entry for {_name} must be a JSON object")
@@ -140,10 +305,11 @@ for _name, _filter in _json_env("PPE_CLASS_BOX_FILTERS").items():
         raise ValueError(f"min_aspect_ratio cannot exceed max_aspect_ratio for {_name}")
     CLASS_BOX_FILTERS[str(_name)] = _normalized_filter
 CAMERA_ROIS = _camera_rois()
-PPE_ASSOCIATION_REGIONS: Dict[str, List[float]] = {
+PPE_ASSOCIATION_REGIONS: dict[str, list[float]] = {
     "helmet": [0.0, 0.4],
     "mask": [0.0, 0.4],
     "goggles": [0.0, 0.45],
+    "arc_flash_suit": [0.0, 1.0],
     "vest": [0.15, 0.85],
     "gloves": [0.2, 1.0],
     "boots": [0.6, 1.0],
@@ -161,7 +327,7 @@ if PPE_COMPLIANCE_MODE not in {"explicit_negative", "positive_absence"}:
 # ---------------------------------------------------------------------------
 # 3. CLASS MAPPING
 # ---------------------------------------------------------------------------
-CLASS_MAP: Dict[str, str] = {
+CLASS_MAP: dict[str, str] = {
     "person": "person", "Person": "person",
     "helmet": "helmet", "Helmet": "helmet", "Hardhat": "helmet", "hardhat": "helmet",
     "no-helmet": "no_helmet", "No-Helmet": "no_helmet", "NO-Hardhat": "no_helmet", "no_hardhat": "no_helmet",
@@ -171,12 +337,33 @@ CLASS_MAP: Dict[str, str] = {
     "boots": "boots", "Safety Boots": "boots", "safety_shoe": "boots", "no-boots": "no_boots",
     "goggles": "goggles", "Goggles": "goggles", "no-goggle": "no_goggles",
     "mask": "mask", "Mask": "mask", "no-mask": "no_mask", "NO-Mask": "no_mask",
+    "arc_flash_suit": "arc_flash_suit",
+    "Arc Flash Suit": "arc_flash_suit",
+    "arc-flash-suit": "arc_flash_suit",
+    "arc flash suit": "arc_flash_suit",
+    "arcflash_suit": "arc_flash_suit",
+    "ArcFlashSuit": "arc_flash_suit",
+    "arc-flash suit": "arc_flash_suit",
+    "NO-Arc Flash Suit": "no_arc_flash_suit",
+    "No-Arc Flash Suit": "no_arc_flash_suit",
+    "No Arc Flash Suit": "no_arc_flash_suit",
+    "no_arc_flash_suit": "no_arc_flash_suit",
+    "no-arc-flash-suit": "no_arc_flash_suit",
+    "no arc flash suit": "no_arc_flash_suit",
+    "no_arcflash_suit": "no_arc_flash_suit",
+    "no-arcflash-suit": "no_arc_flash_suit",
+    "no arcflash suit": "no_arc_flash_suit",
+    "cell phone": "phone", "cell_phone": "phone", "mobile phone": "phone",
+    "phone": "phone",
 }
 
-POSITIVE_PPE_CLASSES = {"helmet", "vest", "gloves", "boots", "goggles", "mask"}
+POSITIVE_PPE_CLASSES = {
+    "helmet", "vest", "gloves", "boots", "goggles", "mask", "arc_flash_suit",
+}
 NEGATIVE_PPE_CLASSES = {
     "helmet": "no_helmet", "vest": "no_vest", "gloves": "no_gloves",
     "boots": "no_boots", "goggles": "no_goggles", "mask": "no_mask",
+    "arc_flash_suit": "no_arc_flash_suit",
 }
 
 # ---------------------------------------------------------------------------
@@ -184,7 +371,7 @@ NEGATIVE_PPE_CLASSES = {
 # ---------------------------------------------------------------------------
 MATCH_OVERLAP_THRESHOLD: float = 0.30
 VIOLATION_CONFIRM_FRAMES: int = int(_env("PPE_VIOLATION_CONFIRM_FRAMES", "5"))
-TEMPORAL_CONFIRMATION: Dict[str, Dict[str, int]] = {}
+TEMPORAL_CONFIRMATION: dict[str, dict[str, int]] = {}
 for _name, _confirmation in _json_env("PPE_TEMPORAL_CONFIRMATION").items():
     if not isinstance(_confirmation, dict) or set(_confirmation) - {"required", "window"}:
         raise ValueError(f"PPE_TEMPORAL_CONFIRMATION entry for {_name} needs required/window values")
@@ -193,6 +380,7 @@ for _name, _confirmation in _json_env("PPE_TEMPORAL_CONFIRMATION").items():
     if _required < 1 or _window < _required:
         raise ValueError(f"Invalid N-of-M confirmation values for {_name}: require 1 <= required <= window")
     TEMPORAL_CONFIRMATION[str(_name)] = {"required": _required, "window": _window}
+TEMPORAL_CONFIRMATION.setdefault("phone", {"required": 2, "window": 3})
 VIOLATION_COOLDOWN_SECONDS: float = float(_env("PPE_VIOLATION_COOLDOWN_SECONDS", "300"))
 if VIOLATION_COOLDOWN_SECONDS < 0:
     raise ValueError("PPE_VIOLATION_COOLDOWN_SECONDS cannot be negative")
@@ -232,6 +420,18 @@ PG_CONNECT_RETRY_SECONDS: int = int(_env("POSTGRES_CONNECT_RETRY_SECONDS", "20")
 SNAPSHOT_DIR: str = _env("PPE_SNAPSHOT_DIR", "snapshots")
 FEEDBACK_DATASET_DIR: str = _env("PPE_FEEDBACK_DATASET_DIR", "dataset/feedback")
 EVIDENCE_CLIP_DIR: str = _env("PPE_EVIDENCE_CLIP_DIR", "evidence/clips")
+EVIDENCE_CATEGORY_BY_VIOLATION = {
+    "helmet": "helmet_violations",
+    "no_helmet": "helmet_violations",
+    "phone_detected": "phone_detected",
+}
+
+
+def evidence_directory(base_dir: str, violation_type: str) -> str:
+    category = EVIDENCE_CATEGORY_BY_VIOLATION.get(violation_type)
+    return os.path.join(base_dir, category) if category else base_dir
+
+
 EVIDENCE_CLIP_PRE_SECONDS: float = float(_env("PPE_EVIDENCE_CLIP_PRE_SECONDS", "5"))
 EVIDENCE_CLIP_POST_SECONDS: float = float(_env("PPE_EVIDENCE_CLIP_POST_SECONDS", "5"))
 EVIDENCE_CLIP_FPS: float = float(_env("PPE_EVIDENCE_CLIP_FPS", "4"))
@@ -265,14 +465,30 @@ if API_HOST not in {"127.0.0.1", "localhost", "::1"} and not AUTH_ENABLED:
 if API_HOST not in {"127.0.0.1", "localhost", "::1"} and not AUTH_COOKIE_SECURE:
     raise ValueError("Public API binding requires PPE_COOKIE_SECURE=true")
 JPEG_QUALITY: int = int(_env("PPE_JPEG_QUALITY", "70"))
-BROADCAST_FPS: int = int(_env("PPE_BROADCAST_FPS", "24"))
+BROADCAST_FPS: int = min(
+    10, int(_env("PPE_TILE_FPS", _env("PPE_BROADCAST_FPS", "8")))
+)
+LIVE_TILE_WIDTH: int = int(_env("PPE_TILE_WIDTH", "640"))
+FULLSCREEN_WIDTH: int = int(_env("PPE_FULLSCREEN_WIDTH", "1920"))
+FULLSCREEN_FPS: int = min(15, int(_env("PPE_FULLSCREEN_FPS", "12")))
 CAMERA_STATUS_UPDATE_INTERVAL: float = float(_env("PPE_STATUS_UPDATE_INTERVAL", "4"))
 CAMERA_RECONNECT_INITIAL_SECONDS: float = float(_env("PPE_CAMERA_RECONNECT_INITIAL_SECONDS", "2"))
 CAMERA_RECONNECT_MAX_SECONDS: float = float(_env("PPE_CAMERA_RECONNECT_MAX_SECONDS", "60"))
 CAMERA_WATCHDOG_INTERVAL_SECONDS: float = float(_env("PPE_CAMERA_WATCHDOG_INTERVAL_SECONDS", "2"))
+CAMERA_FRAME_TIMEOUT_SECONDS: float = float(_env("PPE_CAMERA_FRAME_TIMEOUT_SECONDS", "10"))
+CAMERA_MAX_SIMULTANEOUS_RECONNECTS: int = int(
+    _env("PPE_CAMERA_MAX_SIMULTANEOUS_RECONNECTS", "4")
+)
 if (CAMERA_RECONNECT_INITIAL_SECONDS <= 0
         or CAMERA_RECONNECT_MAX_SECONDS < CAMERA_RECONNECT_INITIAL_SECONDS
-        or CAMERA_WATCHDOG_INTERVAL_SECONDS <= 0):
+        or CAMERA_WATCHDOG_INTERVAL_SECONDS <= 0
+        or CAMERA_FRAME_TIMEOUT_SECONDS <= 0
+        or CAMERA_MAX_SIMULTANEOUS_RECONNECTS < 1
+        or not isfinite(DETECT_FPS) or DETECT_FPS <= 0
+        or BROADCAST_FPS < 1
+        or LIVE_TILE_WIDTH < 64
+        or FULLSCREEN_FPS < 1
+        or FULLSCREEN_WIDTH < LIVE_TILE_WIDTH):
     raise ValueError("Invalid camera reconnect/watchdog configuration")
 
 # ---------------------------------------------------------------------------

@@ -4,8 +4,8 @@ import hashlib
 import hmac
 import secrets
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from datetime import UTC, datetime
+from typing import Any
 
 import bcrypt
 
@@ -39,7 +39,7 @@ def create_session_token(session_id: str, expires_at: int, secret: str) -> str:
     return f"{payload}.{encoded}"
 
 
-def parse_session_token(token: str, secret: str, now: Optional[int] = None) -> Optional[Tuple[str, int]]:
+def parse_session_token(token: str, secret: str, now: int | None = None) -> tuple[str, int] | None:
     try:
         session_id, expires_text, signature = token.split(".", 2)
         expires_at = int(expires_text)
@@ -53,7 +53,7 @@ def parse_session_token(token: str, secret: str, now: Optional[int] = None) -> O
         return None
 
 
-async def authenticate_token(token: str) -> Optional[Dict[str, Any]]:
+async def authenticate_token(token: str) -> dict[str, Any] | None:
     if not config.AUTH_ENABLED:
         return None
     parsed = parse_session_token(token, config.AUTH_SESSION_SECRET)
@@ -63,13 +63,13 @@ async def authenticate_token(token: str) -> Optional[Dict[str, Any]]:
     return await db.get_auth_session(session_id, expires_at)
 
 
-async def create_session(user: Dict[str, Any]):
+async def create_session(user: dict[str, Any]):
     session_id = secrets.token_urlsafe(32)
     csrf_token = secrets.token_urlsafe(32)
     expires_at = int(time.time()) + config.AUTH_SESSION_HOURS * 3600
     await db.create_auth_session(
         session_id, int(user["id"]), csrf_token,
-        datetime.fromtimestamp(expires_at, tz=timezone.utc),
+        datetime.fromtimestamp(expires_at, tz=UTC),
     )
     token = create_session_token(session_id, expires_at, config.AUTH_SESSION_SECRET)
     return token, csrf_token, expires_at

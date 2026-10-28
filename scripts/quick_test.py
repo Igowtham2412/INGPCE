@@ -1,13 +1,19 @@
 """quick_test.py - visually verify PPE detection on ONE camera, no DB needed."""
-import sys, os
+import os
+import sys
+
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_THIS_DIR)
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
-import argparse, cv2
-from app.detector import PPEDetector
-from app.compliance_engine import ComplianceEngine
+import argparse
+
+import cv2
+
 from app import config
+from app.compliance_engine import ComplianceEngine
+from app.detector import PPEDetector
+
 
 def draw(frame, statuses):
     for status in statuses:

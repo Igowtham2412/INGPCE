@@ -2,14 +2,29 @@
 detector.py — wraps Ultralytics YOLO, normalizes class names via config.CLASS_MAP.
 """
 import logging
+import threading
 from dataclasses import dataclass
-from typing import List
+from pathlib import Path
 
+import torch
 from ultralytics import YOLO
 
 from . import config
 
 logger = logging.getLogger("ppe.detector")
+_FALLBACK_INFERENCE_LOCK = threading.Lock()
+
+
+def _resolve_device(device: str) -> str:
+    requested = device.strip().lower()
+    if requested == "auto":
+        return "0" if torch.cuda.is_available() else "cpu"
+    if requested == "cuda":
+        if torch.cuda.is_available():
+            return "0"
+        logger.warning("PPE_DEVICE=cuda requested but CUDA is unavailable; falling back to CPU")
+        return "cpu"
+    return device
 
 
 @dataclass
@@ -41,8 +56,8 @@ def _point_in_polygon(point, polygon) -> bool:
         previous = current
     return inside
 
-def filter_detections(detections: List[Detection], frame_shape, camera_id: str = None,
-                      camera_rois=None) -> List[Detection]:
+def filter_detections(detections: list[Detection], frame_shape, camera_id: str = None,
+                      camera_rois=None) -> list[Detection]:
     frame_height, frame_width = frame_shape[:2]
     frame_area = frame_width * frame_height
     roi_polygons = camera_rois
@@ -86,39 +101,115 @@ def filter_detections(detections: List[Detection], frame_shape, camera_id: str =
 
 class PPEDetector:
     def __init__(self, model_path: str = config.MODEL_PATH, device: str = config.DEVICE):
-        logger.info(f"Loading PPE model from {model_path} on device={device}")
+        self.device = _resolve_device(device)
+        self.half = self.device != "cpu"
+        self._inference_lock = threading.Lock()
+        if self.device == "cpu":
+            torch.set_num_threads(config.CPU_INFERENCE_THREADS)
+        logger.info(
+            "Loading PPE model from %s on device=%s half=%s",
+            model_path, self.device, self.half,
+        )
         self.model = YOLO(model_path)
-        self.device = device
         self.names = self.model.names
+        phone_model_path = Path(config.PHONE_MODEL_PATH)
+        if not phone_model_path.is_file():
+            raise FileNotFoundError(
+                f"Phone detection model is missing: {phone_model_path}. "
+                "Run .\\.venv\\Scripts\\python.exe scripts\\download_phone_model.py"
+            )
+        logger.info(
+            "Loading phone detection model from %s on device=%s half=%s",
+            phone_model_path, self.device, self.half,
+        )
+        self.phone_model = YOLO(str(phone_model_path))
+        self.phone_names = self.phone_model.names
+        self.phone_class_ids = [
+            int(class_id)
+            for class_id, name in self.phone_names.items()
+            if config.CLASS_MAP.get(name, name.lower()) == "phone"
+        ]
+        if not self.phone_class_ids:
+            raise ValueError(
+                f"Phone model {phone_model_path} has no recognized cell phone class"
+            )
         self.normalized_classes = {
             config.CLASS_MAP.get(raw_name, raw_name.lower())
             for raw_name in self.names.values()
         }
+        self.normalized_classes.add("phone")
 
-    def infer(self, frame, camera_id: str = None, camera_rois=None) -> List[Detection]:
+    def _predict(self, model, **options):
+        options["device"] = self.device
+        half = getattr(self, "half", self.device != "cpu")
+        options["half"] = half
+        try:
+            return model.predict(**options)
+        except RuntimeError:
+            if self.device == "cpu":
+                raise
+            logger.warning(
+                "CUDA inference failed for %s; retrying on CPU",
+                type(model).__name__,
+                exc_info=True,
+            )
+            self.device = "cpu"
+            self.half = False
+            torch.set_num_threads(config.CPU_INFERENCE_THREADS)
+            options["device"] = self.device
+            options["half"] = self.half
+            return model.predict(**options)
+
+    def infer(self, frame, camera_id: str = None, camera_rois=None) -> list[Detection]:
+        with getattr(self, "_inference_lock", _FALLBACK_INFERENCE_LOCK):
+            return self._infer_locked(frame, camera_id, camera_rois)
+
+    def _infer_locked(self, frame, camera_id: str = None,
+                      camera_rois=None) -> list[Detection]:
         confidence = min(
             config.CONFIDENCE_THRESHOLD,
             config.TRACK_LOW_THRESHOLD,
             *config.CLASS_CONFIDENCE_THRESHOLDS.values(),
         )
-        results = self.model.predict(
-            source=frame, conf=confidence, iou=config.IOU_THRESHOLD,
-            imgsz=config.INFERENCE_IMG_SIZE, device=self.device, verbose=False,
-        )
-        detections: List[Detection] = []
-        if not results:
-            return filter_detections(detections, frame.shape, camera_id, camera_rois)
-        r = results[0]
-        if r.boxes is None:
-            return filter_detections(detections, frame.shape, camera_id, camera_rois)
-        for box in r.boxes:
-            cls_id = int(box.cls[0].item())
-            raw_name = self.names.get(cls_id, str(cls_id))
-            norm_name = config.CLASS_MAP.get(raw_name, raw_name.lower())
-            conf = float(box.conf[0].item())
-            x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
-            detections.append(Detection(
-                cls_raw=raw_name, cls_norm=norm_name, confidence=conf,
-                x1=x1, y1=y1, x2=x2, y2=y2, class_id=cls_id,
+        detections: list[Detection] = []
+        model_predictions = [
+            (
+                self.model,
+                self.names,
+                {
+                    "conf": confidence,
+                    "imgsz": config.INFERENCE_IMG_SIZE,
+                },
+            ),
+        ]
+        phone_model = getattr(self, "phone_model", None)
+        if phone_model is None:
+            logger.warning("Phone model is not initialized; running PPE inference only")
+        else:
+            model_predictions.append((
+                phone_model,
+                self.phone_names,
+                {
+                    "conf": config.PHONE_CONFIDENCE_THRESHOLD,
+                    "classes": self.phone_class_ids,
+                    "imgsz": config.INFERENCE_IMG_SIZE,
+                },
             ))
+        for model, names, options in model_predictions:
+            results = self._predict(
+                model, source=frame, iou=config.IOU_THRESHOLD,
+                verbose=False, **options,
+            )
+            if not results or results[0].boxes is None:
+                continue
+            for box in results[0].boxes:
+                cls_id = int(box.cls[0].item())
+                raw_name = names.get(cls_id, str(cls_id))
+                norm_name = config.CLASS_MAP.get(raw_name, raw_name.lower())
+                conf = float(box.conf[0].item())
+                x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
+                detections.append(Detection(
+                    cls_raw=raw_name, cls_norm=norm_name, confidence=conf,
+                    x1=x1, y1=y1, x2=x2, y2=y2, class_id=cls_id,
+                ))
         return filter_detections(detections, frame.shape, camera_id, camera_rois)

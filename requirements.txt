@@ -1,4 +1,4 @@
-ultralytics>=8.2.0
+ultralytics>=8.4.0
 lap>=0.5.12
 opencv-python>=4.9.0
 fastapi>=0.111.0
@@ -12,7 +12,18 @@ asyncpg>=0.29.0
 psycopg2-binary>=2.9.9
 pydantic>=2.6.0
 python-dotenv>=1.0.0
+cryptography==50.0.2
+openpyxl==3.1.5
 tzlocal>=5.2,<6
 bcrypt>=4.0.1
 alembic>=1.13
 SQLAlchemy>=2.0
+coverage>=7.6,<8
+pip-audit>=2.7,<3
+ruff>=0.4,<1
+playwright>=1.48,<2
+# Optional face-recognition runtime: install requirements-face-gpu.txt or
+# requirements-face-cpu.txt through scripts\install_face_stack.ps1.
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.14.1+cu130; sys_platform == "win32"
+torchvision==0.29.1+cu130; sys_platform == "win32"

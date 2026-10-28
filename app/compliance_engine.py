@@ -3,10 +3,9 @@ compliance_engine.py — matches PPE detections to persons, tracks violation
 streaks so momentary occlusion/bad angle doesn't trigger false alerts.
 """
 import logging
-from dataclasses import dataclass, field
 from collections import deque
+from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import List, Dict, Set, Tuple
 
 import numpy as np
 from ultralytics.engine.results import Boxes
@@ -35,13 +34,29 @@ def _in_person_region(person_box, item_box, ppe_type: str) -> bool:
     relative_y = (item_center_y - person_box[1]) / person_height
     return y1 <= relative_y <= y2
 
-def cooldown_active(last_alerted_at: Dict[Tuple[int, str], float],
-                    alert_key: Tuple[int, str], now: float, cooldown_seconds: float) -> bool:
+def _phone_belongs_to_person(person_box, phone_box) -> bool:
+    if _overlap_fraction_of_b(person_box, phone_box) >= config.MATCH_OVERLAP_THRESHOLD:
+        return True
+    x1, y1, x2, y2 = person_box
+    px1, py1, px2, py2 = phone_box
+    person_width = max(1, x2 - x1)
+    person_height = max(1, y2 - y1)
+    phone_center_x = (px1 + px2) / 2
+    phone_center_y = (py1 + py2) / 2
+    horizontal_margin = person_width * 0.25
+    vertical_margin = person_height * 0.1
+    return (
+        x1 - horizontal_margin <= phone_center_x <= x2 + horizontal_margin
+        and y1 - vertical_margin <= phone_center_y <= y2 + vertical_margin
+    )
+
+def cooldown_active(last_alerted_at: dict[tuple[int, str], float],
+                    alert_key: tuple[int, str], now: float, cooldown_seconds: float) -> bool:
     last_alert = last_alerted_at.get(alert_key)
     return last_alert is not None and now - last_alert < cooldown_seconds
 
-def prune_expired_cooldowns(last_alerted_at: Dict[Tuple[int, str], float],
-                            now: float, cooldown_seconds: float) -> Dict[Tuple[int, str], float]:
+def prune_expired_cooldowns(last_alerted_at: dict[tuple[int, str], float],
+                            now: float, cooldown_seconds: float) -> dict[tuple[int, str], float]:
     return {
         key: alerted_at for key, alerted_at in last_alerted_at.items()
         if now - alerted_at < cooldown_seconds
@@ -54,16 +69,18 @@ def violation_class_for(ppe_type: str) -> str:
 @dataclass
 class PersonStatus:
     track_id: int
-    box: Tuple[int, int, int, int]
-    present_ppe: Set[str] = field(default_factory=set)
-    missing_ppe: Set[str] = field(default_factory=set)
-    unknown_ppe: Set[str] = field(default_factory=set)
+    box: tuple[int, int, int, int]
+    present_ppe: set[str] = field(default_factory=set)
+    missing_ppe: set[str] = field(default_factory=set)
+    unknown_ppe: set[str] = field(default_factory=set)
+    phone_detected: bool = False
+    phone_box: tuple[int, int, int, int] | None = None
     is_violation: bool = False
 
 
 class ComplianceEngine:
-    def __init__(self, camera_id: str, required_ppe: List[str],
-                 model_classes: Set[str] = None):
+    def __init__(self, camera_id: str, required_ppe: list[str],
+                 model_classes: set[str] = None):
         self.camera_id = camera_id
         self.required_ppe = required_ppe
         self._unsupported_negative_classes = {
@@ -87,10 +104,10 @@ class ComplianceEngine:
             match_thresh=config.TRACK_MATCH_THRESHOLD,
             fuse_score=True,
         ))
-        self._observations: Dict[int, Dict[str, deque]] = {}
+        self._observations: dict[int, dict[str, deque]] = {}
 
     @property
-    def active_track_ids(self) -> Set[int]:
+    def active_track_ids(self) -> set[int]:
         return {
             track.track_id
             for track in self.tracker.tracked_stracks + self.tracker.lost_stracks
@@ -110,7 +127,7 @@ class ComplianceEngine:
         history.append(is_missing)
         return sum(history) >= settings["required"]
 
-    def evaluate(self, detections: List[Detection], frame_shape) -> List[PersonStatus]:
+    def evaluate(self, detections: list[Detection], frame_shape) -> list[PersonStatus]:
         persons = [d for d in detections if d.cls_norm == "person"]
         ppe_items = [d for d in detections if d.cls_norm != "person"]
         tracker_input = np.asarray(
@@ -135,6 +152,18 @@ class ComplianceEngine:
         results = []
         for track_id, (box, _) in tracked.items():
             present, missing, unknown = set(), set(), set()
+            matched_phone = next(
+                (
+                    item for item in ppe_items
+                    if item.cls_norm == "phone"
+                    and _phone_belongs_to_person(box, item.box)
+                ),
+                None,
+            )
+            phone_observed = matched_phone is not None
+            phone_detected = self._confirm_observation(
+                track_id, "phone", phone_observed,
+            )
             for req in self.required_ppe:
                 neg_cls = config.NEGATIVE_PPE_CLASSES.get(req)
                 explicit_negative = any(
@@ -179,6 +208,8 @@ class ComplianceEngine:
             results.append(PersonStatus(
                 track_id=track_id, box=box, present_ppe=present,
                 missing_ppe=confirmed_missing, unknown_ppe=unknown,
-                is_violation=len(confirmed_missing) > 0,
+                phone_detected=phone_detected,
+                phone_box=matched_phone.box if matched_phone else None,
+                is_violation=bool(confirmed_missing) or phone_detected,
             ))
         return results

@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app import config
-from app.main import RuleIn, app, _minimum_role
+from app.main import RuleIn, _minimum_role, app
 
 
 class PowerAutomateApiTests(unittest.TestCase):
@@ -92,7 +92,15 @@ class PowerAutomateApiTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             RuleIn(name="legacy rule", channels=["teams"])
 
-    def test_alert_rules_accept_only_helmet_violation_type(self):
+    def test_alert_rules_accept_helmet_and_phone_types(self):
+        phone_rule = RuleIn(name="phone rule", violation_type="phone_detected")
+        self.assertEqual(phone_rule.violation_type, "phone_detected")
+        arc_suit_rule = RuleIn(
+            name="arc suit rule", violation_type="no_arc_flash_suit",
+        )
+        self.assertEqual(arc_suit_rule.violation_type, "no_arc_flash_suit")
+
+    def test_alert_rules_reject_unimplemented_violation_types(self):
         with self.assertRaises(ValidationError):
             RuleIn(name="vest rule", violation_type="no_vest")
 
