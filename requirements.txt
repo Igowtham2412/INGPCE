@@ -22,8 +22,9 @@ coverage>=7.6,<8
 pip-audit>=2.7,<3
 ruff>=0.4,<1
 playwright>=1.48,<2
-# Optional face-recognition runtime: install requirements-face-gpu.txt or
-# requirements-face-cpu.txt through scripts\install_face_stack.ps1.
+# Face recognition uses InsightFace buffalo_l models provisioned separately.
+insightface==0.7.3
+onnxruntime>=1.18
 --extra-index-url https://download.pytorch.org/whl/cu130
 torch==2.14.1+cu130; sys_platform == "win32"
 torchvision==0.29.1+cu130; sys_platform == "win32"

@@ -11,9 +11,17 @@ from app.faces.face_readiness import get_face_readiness
 
 class FaceReadinessTests(unittest.TestCase):
     def test_readiness_lists_missing_dependencies_and_inputs(self):
-        with patch(
-            "app.faces.face_readiness.importlib.metadata.version",
-            side_effect=PackageNotFoundError,
+        with tempfile.TemporaryDirectory() as directory, patch(
+                "app.faces.face_readiness.importlib.metadata.version",
+                side_effect=PackageNotFoundError,
+        ), patch(
+                "app.faces.face_readiness.config.FACE_LICENSE_ACCEPTED", False,
+        ), patch(
+                "app.faces.face_readiness.config.FACE_ENABLED", False,
+        ), patch(
+                "app.faces.face_readiness.config.FACE_ENCRYPTION_KEY", "",
+        ), patch(
+                "app.faces.face_readiness.config.FACE_DATASET_PATH", directory,
         ):
             result = get_face_readiness(0)
 
@@ -23,16 +31,59 @@ class FaceReadinessTests(unittest.TestCase):
         self.assertIn("Review model terms and set PPE_FACE_LICENSE_ACCEPTED=true after authorization",
                       result["missing"])
         self.assertIn("Upload a validated consented face dataset", result["missing"])
+        self.assertIn(
+            "Configure PPE_FACE_ENCRYPTION_KEY in the local secret store",
+            result["missing"],
+        )
 
     def test_dataset_presence_ignores_gitkeep_and_reports(self):
-        with patch("app.faces.face_readiness.config.FACE_DATASET_PATH", "dataset/faces"):
-            result = get_face_readiness(0)
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / ".gitkeep").touch()
+            with patch(
+                "app.faces.face_readiness.config.FACE_DATASET_PATH", directory,
+            ):
+                result = get_face_readiness(0)
 
-        self.assertTrue(Path(result["dataset_directory_configured"]).as_posix().endswith("dataset/faces")
-                        or result["dataset_directory_configured"] == "dataset/faces")
+        self.assertEqual(result["dataset_directory_configured"], directory)
         self.assertFalse(result["dataset_present"])
 
+    def test_unlabelled_images_at_dataset_root_are_not_a_usable_roster(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "Image.jpg").write_bytes(b"not decoded by readiness")
+            with patch(
+                "app.faces.face_readiness.config.FACE_DATASET_PATH", directory,
+            ):
+                result = get_face_readiness(0)
+
+        self.assertFalse(result["dataset_present"])
+        self.assertFalse(result["excel_manifest_present"])
+
     def test_excel_manifest_is_detected_as_dataset_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "E001_Jane Doe").mkdir()
+            image_path = root / "E001_Jane Doe" / "photo.jpg"
+            image_path.write_bytes(b"synthetic-image")
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append([
+                "employee_code", "full_name", "department", "image_path",
+                "consent_recorded", "consent_reference", "consent_date",
+            ])
+            sheet.append([
+                "E001", "Example Person", "Operations",
+                "E001_Jane Doe/photo.jpg", True, "CONSENT-001", "2026-10-28",
+            ])
+            workbook.save(root / "employees.xlsx")
+            with patch(
+                "app.faces.face_readiness.config.FACE_DATASET_PATH", directory,
+            ):
+                result = get_face_readiness(0)
+
+        self.assertTrue(result["dataset_present"])
+        self.assertTrue(result["excel_manifest_present"])
+
+    def test_example_workbook_without_real_enrollment_images_is_not_ready(self):
         with tempfile.TemporaryDirectory() as directory:
             workbook = Workbook()
             workbook.active.append([
@@ -45,5 +96,18 @@ class FaceReadinessTests(unittest.TestCase):
             ):
                 result = get_face_readiness(0)
 
-        self.assertTrue(result["dataset_present"])
+        self.assertFalse(result["dataset_present"])
         self.assertTrue(result["excel_manifest_present"])
+
+    def test_invalid_encryption_key_is_reported_as_unconfigured(self):
+        with patch(
+            "app.faces.face_readiness.config.FACE_ENCRYPTION_KEY",
+            "not-a-valid-key",
+        ):
+            result = get_face_readiness(0)
+
+        self.assertFalse(result["encryption_key_configured"])
+        self.assertIn(
+            "Configure PPE_FACE_ENCRYPTION_KEY in the local secret store",
+            result["missing"],
+        )

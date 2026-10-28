@@ -21,15 +21,14 @@ def _face_violation_types() -> frozenset[str]:
     aliases = {
         "missing_helmet": "no_helmet",
         "no_helmet": "no_helmet",
-        "missing_vest": "no_vest",
-        "no_vest": "no_vest",
+        "no_arc_flash_suit": "no_arc_flash_suit",
         "phone_detected": "phone_detected",
     }
     configured = _env(
         "PPE_FACE_VIOLATION_TYPES",
-        "missing_helmet,missing_vest,phone_detected",
+        "no_helmet,no_arc_flash_suit,phone_detected",
     )
-    selected = set()
+    selected = {"no_helmet", "no_arc_flash_suit", "phone_detected"}
     for raw_value in configured.split(","):
         value = raw_value.strip().lower()
         if not value:
@@ -209,36 +208,40 @@ DEVICE: str = _env("PPE_DEVICE", "auto")
 CPU_INFERENCE_THREADS: int = int(_env("PPE_CPU_THREADS", "4"))
 FACE_ENABLED: bool = _env_bool("PPE_FACE_ENABLED", False)
 FACE_VIOLATION_TYPES: frozenset[str] = _face_violation_types()
-FACE_TRACK_REUSE_SECONDS: float = float(
-    _env("PPE_FACE_TRACK_REUSE_SECONDS", "120")
-)
 FACE_QUALITY_MIN_BY_VIOLATION: dict[str, float] = (
     _face_quality_min_by_violation()
 )
 FACE_DATASET_PATH: str = _env("PPE_FACE_DATASET_PATH", "dataset/faces")
-FACE_MODEL_NAME: str = _env("PPE_FACE_MODEL_NAME", "buffalo_l")
-FACE_MODEL_DIR: str = _env("PPE_FACE_MODEL_DIR", "models")
+FACE_MODEL_NAME: str = _env(
+    "PPE_FACE_MODEL_NAME", "insightface_buffalo_l",
+)
+FACE_MODEL_DIR: str = _env("PPE_FACE_MODEL_DIR", "models/face")
+FACE_PROVIDER: str = _env("PPE_FACE_PROVIDER", "auto").lower()
+FACE_YUNET_MODEL_FILENAME: str = "face_detection_yunet_2023mar.onnx"
+FACE_SFACE_MODEL_FILENAME: str = "face_recognition_sface_2021dec.onnx"
 FACE_LICENSE_ACCEPTED: bool = _env_bool(
     "PPE_FACE_LICENSE_ACCEPTED", False,
 )
 FACE_REPORT_DIR: str = _env("PPE_FACE_REPORT_DIR", "dataset/faces/reports")
-FACE_KEEP_PHOTOS: bool = _env_bool("PPE_FACE_KEEP_PHOTOS", False)
+FACE_KEEP_PHOTOS: bool = _env_bool("PPE_FACE_KEEP_PHOTOS", True)
 FACE_PHOTO_DIR: str = _env("PPE_FACE_PHOTO_DIR", "dataset/faces/enrolled_photos")
 FACE_ENCRYPTION_KEY: str = _env("PPE_FACE_ENCRYPTION_KEY")
 FACE_MIN_SIZE: int = int(_env("PPE_FACE_MIN_SIZE", "80"))
 FACE_MIN_SHARPNESS: float = float(_env("PPE_FACE_MIN_SHARPNESS", "40"))
 FACE_MIN_DETECTION_SCORE: float = float(_env("PPE_FACE_MIN_DETECTION_SCORE", "0.6"))
+FACE_MIN_BRIGHTNESS: float = float(_env("PPE_FACE_MIN_BRIGHTNESS", "25"))
+FACE_MAX_BRIGHTNESS: float = float(_env("PPE_FACE_MAX_BRIGHTNESS", "235"))
 FACE_MAX_YAW: float = float(_env("PPE_FACE_MAX_YAW", "35"))
 FACE_MAX_PITCH: float = float(_env("PPE_FACE_MAX_PITCH", "30"))
 FACE_OUTLIER_THRESHOLD: float = float(_env("PPE_FACE_OUTLIER_THRESHOLD", "0.35"))
 FACE_CROSS_ID_DUPLICATE_THRESHOLD: float = float(
     _env("PPE_FACE_CROSS_ID_DUPLICATE_THRESHOLD", "0.85")
 )
-FACE_MATCH_THRESHOLD: float = float(_env("PPE_FACE_MATCH_THRESHOLD", "1.0"))
-FACE_SUGGEST_THRESHOLD: float = float(_env("PPE_FACE_SUGGEST_THRESHOLD", "1.0"))
+FACE_MATCH_THRESHOLD: float = float(_env("PPE_FACE_MATCH_THRESHOLD", "0.60"))
+FACE_SUGGEST_THRESHOLD: float = float(_env("PPE_FACE_SUGGEST_THRESHOLD", "0.45"))
 FACE_MIN_MARGIN: float = float(_env("PPE_FACE_MIN_MARGIN", "0.10"))
 FACE_MATCH_STRATEGY: str = _env("PPE_FACE_MATCH_STRATEGY", "max").lower()
-FACE_MATCH_TOP_K: int = int(_env("PPE_FACE_MATCH_TOP_K", "3"))
+FACE_MATCH_TOP_K: int = int(_env("PPE_FACE_MATCH_TOP_K", "5"))
 FACE_BUFFER_FRAMES: int = int(_env("PPE_FACE_BUFFER_FRAMES", "4"))
 FACE_BUFFER_TTL_SECONDS: float = float(_env("PPE_FACE_BUFFER_TTL_SECONDS", "10"))
 FACE_JOB_POLL_SECONDS: float = float(_env("PPE_FACE_JOB_POLL_SECONDS", "1"))
@@ -247,6 +250,8 @@ FACE_MATCH_RETENTION_DAYS: int = int(_env("PPE_FACE_MATCH_RETENTION_DAYS", "365"
 FACE_INCLUDE_IN_EMAIL: bool = _env_bool("PPE_FACE_INCLUDE_IN_EMAIL", False)
 if (FACE_MIN_SIZE < 1 or FACE_MIN_SHARPNESS < 0
         or not 0 <= FACE_MIN_DETECTION_SCORE <= 1
+        or not 0 <= FACE_MIN_BRIGHTNESS < FACE_MAX_BRIGHTNESS <= 255
+        or FACE_PROVIDER not in {"auto", "cpu", "cuda"}
         or FACE_MAX_YAW <= 0 or FACE_MAX_PITCH <= 0
         or not -1 <= FACE_OUTLIER_THRESHOLD <= 1
         or not -1 <= FACE_CROSS_ID_DUPLICATE_THRESHOLD <= 1
@@ -258,8 +263,6 @@ if (FACE_MIN_SIZE < 1 or FACE_MIN_SHARPNESS < 0
         or FACE_MATCH_STRATEGY not in {"max", "top_k_mean"}
         or FACE_MATCH_TOP_K < 1
         or not 1 <= FACE_BUFFER_FRAMES <= 8
-        or not isfinite(FACE_TRACK_REUSE_SECONDS)
-        or FACE_TRACK_REUSE_SECONDS < 0
         or any(not isfinite(value) for value in FACE_QUALITY_MIN_BY_VIOLATION.values())
         or not isfinite(FACE_BUFFER_TTL_SECONDS)
         or not 0 < FACE_BUFFER_TTL_SECONDS <= 30

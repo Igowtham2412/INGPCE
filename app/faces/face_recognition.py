@@ -20,8 +20,7 @@ from .. import config, db
 from .face_dataset import (
     FaceAnalyzer,
     ImageRejected,
-    InsightFaceAnalyzer,
-    _cosine_similarity,
+    create_face_analyzer,
     _encryption_key,
     decrypt_embedding,
     encrypt_face_crop,
@@ -30,7 +29,6 @@ from .face_dataset import (
 logger = logging.getLogger("ppe.face_recognition")
 _MAX_TRACK_BUFFERS = 64
 _MAX_PENDING_CROPS = 64
-_MAX_PENDING_ENQUEUE_TASKS = 64
 _CAPTURE_QUEUE_SIZE = 4
 _JPEG_QUALITY = 78
 
@@ -46,15 +44,52 @@ def rank_person_scores(
         raise ValueError("Invalid face match strategy")
     if top_k < 1:
         raise ValueError("Face match top-k must be positive")
+    vectors: list[np.ndarray] = []
+    owners: list[int] = []
+    normalized_query = np.asarray(query, dtype=np.float32).reshape(-1)
+    if normalized_query.size == 0:
+        return []
+    for person_id, person in gallery.items():
+        for vector in person["embeddings"]:
+            normalized = np.asarray(vector, dtype=np.float32).reshape(-1)
+            norm = float(np.linalg.norm(normalized))
+            if (
+                normalized.size == normalized_query.size
+                and norm > 1e-8 and np.isfinite(normalized).all()
+            ):
+                vectors.append(normalized / norm)
+                owners.append(person_id)
+    if not vectors:
+        return []
+    matrix = np.stack(vectors)
+    query_norm = float(np.linalg.norm(normalized_query))
+    if query_norm <= 1e-8 or not np.isfinite(normalized_query).all():
+        return []
+    normalized_query = normalized_query / query_norm
+    try:
+        import faiss
+    except ImportError:
+        scores = matrix @ normalized_query
+    else:
+        index = faiss.IndexFlatIP(matrix.shape[1])
+        index.add(np.ascontiguousarray(matrix))
+        scores, _ = index.search(
+            np.ascontiguousarray(normalized_query.reshape(1, -1), dtype=np.float32),
+            len(vectors),
+        )
+        scores = scores[0]
+    grouped: dict[int, list[float]] = {}
+    for person_id, score in zip(owners, scores):
+        grouped.setdefault(person_id, []).append(float(score))
     ranked = []
     for person_id, person in gallery.items():
-        scores = sorted(
-            (_cosine_similarity(query, vector) for vector in person["embeddings"]),
-            reverse=True,
-        )
-        if not scores:
+        person_scores = sorted(grouped.get(person_id, ()), reverse=True)
+        if not person_scores:
             continue
-        score = max(scores) if strategy == "max" else float(np.mean(scores[:top_k]))
+        score = (
+            max(person_scores) if strategy == "max"
+            else float(np.mean(person_scores[:top_k]))
+        )
         ranked.append({
             "person_id": person_id,
             "employee_code": person["employee_code"],
@@ -70,22 +105,24 @@ def decide_face_match(
         suggest_threshold: float, min_margin: float,
 ) -> tuple[str, int | None, float | None, float | None, list[dict[str, Any]]]:
     if not ranked:
-        return "Not identified", None, None, None, []
+        return "UNKNOWN", None, None, None, []
     best = ranked[0]
     margin = (
         float(best["similarity"] - ranked[1]["similarity"])
         if len(ranked) > 1 else 0.0
     )
     score = float(best["similarity"])
-    if score > match_threshold and margin > min_margin:
-        status = "Identified"
-    elif score > suggest_threshold:
-        status = "Suggested"
+    if score >= match_threshold and (len(ranked) == 1 or margin > min_margin):
+        status = "MATCHED"
+    elif score >= suggest_threshold:
+        status = "NEEDS_REVIEW"
     else:
-        return "Not identified", None, score, margin, []
+        return "UNKNOWN", None, score, margin, [
+            dict(candidate) for candidate in ranked[:5]
+        ]
     return (
         status, int(best["person_id"]), score, margin,
-        [dict(candidate) for candidate in ranked[:3]],
+        [dict(candidate) for candidate in ranked[:5]],
     )
 
 
@@ -225,7 +262,7 @@ def _lower_face_worker_priority() -> bool:
 
 
 class FaceRecognitionWorker:
-    def __init__(self, analyzer_factory=InsightFaceAnalyzer):
+    def __init__(self, analyzer_factory=create_face_analyzer):
         self._analyzer_factory = analyzer_factory
         self._analyzer: FaceAnalyzer | None = None
         self._capture_queue: asyncio.Queue = asyncio.Queue(
@@ -300,7 +337,7 @@ class FaceRecognitionWorker:
         except Exception as exc:
             logger.warning("Could not queue tracked-person frame (%s)", type(exc).__name__)
 
-    def enqueue_confirmed_incident(
+    def enqueue_violation(
             self, incident_id: int, camera_id: str, track_id: int,
             violation_type: str,
     ) -> None:
@@ -308,9 +345,10 @@ class FaceRecognitionWorker:
             return
         if not violation_requires_face_recognition(violation_type):
             return
-        if len(self._enqueue_tasks) >= _MAX_PENDING_ENQUEUE_TASKS:
+        if len(self._enqueue_tasks) >= _MAX_PENDING_CROPS:
             logger.warning(
-                "Face-recognition enqueue backlog reached capacity; job deferred"
+                "Face-recognition enqueue capacity reached; incident %s will be recovered by the queue sweep",
+                incident_id,
             )
             return
         key = (camera_id, track_id)
@@ -324,6 +362,14 @@ class FaceRecognitionWorker:
         self._enqueue_tasks.add(task)
         task.add_done_callback(self._enqueue_tasks.discard)
 
+    def enqueue_confirmed_incident(
+            self, incident_id: int, camera_id: str, track_id: int,
+            violation_type: str,
+    ) -> None:
+        self.enqueue_violation(
+            incident_id, camera_id, track_id, violation_type,
+        )
+
     async def _enqueue_job(self, incident_id: int) -> None:
         try:
             queued = await db.enqueue_face_recognition_job(incident_id)
@@ -332,7 +378,7 @@ class FaceRecognitionWorker:
         except Exception as exc:
             self._pending_crops.pop(incident_id, None)
             logger.error(
-                "Could not queue confirmed face-recognition job (%s)",
+                "Could not queue face-recognition job (%s)",
                 type(exc).__name__,
             )
 
@@ -377,6 +423,7 @@ class FaceRecognitionWorker:
 
     async def _recognition_loop(self) -> None:
         next_retention_check = time.monotonic()
+        next_reconciliation = time.monotonic()
         while True:
             if (
                 config.FACE_MATCH_RETENTION_DAYS > 0
@@ -386,6 +433,15 @@ class FaceRecognitionWorker:
                 next_retention_check = (
                     time.monotonic() + 24 * 60 * 60
                 )
+            if time.monotonic() >= next_reconciliation:
+                try:
+                    await db.enqueue_missing_face_recognition_jobs()
+                except Exception as exc:
+                    logger.error(
+                        "Could not reconcile unqueued face-recognition jobs (%s)",
+                        type(exc).__name__,
+                    )
+                next_reconciliation = time.monotonic() + 30
             try:
                 job = await db.claim_face_recognition_job()
             except Exception as exc:
@@ -424,23 +480,19 @@ class FaceRecognitionWorker:
         try:
             if not violation_requires_face_recognition(job["violation_type"]):
                 raise ValueError("ineligible_violation")
-            source_incident_id = await db.reuse_face_match_for_track(
-                incident_id,
-                job["camera_id"],
-                int(job["track_id"]),
-                config.FACE_TRACK_REUSE_SECONDS,
-                sorted(config.FACE_VIOLATION_TYPES),
-            )
-            if source_incident_id is not None:
-                await self._audit_reused_result(
-                    incident_id, source_incident_id,
-                )
-                return
-
             analyzer = self._analyzer
             if analyzer is None:
                 analyzer = await self._run_blocking(self._analyzer_factory)
                 self._analyzer = analyzer
+            settings = await db.get_face_match_settings()
+            thresholds_used = {
+                "high_threshold": float(settings["high_threshold"]),
+                "low_threshold": float(settings["low_threshold"]),
+                "minimum_margin": float(settings["minimum_margin"]),
+                "quality_min_by_violation": settings[
+                    "quality_min_by_violation"
+                ],
+            }
 
             crops: list[tuple[np.ndarray, str, list[int] | None]] = []
             buffered_crops = self._pending_crops.pop(incident_id, [])
@@ -471,16 +523,14 @@ class FaceRecognitionWorker:
                 raise FileNotFoundError("incident evidence image unavailable")
             best_face, rejected_reasons = await self._run_blocking(
                 _best_face_from_crops, analyzer, crops,
-                config.FACE_QUALITY_MIN_BY_VIOLATION.get(
+                thresholds_used["quality_min_by_violation"].get(
                     job["violation_type"], 0.0,
                 ),
             )
             elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
             if best_face is None:
                 status = (
-                    "No face found"
-                    if not rejected_reasons or set(rejected_reasons) == {"no_face"}
-                    else "Not identified"
+                    "FACE_NOT_VISIBLE"
                 )
                 await db.complete_face_recognition_job(
                     incident_id, status, None, None, None,
@@ -489,6 +539,8 @@ class FaceRecognitionWorker:
                         "processing_ms": elapsed_ms,
                     },
                     None, [], analyzer.model_name, analyzer.model_version,
+                    source=job.get("source", "live"),
+                    thresholds=thresholds_used,
                 )
                 await self._audit_result(incident_id, status)
                 return
@@ -502,8 +554,9 @@ class FaceRecognitionWorker:
                 config.FACE_MATCH_STRATEGY, config.FACE_MATCH_TOP_K,
             )
             status, matched_person_id, score, margin, candidates = decide_face_match(
-                ranked, config.FACE_MATCH_THRESHOLD,
-                config.FACE_SUGGEST_THRESHOLD, config.FACE_MIN_MARGIN,
+                ranked, thresholds_used["high_threshold"],
+                thresholds_used["low_threshold"],
+                thresholds_used["minimum_margin"],
             )
             face_quality = {
                 **best_face["measurements"],
@@ -513,7 +566,7 @@ class FaceRecognitionWorker:
                 "processing_ms": elapsed_ms,
             }
             stored_face_crop = None
-            if status in {"Identified", "Suggested"}:
+            if best_face is not None:
                 stored_face_crop = await self._run_blocking(
                     _encrypt_recognized_face_crop, best_face, key,
                 )
@@ -522,6 +575,8 @@ class FaceRecognitionWorker:
                 face_quality, best_face["absolute_bbox"], candidates,
                 analyzer.model_name, analyzer.model_version,
                 stored_face_crop,
+                source=job.get("source", "live"),
+                thresholds=thresholds_used,
             )
             await self._audit_result(incident_id, status)
         except Exception as exc:

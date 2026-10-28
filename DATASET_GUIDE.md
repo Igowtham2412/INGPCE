@@ -31,11 +31,41 @@ E001          | Jane Doe  | Operations | E001_Jane Doe\image01.jpg | true | CONS
 ```
 
 Use `dataset\faces_manifest.example.xlsx` and copy it to
-`dataset\faces\employees.xlsx`. `image_path` must point to a JPG, JPEG, or PNG
-inside the dataset. Alternatively, use `employees.csv` with the same columns.
+`dataset\faces\employees.xlsx`, then replace all sample rows with actual
+consented employee records. The example workbook is not an enrollment roster.
+`image_path` must point to a JPG, JPEG, or PNG inside the dataset. Loose images
+directly under `dataset\faces\` are not associated with an identity and will
+not be enrolled. Alternatively, use `employees.csv` with the same columns.
 Do not put multiple manifests in the dataset root. Folder-only imports (no
 manifest) are also supported and use the explicit bulk-consent confirmation.
 `openpyxl==3.1.5` is installed with the application to read Excel.
+
+### Enroll from the dashboard
+
+An authenticated Admin or Manager can open **Face Matches → Enroll Employee**,
+enter the employee ID, name, and department, select a JPG/PNG photo, and
+confirm that the employee notice and documented consent are in place. If
+`employees.xlsx` does not exist, the form creates it. The uploaded photo is
+checked for one quality-acceptable face, normalized to JPEG, stored under
+`dataset\faces\enrolled_photos\<employee-id>\`, added as a row in the workbook,
+and imported into the encrypted enrollment index. Repeated uploads for the
+same employee add photos only when the ID, name, and department agree.
+
+The consent checkbox is an operator attestation, not a substitute for keeping
+the underlying employee notice and consent documentation. Enrollments remain
+local and access-controlled. A single photo per person is a weak enrollment;
+add several suitable photos and calibrate against representative site footage
+before relying on identity results. Matching is disabled by default. When
+enabled, it runs asynchronously for every `no_helmet`, `no_arc_flash_suit`,
+and `phone_detected` violation at creation time, irrespective of its review
+status. It never runs for `no_vest`, never reprocesses a result after a status
+change, and only reruns when a reviewer explicitly requests it. Example
+thresholds in `.env.example` are provisional and are not calibrated for this
+site. A result is a human-review suggestion, not a disciplinary decision.
+
+Admins and Managers can request a resumable historian backfill from the Face
+Matches tab. Select the date range, camera(s), and eligible violation types;
+already processed incidents are skipped.
 
 ```powershell
 Copy-Item dataset\faces_manifest.example.xlsx dataset\faces\employees.xlsx
@@ -56,16 +86,15 @@ Copy-Item dataset\faces_manifest.example.xlsx dataset\faces\employees.xlsx
   `consent_reference`. Folder imports require the confirming administrator's
   name, date, and internal consent reference on the command line. Maintain
   the underlying consent documentation and employee notice.
-- A model license is separate from employee consent. Do not load or download
-  model weights until the organization has confirmed the model license permits
-  the intended commercial use. `buffalo_l` is restricted to non-commercial
-  research by the InsightFace model terms.
+- A model license is separate from employee consent. The configured analyzer
+  uses InsightFace `buffalo_l` (SCRFD face detection and 512-D ArcFace
+  embeddings). Review the applicable InsightFace and model-pack terms and
+  obtain organizational authorization before provisioning any weights.
 
 ## When the dataset arrives
 
-Run commands from `C:\INGPCS` in PowerShell. Replace the example consent
-details, URL, and checksum with the approved in-house values. Do not put
-secrets in command history or source control.
+Run commands from `C:\INGPCS` in PowerShell. Do not put secrets in command
+history or source control.
 
 1. **Validate without loading a model.** For folder-only layout:
 
@@ -87,25 +116,24 @@ secrets in command history or source control.
    Fix every validation error and review duplicate/low-photo warnings. The
    validator checks names/layout, file types, image decoding, duplicate hashes,
    consent columns, manifest image paths, and per-person photo counts without
-   InsightFace.
+   loading the face models.
 
 2. **Review model authorization.** Only after the license terms and commercial
    authorization have been approved by the responsible owner, manually set
    `PPE_FACE_LICENSE_ACCEPTED=true` in the local `.env`. Do not commit `.env`.
 
-3. **Download the licensed model.** Obtain an HTTPS ZIP URL and a trusted
-   SHA-256 from the authorized model supplier, then run:
+3. **Provision InsightFace buffalo_l.** After model-license review, set
+   `PPE_FACE_LICENSE_ACCEPTED=true` in the local `.env`, then run:
 
    ```powershell
-   .\.venv\Scripts\python.exe scripts\download_face_model.py `
-     --url "https://authorized-supplier.example/model.zip" `
-     --sha256 "<64-character-trusted-sha256>"
+   .\.venv\Scripts\python.exe scripts\download_insightface_model.py
    ```
 
-   Model name/root are selected with `PPE_FACE_MODEL_NAME` and
-   `PPE_FACE_MODEL_DIR`. The downloader checks the flag before network access,
-   verifies the archive hash, rejects unsafe archive paths, and refuses to
-   overwrite an existing model directory.
+   Install the optional InsightFace and ONNX Runtime packages from
+   `requirements.txt` first if they are not installed. The provisioning
+   script checks the explicit acceptance flag and stores the buffalo_l model
+   pack under `<PPE_FACE_MODEL_DIR>\models\buffalo_l` (default:
+   `models\face\models\buffalo_l`).
 
 4. **Run a no-write model dry run.** This processes images, checks face
    quality, and writes a private CSV summary but does not update the database:
@@ -138,16 +166,27 @@ secrets in command history or source control.
    and resolve its flagged duplicate/outlier items. A Safety Manager/Admin
    can also import through the dashboard and review the report in Face Matches.
 
-6. **Calibrate on in-house data.** Use real, consented incident crops under
-   `dataset\face_test_crops\`, organized by camera, violation type, and identity:
+6. **Calibrate on in-house data.** Use real, consented incident crops labeled
+   by camera, violation type, and identity. A flat crop folder can use a CSV
+   manifest. Create a blank one with:
+
+   ```powershell
+   .\.venv\Scripts\python.exe scripts\create_face_calibration_manifest.py `
+     --images dataset\feedback\confirmed\images `
+     --output dataset\feedback\confirmed\images\face_calibration_labels.csv
+   ```
+
+   Fill `camera_id`, `violation_type`, and `employee_id` for each row.
+   `employee_id` must be an enrolled employee code or `not_in_dataset` for
+   an unknown person. You can instead use the folder layout below:
 
    ```text
-   dataset\face_test_crops\
+   dataset\face_incident_calibration\
      CAM01\
-       missing_helmet\
+       no_helmet\
          E001\*.jpg
          not_in_dataset\*.jpg
-       missing_vest\
+       no_arc_flash_suit\
          E001\*.jpg
          not_in_dataset\*.jpg
        phone_detected\
@@ -155,15 +194,15 @@ secrets in command history or source control.
          not_in_dataset\*.jpg
    ```
 
-   The violation folders may also use `no_helmet` and `no_vest`. Every known
-   identity folder must match an enrolled employee code. `not_in_dataset`
-   samples represent unknown people and are used only for evaluation; they
-   are not imported or enrolled.
+   Do not use `no_vest` as an identity-match evaluation type; PPE face
+   matching excludes it. Every known identity folder must match an enrolled
+   employee code. `not_in_dataset` samples represent unknown people and are
+   evaluation-only; they are not imported or enrolled.
 
    ```powershell
    .\.venv\Scripts\python.exe scripts\calibrate_face_thresholds.py `
      --dataset dataset\faces `
-     --incident-crops dataset\face_test_crops `
+     --incident-crops dataset\feedback\confirmed\images\face_calibration_labels.csv `
      --target-far 0.001 `
      --consent-name "Approving Admin" `
      --consent-date YYYY-MM-DD `

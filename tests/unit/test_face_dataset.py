@@ -1,6 +1,6 @@
 import base64
 import csv
-import sys
+import threading
 import tempfile
 import types
 import unittest
@@ -16,7 +16,7 @@ from app.faces import face_dataset
 from app.faces.face_dataset import (
     ConsentError,
     ImageRejected,
-    InsightFaceAnalyzer,
+    OpenCVZooFaceAnalyzer,
     _quality_approved_face,
     decrypt_embedding,
     decrypt_face_crop,
@@ -74,7 +74,7 @@ class _MemoryFaceRepository:
 
     async def upsert_face_enrollment(
             self, employee_code, full_name, department, consent_basis,
-            consent_date, enrolled_by):
+            consent_date, enrolled_by, designation=None):
         current = self.people.get(employee_code)
         if current is None:
             current = {
@@ -87,6 +87,7 @@ class _MemoryFaceRepository:
         current.update({
             "full_name": full_name,
             "department": department,
+            "designation": designation,
             "consent_recorded": True,
             "consent_basis": consent_basis,
             "consent_date": consent_date,
@@ -241,70 +242,87 @@ class FaceQualityTests(unittest.TestCase):
         with self.assertRaisesRegex(ImageRejected, "non_frontal_yaw"):
             _quality_approved_face(_FakeFace(pose=(70, 0)), image)
 
-    def test_insightface_analyzer_rejects_zero_and_multiple_faces(self):
-        analyzer = InsightFaceAnalyzer.__new__(InsightFaceAnalyzer)
-        analyzer.app = type("App", (), {"get": lambda _self, _image: []})()
-        image = np.zeros((100, 100, 3), dtype=np.uint8)
+    def test_opencv_analyzer_rejects_zero_and_multiple_faces(self):
+        image = np.zeros((160, 160, 3), dtype=np.uint8)
+        analyzer = OpenCVZooFaceAnalyzer.__new__(OpenCVZooFaceAnalyzer)
+        analyzer._lock = threading.Lock()
+        analyzer._detector = types.SimpleNamespace(
+            setInputSize=lambda _size: None,
+            detect=lambda _image: (None, None),
+        )
+        analyzer._recognizer = types.SimpleNamespace()
         with self.assertRaisesRegex(ImageRejected, "no_face"):
             analyzer.analyze(image)
-        analyzer.app = type(
-            "App", (), {"get": lambda _self, _image: [object(), object()]}
-        )()
+        analyzer._detector.detect = lambda _image: (
+            None, np.zeros((2, 15), dtype=np.float32),
+        )
         with self.assertRaisesRegex(ImageRejected, "multiple_faces"):
             analyzer.analyze(image)
 
-    def test_insightface_model_requires_explicit_license_approval(self):
+    def test_opencv_analyzer_aligns_and_normalizes_a_single_face_embedding(self):
+        image = np.random.default_rng(42).integers(
+            0, 256, (160, 160, 3), dtype=np.uint8,
+        )
+        face_row = np.asarray([
+            20, 20, 100, 100,
+            45, 50, 75, 50, 60, 65, 50, 85, 70, 85,
+            0.99,
+        ], dtype=np.float32)
+        analyzer = OpenCVZooFaceAnalyzer.__new__(OpenCVZooFaceAnalyzer)
+        analyzer._lock = threading.Lock()
+        analyzer._detector = types.SimpleNamespace(
+            setInputSize=lambda _size: None,
+            detect=lambda _image: (None, face_row[None, :]),
+        )
+        analyzer._recognizer = types.SimpleNamespace(
+            alignCrop=lambda _image, _row: np.zeros(
+                (112, 112, 3), dtype=np.uint8,
+            ),
+            feature=lambda _crop: np.asarray([[3.0, 4.0]], dtype=np.float32),
+        )
+
+        embedding, measurements = analyzer.analyze(image)
+
+        np.testing.assert_allclose(embedding, [0.6, 0.8])
+        self.assertGreater(measurements["quality_score"], 0.7)
+        self.assertEqual(measurements["bbox"], [20, 20, 120, 120])
+
+    def test_opencv_zoo_model_requires_explicit_license_approval(self):
         with patch.object(face_dataset.config, "FACE_LICENSE_ACCEPTED", False):
             with self.assertRaisesRegex(
                     face_dataset.FaceModelUnavailable, "authorization"):
-                InsightFaceAnalyzer()
+                OpenCVZooFaceAnalyzer()
 
-    def test_insightface_inference_falls_back_to_cpu_after_gpu_failure(self):
-        calls = []
-
-        class _FaceAnalysis:
-            def __init__(self, name, providers):
-                self.providers = providers
-                calls.append(providers)
-
-            def prepare(self, **_kwargs):
-                return None
-
-            def get(self, _image):
-                if self.providers[0] == "CUDAExecutionProvider":
-                    raise RuntimeError("GPU provider failed")
-                return []
-
+    def test_opencv_zoo_analyzer_loads_both_local_models(self):
+        detector = types.SimpleNamespace(
+            setInputSize=lambda _size: None,
+            detect=lambda _image: (None, None),
+        )
+        recognizer = types.SimpleNamespace()
         with tempfile.TemporaryDirectory() as directory:
-            model_pack = Path(directory) / "buffalo_l"
-            model_pack.mkdir()
-            (model_pack / "detector.onnx").write_bytes(b"local model bytes")
-
-            ort = types.ModuleType("onnxruntime")
-            ort.get_available_providers = lambda: [
-                "CUDAExecutionProvider", "CPUExecutionProvider",
-            ]
-            insightface = types.ModuleType("insightface")
-            insightface.__path__ = []
-            app_module = types.ModuleType("insightface.app")
-            app_module.FaceAnalysis = _FaceAnalysis
-            with patch.dict(sys.modules, {
-                "onnxruntime": ort,
-                "insightface": insightface,
-                "insightface.app": app_module,
-            }), patch.object(
+            model_dir = Path(directory)
+            (model_dir / face_dataset.config.FACE_YUNET_MODEL_FILENAME).write_bytes(
+                b"local YuNet model",
+            )
+            (model_dir / face_dataset.config.FACE_SFACE_MODEL_FILENAME).write_bytes(
+                b"local SFace model",
+            )
+            with patch.object(
                 face_dataset.config, "FACE_LICENSE_ACCEPTED", True,
             ), patch.object(
                 face_dataset.config, "FACE_MODEL_DIR", directory,
             ), patch.object(
-                face_dataset.config, "FACE_MODEL_NAME", "buffalo_l",
-            ):
-                analyzer = InsightFaceAnalyzer()
+                face_dataset.cv2.FaceDetectorYN, "create", return_value=detector,
+            ) as create_detector, patch.object(
+                face_dataset.cv2.FaceRecognizerSF, "create", return_value=recognizer,
+            ) as create_recognizer:
+                analyzer = OpenCVZooFaceAnalyzer()
                 with self.assertRaisesRegex(ImageRejected, "no_face"):
                     analyzer.analyze(np.zeros((20, 20, 3), dtype=np.uint8))
 
-        self.assertEqual(analyzer.runtime_provider, "CPUExecutionProvider")
-        self.assertEqual(len(calls), 2)
+        create_detector.assert_called_once()
+        create_recognizer.assert_called_once()
+        self.assertEqual(analyzer.runtime_provider, "OpenCV DNN CPU")
 
     def test_embeddings_are_authenticated_and_encrypted(self):
         key = b"f" * 32
@@ -335,7 +353,7 @@ class FaceDatasetImportTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(face_dataset.config, "FACE_REPORT_DIR", str(reports)), patch(
                 "app.faces.face_dataset.db.write_audit_log", side_effect=AssertionError,
             ), patch(
-                "app.faces.face_dataset.InsightFaceAnalyzer", side_effect=AssertionError,
+                "app.faces.face_dataset.OpenCVZooFaceAnalyzer", side_effect=AssertionError,
             ):
                 result = await import_face_dataset(root, dry_run=True)
                 self.assertTrue(Path(result["report_path"]).is_file())

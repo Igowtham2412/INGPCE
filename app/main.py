@@ -9,18 +9,24 @@ KEY ENDPOINT for the "cameras missing from frontend" fix:
     Exposed as a "Sync Default Cameras" button in the dashboard's Cameras tab.
 """
 import asyncio
+import csv
 import hashlib
+import io
 import json
 import logging
 import os
 import re
 import secrets
 import sys
+import stat
+import tempfile
 import time
 import traceback
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any, Literal
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
@@ -28,11 +34,14 @@ import cv2
 import numpy as np
 import uvicorn
 from fastapi import (
+    File,
+    Form,
     FastAPI,
     HTTPException,
     Query,
     Request,
     Response,
+    UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -89,8 +98,17 @@ async def lifespan(app: FastAPI):
 
         _out("[3/3] Starting camera workers...")
         if config.FACE_ENABLED:
-            _face_recognition_worker = FaceRecognitionWorker()
-            await _face_recognition_worker.start()
+            try:
+                _face_recognition_worker = FaceRecognitionWorker()
+                await _face_recognition_worker.start()
+            except Exception as exc:
+                logger.error(
+                    "Optional face worker failed to start (%s); "
+                    "PPE detection will continue without face matching",
+                    type(exc).__name__,
+                    exc_info=True,
+                )
+                _face_recognition_worker = None
         _camera_manager = CameraManager(
             _get_detector, _alert_manager, _hikvision_playback_url,
             _open_playback_capture, _face_recognition_worker,
@@ -342,7 +360,7 @@ class FaceDatasetImportIn(BaseModel):
 
 
 class FaceMatchReviewIn(BaseModel):
-    decision: Literal["Confirmed", "Rejected", "Reassigned"]
+    decision: Literal["Confirmed", "Rejected", "Reassigned", "Unknown"]
     person_id: int | None = Field(default=None, ge=1)
     comment: str | None = Field(default=None, max_length=2000)
     add_crop_embedding: bool = False
@@ -355,6 +373,43 @@ class FaceMatchReviewIn(BaseModel):
             raise ValueError("A person can only be selected for reassignment")
         if self.add_crop_embedding and self.decision not in {"Confirmed", "Reassigned"}:
             raise ValueError("An incident crop can only be added after confirmation")
+        return self
+
+
+class FaceMatchSettingsIn(BaseModel):
+    high_threshold: float = Field(ge=-1, le=1)
+    low_threshold: float = Field(ge=-1, le=1)
+    minimum_margin: float = Field(ge=0, le=2)
+    quality_min_by_violation: dict[str, float] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_thresholds(self):
+        if self.low_threshold > self.high_threshold:
+            raise ValueError("Low threshold must not exceed the high threshold")
+        allowed_types = {"no_helmet", "no_arc_flash_suit", "phone_detected"}
+        if not set(self.quality_min_by_violation) <= allowed_types:
+            raise ValueError("Quality thresholds contain an unsupported violation type")
+        if any(not 0 <= value <= 1 for value in self.quality_min_by_violation.values()):
+            raise ValueError("Quality thresholds must be between 0 and 1")
+        return self
+
+
+class FaceHistorianJobIn(BaseModel):
+    date_from: datetime
+    date_to: datetime
+    camera_ids: list[str] = Field(default_factory=list, max_length=100)
+    violation_types: list[
+        Literal["no_helmet", "no_arc_flash_suit", "phone_detected"]
+    ] = Field(min_length=1, max_length=3)
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        if self.date_to <= self.date_from:
+            raise ValueError("End time must be after start time")
+        if len(set(self.violation_types)) != len(self.violation_types):
+            raise ValueError("Violation types must not be repeated")
+        if len(set(self.camera_ids)) != len(self.camera_ids):
+            raise ValueError("Camera IDs must not be repeated")
         return self
 
 
@@ -663,7 +718,6 @@ async def face_recognition_status(request: Request):
     return {
         "feature_enabled": config.FACE_ENABLED,
         "enabled_violation_types": enabled_types,
-        "track_reuse_seconds": config.FACE_TRACK_REUSE_SECONDS,
         "quality_min_by_violation": config.FACE_QUALITY_MIN_BY_VIOLATION,
     }
 
@@ -1293,12 +1347,20 @@ async def get_violation_face_match(
         details={"view": "match_details", "match_available": match is not None},
     )
     if match is None:
-        return {"incident_id": violation_id, "status": "Not available"}
+        return {"incident_id": violation_id, "status": "Queued"}
     encrypted_face_crop = match.pop("face_crop", None)
     match["face_crop_available"] = encrypted_face_crop is not None
-    for key in ("face_quality", "face_bbox", "top3_candidates"):
+    for key in ("face_quality", "face_bbox", "top3_candidates", "top5_candidates", "thresholds"):
         if isinstance(match.get(key), str):
             match[key] = json.loads(match[key])
+    match["snapshot_url"] = (
+        f"/api/snapshot/{violation_id}"
+        if violation.get("snapshot_path") else None
+    )
+    match["clean_snapshot_url"] = (
+        f"/api/violations/{violation_id}/evidence/clean"
+        if violation.get("clean_snapshot_path") else None
+    )
     return match
 
 
@@ -1306,11 +1368,7 @@ async def get_violation_face_match(
 async def get_violation_face_crop(violation_id: int, request: Request):
     actor = _require_face_manager(request)
     match = await db.get_face_match(violation_id)
-    if (
-        match is None
-        or match["status"] not in {"Identified", "Suggested"}
-        or not match.get("face_crop")
-    ):
+    if match is None or not match.get("face_crop"):
         raise HTTPException(status_code=404, detail="Face crop is not available")
     from .faces.face_dataset import _encryption_key, decrypt_face_crop
 
@@ -1376,6 +1434,199 @@ async def import_face_dataset_api(payload: FaceDatasetImportIn, request: Request
     result.pop("report_path", None)
     result["report_url"] = f"/api/face/import-runs/{result['run_id']}/report"
     return result
+
+
+@app.post("/api/face/import-upload")
+async def upload_face_dataset_archive(
+        request: Request, archive: UploadFile = File(...),
+        consent_name: str | None = Form(default=None, max_length=200),
+        consent_date: str | None = Form(default=None, max_length=10),
+        consent_reference: str | None = Form(default=None, max_length=500)):
+    actor = _require_face_manager(request)
+    if not archive.filename or Path(archive.filename).suffix.lower() != ".zip":
+        raise HTTPException(status_code=422, detail="Upload a ZIP dataset archive")
+    archive_bytes = await archive.read(50 * 1024 * 1024 + 1)
+    await archive.close()
+    if not archive_bytes or len(archive_bytes) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="ZIP archive must be no larger than 50 MB")
+    from .faces.face_dataset import (
+        ConsentError,
+        FaceModelUnavailable,
+        import_face_dataset,
+    )
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="ppe-face-import-") as directory:
+            root = Path(directory).resolve()
+            with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zip_file:
+                entries = zip_file.infolist()
+                if len(entries) > 5000 or sum(item.file_size for item in entries) > 200 * 1024 * 1024:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="ZIP may contain at most 5,000 files and 200 MB uncompressed",
+                    )
+                for entry in entries:
+                    relative = PurePosixPath(entry.filename)
+                    if (
+                        relative.is_absolute()
+                        or any(part in {"", ".", ".."} for part in relative.parts)
+                        or stat.S_ISLNK(entry.external_attr >> 16)
+                    ):
+                        raise HTTPException(
+                            status_code=422,
+                            detail="ZIP contains an unsafe path or symbolic link",
+                        )
+                    destination = (root / Path(*relative.parts)).resolve()
+                    try:
+                        destination.relative_to(root)
+                    except ValueError as exc:
+                        raise HTTPException(
+                            status_code=422, detail="ZIP contains an unsafe path",
+                        ) from exc
+                    if entry.is_dir():
+                        destination.mkdir(parents=True, exist_ok=True)
+                        continue
+                    if destination.suffix.lower() not in {
+                        ".csv", ".xlsx", ".jpg", ".jpeg", ".png",
+                    }:
+                        raise HTTPException(
+                            status_code=422,
+                            detail="ZIP may contain only a manifest and JPG/PNG photos",
+                        )
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with zip_file.open(entry) as source, destination.open("wb") as target:
+                        while block := source.read(1024 * 1024):
+                            target.write(block)
+            result = await import_face_dataset(
+                root, consent_name=consent_name,
+                consent_date=consent_date,
+                consent_reference=consent_reference,
+                actor_user_id=int(actor["user_id"]),
+                actor_email=actor["email"],
+            )
+    except HTTPException:
+        raise
+    except ConsentError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except FaceModelUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
+        logger.error("Face dataset ZIP import failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=422, detail="ZIP dataset could not be imported",
+        ) from exc
+    result.pop("report_path", None)
+    result["report_url"] = f"/api/face/import-runs/{result['run_id']}/report"
+    return result
+
+
+@app.post("/api/face/enrollments/upload")
+async def upload_face_enrollment(
+        request: Request,
+        employee_code: str = Form(..., max_length=64),
+        full_name: str = Form(..., max_length=160),
+        department: str = Form(..., max_length=120),
+        designation: str = Form("", max_length=120),
+        consent_confirmed: bool = Form(...),
+        photo: UploadFile = File(...),
+):
+    actor = _require_face_manager(request)
+    if not consent_confirmed:
+        raise HTTPException(
+            status_code=422,
+            detail="Confirm documented employee notice and consent before enrollment",
+        )
+
+    max_upload_bytes = 10 * 1024 * 1024
+    image_bytes = await photo.read(max_upload_bytes + 1)
+    await photo.close()
+    if len(image_bytes) > max_upload_bytes:
+        raise HTTPException(
+            status_code=413, detail="Image must be no larger than 10 MB",
+        )
+
+    from .faces.face_dataset import (
+        ConsentError,
+        FaceModelUnavailable,
+        import_face_dataset,
+    )
+    from .faces.face_enrollment_upload import (
+        FaceEnrollmentConflict,
+        FaceEnrollmentUploadError,
+        store_face_enrollment,
+    )
+
+    try:
+        stored = await asyncio.to_thread(
+            store_face_enrollment,
+            employee_code=employee_code,
+            full_name=full_name,
+            department=department,
+            designation=designation,
+            image_bytes=image_bytes,
+            actor_user_id=int(actor["user_id"]),
+        )
+    except FaceEnrollmentConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FaceEnrollmentUploadError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except FaceModelUnavailable as exc:
+        raise HTTPException(
+            status_code=503, detail="The local face model is unavailable",
+        ) from exc
+    except (OSError, ValueError, RuntimeError) as exc:
+        logger.error(
+            "Face enrollment image could not be stored (%s)", type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503, detail="Could not store the enrollment image",
+        ) from exc
+
+    try:
+        imported = await import_face_dataset(
+            actor_user_id=int(actor["user_id"]),
+            actor_email=actor["email"],
+        )
+    except ConsentError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "The image was saved, but the employee workbook needs "
+                "consent corrections before enrollment can finish"
+            ),
+        ) from exc
+    except Exception as exc:
+        logger.error(
+            "Face enrollment import failed after upload (%s)", type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The image was saved, but enrollment could not finish; "
+                "retry the dataset import from Face Match"
+            ),
+        ) from exc
+
+    await db.write_audit_log(
+        "face_enrollment_image_uploaded",
+        int(actor["user_id"]), actor["email"],
+        target_type="face_enrollment",
+        details={
+            "employee_code": stored["employee_code"],
+            "consent_confirmed": True,
+            "accepted_images": imported["accepted"],
+            "rejected_images": imported["rejected"],
+        },
+    )
+    return {
+        "employee_code": stored["employee_code"],
+        "image_path": stored["image_path"],
+        "run_id": imported["run_id"],
+        "accepted": imported["accepted"],
+        "rejected": imported["rejected"],
+        "duplicates": imported["duplicates"],
+        "active_enrolled_people": await db.count_active_face_enrollments(),
+    }
 
 
 @app.get("/api/face/import-runs")
@@ -1480,7 +1731,7 @@ async def _add_reviewed_incident_embedding(
         violation_id: int, person_id: int, actor: dict[str, Any],
 ) -> bool:
     from .faces.face_dataset import (
-        InsightFaceAnalyzer,
+        create_face_analyzer,
         _encryption_key,
         decrypt_face_crop,
         encrypt_embedding,
@@ -1501,7 +1752,7 @@ async def _add_reviewed_incident_embedding(
     image = cv2.imdecode(np.frombuffer(crop_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
     if image is None or image.size == 0:
         raise HTTPException(status_code=422, detail="Incident face crop is not available")
-    analyzer = await asyncio.to_thread(InsightFaceAnalyzer)
+    analyzer = await asyncio.to_thread(create_face_analyzer)
     embedding, measurements = await asyncio.to_thread(analyzer.analyze, image)
     ok, encoded = await asyncio.to_thread(
         cv2.imencode, ".jpg", image,
@@ -1532,6 +1783,7 @@ async def _add_reviewed_incident_embedding(
 
 
 @app.post("/api/violations/{violation_id}/face-review")
+@app.post("/api/face-matches/{violation_id}/review")
 async def review_violation_face_match(
         violation_id: int, payload: FaceMatchReviewIn, request: Request):
     actor = _require_face_manager(request)
@@ -1568,6 +1820,7 @@ async def review_violation_face_match(
 
 
 @app.post("/api/face/incidents/{violation_id}/reprocess")
+@app.post("/api/face-matches/{violation_id}/rerun")
 async def reprocess_face_match(violation_id: int, request: Request):
     actor = _require_face_manager(request)
     if not config.FACE_ENABLED:
@@ -1576,7 +1829,7 @@ async def reprocess_face_match(violation_id: int, request: Request):
     if not queued:
         raise HTTPException(
             status_code=422,
-            detail="Only incidents of enabled face-recognition types can be reprocessed",
+            detail="Face matching requires an eligible incident with saved image evidence",
         )
     await db.write_audit_log(
         "face_match_reprocess_requested", int(actor["user_id"]), actor["email"],
@@ -1601,26 +1854,410 @@ async def reprocess_face_match_batch(
     return {"queued": len(incident_ids)}
 
 @app.get("/api/face/matches")
+@app.get("/api/face-matches")
 async def list_face_matches(
         request: Request,
         violation_type: Literal[
-            "no_helmet", "no_vest", "phone_detected",
+            "no_helmet", "no_arc_flash_suit", "phone_detected",
         ] | None = None,
+        date_from: datetime | None = None,
+        date_to: datetime | None = None,
+        camera_id: str | None = Query(default=None, max_length=120),
+        status: Literal[
+            "Queued", "Processing", "MATCHED", "NEEDS_REVIEW",
+            "UNKNOWN", "FACE_NOT_VISIBLE", "Error",
+        ] | None = None,
+        employee: str | None = Query(default=None, max_length=64),
+        department: str | None = Query(default=None, max_length=120),
+        score_min: float | None = Query(default=None, ge=-1, le=1),
+        score_max: float | None = Query(default=None, ge=-1, le=1),
+        search: str | None = Query(default=None, max_length=160),
+        source: Literal["live", "historian"] | None = None,
         limit: int = Query(default=100, ge=1, le=500),
         offset: int = Query(default=0, ge=0, le=100000)):
     actor = _require_face_manager(request)
-    rows = await db.list_face_matches(violation_type, limit, offset)
+    if date_from and date_to and date_to <= date_from:
+        raise HTTPException(status_code=422, detail="End time must be after start time")
+    if score_min is not None and score_max is not None and score_min > score_max:
+        raise HTTPException(status_code=422, detail="Minimum score exceeds maximum score")
+
+    def epoch(value: datetime | None) -> float | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC).timestamp()
+
+    rows = await db.list_face_matches(
+        violation_type, limit, offset, epoch(date_from), epoch(date_to),
+        camera_id, status, employee, department, score_min, score_max,
+        search, source,
+    )
+    for row in rows:
+        incident_id = int(row["incident_id"])
+        row["snapshot_url"] = (
+            f"/api/snapshot/{incident_id}"
+            if row.get("snapshot_available") else None
+        )
+        if not row["snapshot_url"] and row.get("clean_snapshot_available"):
+            row["snapshot_url"] = (
+                f"/api/violations/{incident_id}/evidence/clean"
+            )
+        row["face_crop_url"] = (
+            f"/api/violations/{incident_id}/face-crop"
+            if row.get("face_crop_available") else None
+        )
     await db.write_audit_log(
         "face_matches_filtered",
         int(actor["user_id"]), actor["email"],
         target_type="incident_face_matches",
         details={
             "violation_type": violation_type,
+            "status": status,
+            "source": source,
             "result_count": len(rows),
             "offset": offset,
         },
     )
     return rows
+
+
+@app.get("/api/face-matches/{violation_id}")
+async def get_face_match_detail(violation_id: int, request: Request):
+    actor = _require_face_manager(request)
+    violation = await db.get_violation_by_id(violation_id)
+    if violation is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    match = await db.get_face_match(violation_id)
+    if match is None:
+        raise HTTPException(status_code=404, detail="Face match not found")
+    await db.write_audit_log(
+        "face_match_detail_viewed", int(actor["user_id"]), actor["email"],
+        target_type="incident", target_id=str(violation_id),
+    )
+    match.pop("face_crop", None)
+    for key in ("face_quality", "face_bbox", "top3_candidates", "top5_candidates", "thresholds", "detection_metadata"):
+        if isinstance(match.get(key), str):
+            match[key] = json.loads(match[key])
+    match["top3_candidates"] = match.get("top5_candidates") or match.get(
+        "top3_candidates", [],
+    )
+    match["snapshot_url"] = (
+        f"/api/snapshot/{violation_id}"
+        if violation.get("snapshot_path") else None
+    )
+    match["clean_snapshot_url"] = (
+        f"/api/violations/{violation_id}/evidence/clean"
+        if violation.get("clean_snapshot_path") else None
+    )
+    return match
+
+
+@app.get("/api/face/employees/{person_id}/history")
+async def get_face_employee_history(person_id: int, request: Request):
+    actor = _require_face_manager(request)
+    employee = await db.get_face_enrollment(person_id)
+    if employee is None:
+        raise HTTPException(status_code=404, detail="Employee enrollment not found")
+    history = await db.get_face_employee_history(person_id)
+    await db.write_audit_log(
+        "face_employee_history_viewed", int(actor["user_id"]), actor["email"],
+        target_type="face_enrollment", target_id=str(person_id),
+        details={"record_count": len(history)},
+    )
+    return {"employee": employee, "violations": history}
+
+
+@app.get("/api/face/employees/{person_id}/photos")
+async def list_face_employee_photos(person_id: int, request: Request):
+    actor = _require_face_manager(request)
+    if await db.get_face_enrollment(person_id) is None:
+        raise HTTPException(status_code=404, detail="Employee enrollment not found")
+    photos = await db.list_face_employee_photos(person_id)
+    await db.write_audit_log(
+        "face_employee_photos_viewed", int(actor["user_id"]), actor["email"],
+        target_type="face_enrollment", target_id=str(person_id),
+        details={"photo_count": len(photos)},
+    )
+    return [
+        {
+            "embedding_id": photo["embedding_id"],
+            "quality_score": photo["quality_score"],
+            "url": f"/api/face/employees/{person_id}/photos/{photo['embedding_id']}",
+        }
+        for photo in photos
+    ]
+
+
+@app.get("/api/face/employees/{person_id}/photos/{embedding_id}")
+async def get_face_employee_photo(
+        person_id: int, embedding_id: int, request: Request):
+    actor = _require_face_manager(request)
+    photo = await db.get_face_employee_photo(person_id, embedding_id)
+    if photo is None or not photo.get("photo_path"):
+        raise HTTPException(status_code=404, detail="Employee photo is not available")
+    photo_root = Path(config.FACE_PHOTO_DIR).resolve()
+    try:
+        path = Path(photo["photo_path"]).resolve(strict=True)
+        path.relative_to(photo_root)
+        encrypted = await asyncio.to_thread(path.read_bytes)
+        from .faces.face_dataset import _encryption_key, decrypt_face_crop
+        image_bytes = await asyncio.to_thread(
+            decrypt_face_crop, encrypted, _encryption_key(),
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail="Employee photo is unavailable") from exc
+    await db.write_audit_log(
+        "face_identity_viewed", int(actor["user_id"]), actor["email"],
+        target_type="face_enrollment", target_id=str(person_id),
+        details={"view": "enrolled_photo", "embedding_id": embedding_id},
+    )
+    return Response(content=image_bytes, media_type="image/jpeg")
+
+
+@app.get("/api/face/settings")
+async def get_face_match_settings(request: Request):
+    actor = _require_face_manager(request)
+    settings = await db.get_face_match_settings()
+    await db.write_audit_log(
+        "face_match_settings_viewed", int(actor["user_id"]), actor["email"],
+        target_type="face_match_settings",
+    )
+    return settings
+
+
+@app.put("/api/face/settings")
+async def update_face_match_settings(
+        payload: FaceMatchSettingsIn, request: Request):
+    actor = _require_face_admin(request)
+    settings = await db.update_face_match_settings(
+        payload.high_threshold, payload.low_threshold,
+        payload.minimum_margin, payload.quality_min_by_violation,
+        int(actor["user_id"]),
+    )
+    await db.write_audit_log(
+        "face_match_settings_updated", int(actor["user_id"]), actor["email"],
+        target_type="face_match_settings",
+        details={
+            "high_threshold": payload.high_threshold,
+            "low_threshold": payload.low_threshold,
+            "minimum_margin": payload.minimum_margin,
+        },
+    )
+    return settings
+
+
+@app.get("/api/face/historian-jobs")
+async def list_face_historian_jobs(request: Request):
+    actor = _require_face_manager(request)
+    jobs = await db.list_face_historian_jobs()
+    await db.write_audit_log(
+        "face_historian_jobs_viewed", int(actor["user_id"]), actor["email"],
+        target_type="face_historian_jobs",
+        details={"job_count": len(jobs)},
+    )
+    return jobs
+
+
+@app.post("/api/face/historian-jobs")
+async def create_face_historian_job(
+        payload: FaceHistorianJobIn, request: Request):
+    actor = _require_face_manager(request)
+    if not config.FACE_ENABLED:
+        raise HTTPException(status_code=409, detail="Face recognition is disabled")
+    if (payload.date_to - payload.date_from).days > 365:
+        raise HTTPException(
+            status_code=422,
+            detail="A historian batch can span at most 365 days",
+        )
+    date_from = payload.date_from
+    date_to = payload.date_to
+    if date_from.tzinfo is None:
+        date_from = date_from.replace(tzinfo=UTC)
+    if date_to.tzinfo is None:
+        date_to = date_to.replace(tzinfo=UTC)
+    job = await db.create_face_historian_job(
+        date_from.timestamp(), date_to.timestamp(),
+        payload.camera_ids, payload.violation_types, int(actor["user_id"]),
+    )
+    await db.write_audit_log(
+        "face_historian_job_created", int(actor["user_id"]), actor["email"],
+        target_type="face_historian_job", target_id=str(job["id"]),
+        details={
+            "total_count": job["total_count"],
+            "camera_count": len(payload.camera_ids),
+            "violation_types": payload.violation_types,
+        },
+    )
+    return job
+
+
+@app.get("/api/face/historian-jobs/{job_id}")
+async def get_face_historian_job(job_id: int, request: Request):
+    actor = _require_face_manager(request)
+    job = await db.get_face_historian_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Historian job not found")
+    await db.write_audit_log(
+        "face_historian_job_viewed", int(actor["user_id"]), actor["email"],
+        target_type="face_historian_job", target_id=str(job_id),
+    )
+    return job
+
+
+async def _control_face_historian_job(
+        job_id: int, action: str, request: Request):
+    actor = _require_face_manager(request)
+    job = await db.control_face_historian_job(job_id, action)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Historian job not found")
+    await db.write_audit_log(
+        f"face_historian_job_{action}", int(actor["user_id"]), actor["email"],
+        target_type="face_historian_job", target_id=str(job_id),
+        details={"status": job["status"]},
+    )
+    return job
+
+
+@app.post("/api/face/historian-jobs/{job_id}/pause")
+async def pause_face_historian_job(job_id: int, request: Request):
+    return await _control_face_historian_job(job_id, "pause", request)
+
+
+@app.post("/api/face/historian-jobs/{job_id}/resume")
+async def resume_face_historian_job(job_id: int, request: Request):
+    return await _control_face_historian_job(job_id, "resume", request)
+
+
+@app.post("/api/face/historian-jobs/{job_id}/cancel")
+async def cancel_face_historian_job(job_id: int, request: Request):
+    return await _control_face_historian_job(job_id, "cancel", request)
+
+
+@app.post("/api/face/search")
+async def search_face_image(
+        request: Request, image: UploadFile = File(...)):
+    actor = _require_face_manager(request)
+    if not config.FACE_ENABLED:
+        raise HTTPException(status_code=409, detail="Face recognition is disabled")
+    image_bytes = await image.read(10 * 1024 * 1024 + 1)
+    if not image_bytes or len(image_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Image must be no larger than 10 MB")
+    decoded = cv2.imdecode(
+        np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR,
+    )
+    if decoded is None or decoded.size == 0:
+        raise HTTPException(status_code=422, detail="Upload a readable JPG or PNG image")
+    from .faces.face_dataset import (
+        FaceModelUnavailable,
+        ImageRejected,
+        _encryption_key,
+        create_face_analyzer,
+        decrypt_embedding,
+    )
+    from .faces.face_recognition import (
+        decide_face_match,
+        rank_person_scores,
+    )
+
+    try:
+        analyzer = await asyncio.to_thread(create_face_analyzer)
+        embedding, quality = await asyncio.to_thread(analyzer.analyze, decoded)
+        key = _encryption_key()
+        enrollments = {
+            int(row["person_id"]): row for row in await db.list_face_enrollments()
+            if row["active"]
+        }
+        gallery: dict[int, dict[str, Any]] = {}
+        for row in await db.list_face_embeddings():
+            person_id = int(row["person_id"])
+            person = enrollments.get(person_id)
+            if (
+                person is None or not row["active"]
+                or row["model_name"] != analyzer.model_name
+                or row["model_version"] != analyzer.model_version
+            ):
+                continue
+            entry = gallery.setdefault(person_id, {
+                "employee_code": person["employee_code"],
+                "full_name": person["full_name"],
+                "department": person["department"],
+                "embeddings": [],
+            })
+            entry["embeddings"].append(decrypt_embedding(row["embedding"], key))
+        ranked = rank_person_scores(
+            embedding, gallery, config.FACE_MATCH_STRATEGY,
+            config.FACE_MATCH_TOP_K,
+        )
+        settings = await db.get_face_match_settings()
+        status, person_id, score, margin, candidates = decide_face_match(
+            ranked, settings["high_threshold"], settings["low_threshold"],
+            settings["minimum_margin"],
+        )
+        result = {
+            "status": status,
+            "best_employee_id": person_id,
+            "similarity": score,
+            "margin": margin,
+            "top5_candidates": candidates,
+            "face_quality": quality,
+            "model_name": analyzer.model_name,
+            "model_version": analyzer.model_version,
+        }
+    except ImageRejected as exc:
+        result = {
+            "status": "FACE_NOT_VISIBLE",
+            "reason": exc.reason,
+            "top5_candidates": [],
+        }
+    except FaceModelUnavailable as exc:
+        logger.error("Ad-hoc face search is unavailable (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=503, detail="Face model is unavailable for ad-hoc search",
+        ) from exc
+    await db.write_audit_log(
+        "face_ad_hoc_search", int(actor["user_id"]), actor["email"],
+        target_type="face_search",
+        details={"status": result["status"]},
+    )
+    return result
+
+
+@app.get("/api/face/matches/export.csv")
+async def export_face_matches_csv(request: Request):
+    actor = _require_face_manager(request)
+    rows = await db.list_face_matches(limit=5000)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "incident_id", "source", "timestamp", "camera", "location",
+        "violation_type", "employee_id", "employee_name", "department",
+        "similarity", "match_status", "violation_status", "review_decision",
+    ])
+    for row in rows:
+        values = [
+            row.get("incident_id"), row.get("source"), row.get("epoch_time"),
+            row.get("camera_name") or row.get("camera_id"),
+            row.get("area_group_name"), row.get("violation_type"),
+            row.get("employee_code"), row.get("full_name"),
+            row.get("department"), row.get("similarity"), row.get("status"),
+            row.get("violation_status"), row.get("review_decision"),
+        ]
+        writer.writerow([
+            f"'{value}" if isinstance(value, str) and value.startswith(
+                ("=", "+", "-", "@"),
+            ) else value for value in values
+        ])
+    await db.write_audit_log(
+        "face_matches_exported", int(actor["user_id"]), actor["email"],
+        target_type="incident_face_matches",
+        details={"record_count": len(rows), "format": "csv"},
+    )
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="face-matches.csv"'},
+    )
 
 
 @app.get("/api/face/analytics")
@@ -1630,7 +2267,7 @@ async def face_analytics(
         employee_code: str | None = None,
         department: str | None = None,
         violation_type: Literal[
-            "no_helmet", "no_vest", "phone_detected",
+            "no_helmet", "no_arc_flash_suit", "phone_detected",
         ] | None = None):
     actor = _require_face_manager(request)
     since_epoch = time.time() - window_hours * 60 * 60

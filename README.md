@@ -256,70 +256,71 @@ weights before relying on suit alerts.
 
 ### Optional employee face dataset import
 
-Face recognition is disabled by default. The implementation uses local
-InsightFace/ArcFace processing; it does not send images to a cloud service and
-does not download model files automatically. The InsightFace library code is
-MIT-licensed, but InsightFace's [official model README](https://github.com/deepinsight/insightface/blob/master/python-package/README.md)
-and [model zoo](https://github.com/deepinsight/insightface/blob/master/model_zoo/README.md)
-state that pretrained model weights, including `buffalo_l`, are for
-non-commercial research only. Those weights are not permitted for this
-commercial industrial-safety use without separate written authorization.
+#### Architecture
 
-The optional face runtime is separate from the normal application install.
-With the existing Python 3.12 virtual environment, install the CUDA 13 /
-cuDNN 9 GPU runtime using:
+The existing PPE detector and violation creation path remain unchanged; face
+work is enqueued after a violation is stored and handled independently:
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File scripts\install_face_stack.ps1
+```mermaid
+flowchart LR
+  CAM[Camera PPE detection] -->|eligible violation + bbox| DB[(PostgreSQL)]
+  DB -->|persistent async job| WORKER[Face worker]
+  WORKER --> CROP[Person crop + same-track buffered frames]
+  CROP --> INSIGHT[InsightFace buffalo_l: SCRFD + ArcFace]
+  INSIGHT --> GALLERY[Consent-filtered encrypted employee gallery]
+  INSIGHT --> RESULT[(Encrypted match result + audit metadata)]
+  UI[Authorized Face Match UI] --> API[FastAPI role-checked API]
+  API --> DB
+  API --> GALLERY
+  HIST[Historian backfill jobs] --> DB
 ```
 
-The script installs pinned InsightFace, ONNX, NumPy, OpenCV, and ONNX Runtime
-packages, then checks that CUDA is an available ONNX Runtime provider. Use
-`-Cpu` to install the CPU-only runtime instead:
+Only `no_helmet`, `no_arc_flash_suit`, and `phone_detected` are eligible.
+Results are suggestions for a human reviewer; a face-module failure cannot
+block PPE detection or violation creation.
+
+#### Face Match API
+
+FastAPI publishes the complete request/response schemas at `/openapi.json`.
+The face routes require the existing Manager or Admin role; mutating requests
+also use the existing CSRF protection.
+
+- Enrollment: `POST /api/face/enrollments/upload` (multipart employee fields,
+  consent attestation, and photo); `POST /api/face/import-upload` for ZIP
+  imports; `GET /api/face/enrollments` to list active enrollments.
+- Results: `GET /api/face/matches` (also `/api/face-matches`) with filters and
+  pagination; `GET /api/face-matches/{violation_id}` for details.
+- Review: `POST /api/face-matches/{violation_id}/review` accepts
+  `decision` (`Confirmed`, `Rejected`, `Reassigned`, or `Unknown`), optional
+  `person_id`, `comment`, and `add_crop_embedding`. Explicit recomputation is
+  `POST /api/face-matches/{violation_id}/rerun`.
+- Historian: `POST /api/face/historian-jobs` accepts `date_from`, `date_to`,
+  optional `camera_ids`, and eligible `violation_types`; job status and
+  pause/resume/cancel actions use `/api/face/historian-jobs/{job_id}`.
+- Ad-hoc search: `POST /api/face/search` accepts a multipart `image` and
+  returns top candidates without creating a violation or match record.
+
+Face recognition is disabled by default. The configured local pipeline uses
+InsightFace `buffalo_l` (SCRFD detection and 512-dimensional ArcFace
+embeddings) with ONNX Runtime. Review the applicable InsightFace and model-pack
+terms and confirm organizational authorization before enabling model
+provisioning. Images and embeddings are processed locally; do not send real
+employee images to external services.
+
+After reviewing and accepting the terms, set
+`PPE_FACE_LICENSE_ACCEPTED=true` in the private `.env` and provision the
+InsightFace model pack:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File scripts\install_face_stack.ps1 -Cpu
+.\.venv\Scripts\python.exe scripts\download_insightface_model.py
 ```
 
-The GPU installer deliberately restores the GPU ONNX Runtime files after
-installing InsightFace because InsightFace also declares a CPU `onnxruntime`
-dependency. This is necessary to avoid the CPU package overwriting the GPU
-provider files. ONNX Runtime 1.30.0 is selected because its official
-compatibility table lists CUDA 13.0/cuDNN 9.x and compatibility with PyTorch
-CUDA 13.x. This does not install or fetch any pretrained face models. The
-regular application requirements do not include these optional packages; the
-application continues to start with face recognition disabled if they are
-absent.
-
-Model loading and downloading require the explicit local setting
-`PPE_FACE_LICENSE_ACCEPTED=true`. Leave it false until the organization has
-reviewed the applicable model terms and secured permission. Do not assume the
-MIT license for package code also grants commercial rights to model weights.
-
-After authorization, get a model ZIP and its independently trusted SHA-256
-digest from the authorized supplier. The model name and root are configurable
-using `PPE_FACE_MODEL_NAME` and `PPE_FACE_MODEL_DIR`. The downloader will not
-access the URL while the license flag is false:
-
-```powershell
-$env:PPE_FACE_LICENSE_ACCEPTED = "true"
-.\.venv\Scripts\python.exe scripts\download_face_model.py `
-  --url "https://authorized-model-supplier.example/model.zip" `
-  --sha256 "<64-character-trusted-sha256>"
-```
-
-The downloader requires HTTPS, verifies the archive digest before extraction,
-rejects unsafe ZIP paths, and refuses to overwrite an existing pack. It does
-not select a model or imply that the supplier's terms permit this use. Do not
-set the flag until authorization is actually reviewed.
-
-Alternatives are (1) obtain commercial authorization for the InsightFace
-weights, (2) choose a face model with terms that explicitly permit this use,
-or (3) purchase a vendor SDK licensed for industrial deployment. A vendor SDK
-with written deployment and support terms is recommended for review, but the
-organization must choose and approve its own option.
+Provisioning requires the InsightFace and ONNX Runtime packages listed in
+`requirements.txt`; the script checks the explicit local acceptance flag and
+downloads the model pack under
+`<PPE_FACE_MODEL_DIR>\models\buffalo_l` (default:
+`models\face\models\buffalo_l`). Provisioning alone does not enable matching.
+GPU execution is optional; CPU inference is supported.
 
 The configured dataset path (`PPE_FACE_DATASET_PATH`, default
 `dataset\faces`) supports employee folders with a CSV or Excel manifest:
@@ -374,13 +375,13 @@ Calibration uses the same authorized local model and consented primary
 dataset. Leave-one-out results are estimates from enrolled photos, not camera
 accuracy claims. For incident evaluation, provide real, consented crops grouped by camera,
 violation type, and identity, for example
-`CAM01\missing_vest\E001\*.jpg` and
-`CAM01\missing_vest\not_in_dataset\*.jpg`. Supported type folders are
-`missing_helmet`/`no_helmet`, `missing_vest`/`no_vest`, and
-`phone_detected`. The older employee-only and camera/employee layouts remain
-supported but report an `unspecified_type` group. Each known label must match
-an enrolled employee code. `not_in_dataset` crops are evaluation-only and
-must never be added to the enrollment dataset.
+`CAM01\no_helmet\E001\*.jpg` and
+`CAM01\no_helmet\not_in_dataset\*.jpg`. Runtime face matching is limited to
+`no_helmet`, `no_arc_flash_suit`, and `phone_detected`; `no_vest` is excluded.
+The evaluation tool also accepts legacy label aliases and reports normalized
+types. Each known label must match an enrolled employee code.
+`not_in_dataset` crops are evaluation-only and must never be added to the
+enrollment dataset.
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\calibrate_face_thresholds.py `
@@ -405,16 +406,29 @@ do not modify application configuration. Do not claim performance or enable
 identification until representative, consented footage from the actual
 cameras has been evaluated and reviewed.
 
-When `PPE_FACE_ENABLED=true`, the application queues recognition only after an
-eligible, temporally confirmed violation has been stored. Eligibility is
-configured by `PPE_FACE_VIOLATION_TYPES`, defaulting to
-`missing_helmet,missing_vest,phone_detected`, which map to stored types
-`no_helmet`, `no_vest`, and `phone_detected`. Unknown configuration values are
-warned about and ignored. `PPE_FACE_TRACK_REUSE_SECONDS` defaults to 120:
-within that window, incidents from the same camera and ByteTrack ID reuse one
-completed result instead of running the model again. The original analysis
-considers the buffered full-person crops and incident evidence; no usable face
-is recorded as no face/not identified, never guessed.
+For a flat image folder, create a blank manifest, fill the camera, violation
+type, and identity for every image, then pass the CSV as `--incident-crops`:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\create_face_calibration_manifest.py `
+  --images dataset\feedback\confirmed\images `
+  --output dataset\feedback\confirmed\images\face_calibration_labels.csv
+```
+
+Use the enrolled `employee_code` as `employee_id`, or `not_in_dataset` for
+unknown people. The manifest parser rejects missing labels, unknown employee
+IDs, unsupported image paths, and paths that escape the manifest directory.
+Keep `no_vest` out of this identity evaluation: it is not an eligible face
+matching violation.
+
+When `PPE_FACE_ENABLED=true`, the application queues matching asynchronously
+when each eligible violation is created, regardless of its review status.
+Eligibility is limited to `no_helmet`, `no_arc_flash_suit`, and
+`phone_detected`; `no_vest` is never queued. A status change does not trigger
+reprocessing. Only an explicit rerun does. The pipeline uses the person's
+violation bounding box plus buffered frames of the same camera/track, checks
+face quality, and records `FACE_NOT_VISIBLE` when no usable face is found.
+It never guesses an identity.
 Face recognition is not run or displayed on the live wall. A bounded,
 short-lived person-crop buffer is keyed by camera and ByteTrack ID; face
 detection and matching are not performed on normal frames, and buffered crops
@@ -425,17 +439,20 @@ worker uses a dedicated single-thread executor (lowered to below-normal
 priority on Windows) and bounded capture/enqueue buffers, so alert creation
 and delivery do not wait for recognition. The persisted pending/processing
 queue is capped by `PPE_FACE_JOB_QUEUE_MAX` (default 500); at capacity, new
-recognition work is deferred rather than slowing detection. The default match and
-suggestion thresholds are both `1.0` (fail-closed); set them only from a
-reviewed calibration. `PPE_FACE_MATCH_STRATEGY` may be `max` or `top_k_mean`,
-and calibration uses the configured strategy. Provider and processing time
-are recorded with the result so actual GPU/CPU cost can be measured; this
-workspace has not been measured on production cameras.
+recognition work is deferred and recovered by the queue sweep. The example
+thresholds (`PPE_FACE_MATCH_THRESHOLD=0.60`,
+`PPE_FACE_SUGGEST_THRESHOLD=0.45`) are provisional, not calibrated; keep
+matching disabled until representative consented site data has been evaluated
+and reviewed. `PPE_FACE_MATCH_STRATEGY` may be `max` or `top_k_mean`,
+and calibration uses the configured strategy. CPU provider and processing
+time are recorded with the result; this workspace has not been measured on
+production cameras.
 Run `scripts\benchmark_face_pipeline.py` for model-free queue/crop/matching
 microbenchmarks, reported with violation-type and camera labels. After model
 authorization and provisioning, it can measure local inference on a synthetic
-or explicitly consented sample; InsightFace exposes detection and embedding in
-one call, so the tool reports combined latency. `scripts\benchmark_live_impact.py`
+or explicitly consented sample; SCRFD detection and ArcFace embedding are
+measured together, so the tool reports combined latency.
+`scripts\benchmark_live_impact.py`
 compares the PPE detector and annotated-tile encoding on synthetic paced frames
 or a local recorded video while a bounded, simulated face-job worker runs; it
 reports camera-to-detection and camera-to-tile-ready latency plus simulated
@@ -443,8 +460,9 @@ job counts by violation type. It does not measure WebSocket delivery or a real
 camera and is not a production performance claim.
 Match and review records are automatically
 removed after `PPE_FACE_MATCH_RETENTION_DAYS` (default 365; set `0` to disable
-automatic expiry). Original enrollment photos remain off by default.
-For `Identified` and `Suggested` results, the selected face crop is encrypted
+automatic expiry). Retained enrollment photos are encrypted; configure
+`PPE_FACE_KEEP_PHOTOS` according to the approved retention policy.
+For `MATCHED` and `NEEDS_REVIEW` results, the selected face crop is encrypted
 in the match record and available only to Admin/Safety Manager reviewers.
 Below-threshold crops are not retained separately. Suggested crops remain
 encrypted while awaiting human review; rejecting a match, deleting/withdrawing
@@ -455,7 +473,7 @@ India's DPDP Act 2023 where applicable). A match is decision support only;
 require human review before any disciplinary action.
 `PPE_FACE_INCLUDE_IN_EMAIL=false` keeps the existing Power Automate schema and
 message unchanged; when enabled, an email receives optional match fields only
-for an `Identified` result, with pending-review wording until a reviewer
+for a `MATCHED` result, with pending-review wording until a reviewer
 confirms or reassigns it.
 
 The application loads `.env`, applies pending Alembic migrations, synchronizes

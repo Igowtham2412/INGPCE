@@ -33,11 +33,13 @@ class DashboardUnauthenticatedSmokeTests(unittest.TestCase):
     def test_incidents_expose_event_triggered_face_match_ui(self):
         markup = (PROJECT_ROOT / "dashboard" / "index.html").read_text(encoding="utf-8")
         script = (PROJECT_ROOT / "dashboard" / "app.js").read_text(encoding="utf-8")
-        self.assertIn("Face recognition is incident-triggered only for confirmed helmet", markup)
+        self.assertIn(
+            "regardless of incident review status", markup,
+        )
         self.assertIn("data-face-match-panel", script)
         self.assertIn("/api/violations/${incidentId}/face-match", script)
         self.assertIn("/api/violations/${incidentId}/face-review", script)
-        self.assertIn("Possible match (pending review)", script)
+        self.assertIn("Suggested:", script)
         self.assertIn('data-tab="face-matches"', markup)
         self.assertIn('id="faceViolationTypeFilter"', markup)
         self.assertIn('id="faceAnalyticsBody"', markup)

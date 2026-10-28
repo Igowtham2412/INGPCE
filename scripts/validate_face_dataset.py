@@ -16,7 +16,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Check dataset layout, consent fields, image readability and exact "
-            "duplicates without loading InsightFace or a model."
+            "duplicates without loading face models."
         ),
     )
     parser.add_argument(

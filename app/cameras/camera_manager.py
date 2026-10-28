@@ -699,7 +699,7 @@ class CameraManager:
                                 )
                             ):
                                 try:
-                                    self._face_recognition_worker.enqueue_confirmed_incident(
+                                    self._face_recognition_worker.enqueue_violation(
                                         violation_id, camera_id, status.track_id,
                                         stored_violation_type,
                                     )

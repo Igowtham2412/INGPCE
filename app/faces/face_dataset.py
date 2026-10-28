@@ -5,10 +5,12 @@ import hashlib
 import logging
 import math
 import secrets
+import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Protocol
 
 import cv2
@@ -55,6 +57,7 @@ class EmployeeImage:
     consent_recorded: bool
     consent_basis: str
     consent_date: date | None
+    designation: str | None = None
 
 
 @dataclass
@@ -64,6 +67,7 @@ class PersonImport:
     department: str | None
     consent_basis: str
     consent_date: date | None
+    designation: str | None = None
     images: list[EmployeeImage] = field(default_factory=list)
 
 
@@ -137,11 +141,12 @@ def _add_person_image(
     if existing is None:
         existing = PersonImport(
             image.employee_code, image.full_name, image.department,
-            image.consent_basis, image.consent_date,
+            image.consent_basis, image.consent_date, image.designation,
         )
         people[image.employee_code] = existing
     elif (existing.full_name != image.full_name
           or existing.department != image.department
+          or existing.designation != image.designation
           or existing.consent_basis != image.consent_basis
           or existing.consent_date != image.consent_date):
         raise ValueError("Rows for an employee must use consistent identity and consent fields")
@@ -200,9 +205,7 @@ def _discover_folders(
         employee_code, full_name = employee_code.strip(), full_name.replace("_", " ").strip()
         if not employee_code or not full_name:
             raise ValueError("Folder names must use <employee_code>_<full_name>")
-        person = PersonImport(
-            employee_code, full_name, None, consent_basis, consent_day,
-        )
+        person = PersonImport(employee_code, full_name, None, consent_basis, consent_day)
         person.images.extend(
             EmployeeImage(
                 employee_code, full_name, None, path, True,
@@ -237,6 +240,7 @@ def _discover_manifest(
         employee_code = row.get("employee_code", "").strip()
         full_name = row.get("full_name", "").strip()
         department = row.get("department", "").strip() or None
+        designation = row.get("designation", "").strip() or None
         image_path = row.get("image_path", "").strip()
         if not employee_code or not full_name or not image_path:
             raise ValueError(
@@ -262,7 +266,7 @@ def _discover_manifest(
         resolved_path = _inside_root(root, root / image_path)
         _add_person_image(people, EmployeeImage(
             employee_code, full_name, department, resolved_path, True,
-            consent_basis, consent_day,
+            consent_basis, consent_day, designation,
         ))
     return people
 
@@ -339,6 +343,13 @@ def decrypt_face_crop(encrypted: bytes, key: bytes) -> bytes:
         raise ValueError("Stored face crop could not be authenticated") from exc
 
 
+def read_face_image(path: Path) -> bytes:
+    image_bytes = path.read_bytes()
+    if image_bytes.startswith(_FACE_CROP_PREFIX):
+        return decrypt_face_crop(image_bytes, _encryption_key())
+    return image_bytes
+
+
 def _pose_degrees(face: Any) -> tuple[float, float]:
     pose = getattr(face, "pose", None)
     if pose is not None:
@@ -384,6 +395,9 @@ def _quality_approved_face(
     if crop.size == 0:
         raise ImageRejected("invalid_face_box")
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    brightness = float(np.mean(gray))
+    if not config.FACE_MIN_BRIGHTNESS <= brightness <= config.FACE_MAX_BRIGHTNESS:
+        raise ImageRejected("brightness_out_of_range")
     sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
     if sharpness < config.FACE_MIN_SHARPNESS:
         raise ImageRejected("blurred")
@@ -416,6 +430,7 @@ def _quality_approved_face(
         "width": int(face_width),
         "height": int(face_height),
         "sharpness": round(sharpness, 2),
+        "brightness": round(brightness, 2),
         "detection_score": round(detection_score, 4),
         "yaw": round(yaw, 2),
         "pitch": round(pitch, 2),
@@ -423,7 +438,7 @@ def _quality_approved_face(
     })
 
 
-class InsightFaceAnalyzer:
+class OpenCVZooFaceAnalyzer:
     def __init__(self, provider_preference: str = "auto") -> None:
         if not config.FACE_LICENSE_ACCEPTED:
             logger.warning(
@@ -432,74 +447,41 @@ class InsightFaceAnalyzer:
             raise FaceModelUnavailable(
                 "Set PPE_FACE_LICENSE_ACCEPTED=true only after model-license review and authorization"
             )
-        try:
-            import onnxruntime as ort
-            from insightface.app import FaceAnalysis as InsightFace
-        except ImportError as exc:
-            raise FaceModelUnavailable(
-                "Optional InsightFace and ONNX Runtime packages are not installed"
-            ) from exc
         if provider_preference not in {"auto", "cuda", "cpu"}:
             raise ValueError("Face provider preference must be auto, cuda, or cpu")
-
-        model_pack = Path(config.FACE_MODEL_DIR).resolve() / config.FACE_MODEL_NAME
-        if not model_pack.is_dir() or not any(model_pack.glob("*.onnx")):
+        if provider_preference == "cuda":
             raise FaceModelUnavailable(
-                "The configured face model is not provisioned locally; automatic downloads are disabled"
+                "The configured OpenCV Zoo face analyzer currently supports CPU inference only"
             )
-        available = set(ort.get_available_providers())
-        self._insightface_class = InsightFace
-        self._model_pack = model_pack
-        self.runtime_provider = "CPUExecutionProvider"
-        if provider_preference == "cpu":
-            self._initialize_cpu()
-        elif provider_preference == "cuda" and "CUDAExecutionProvider" not in available:
+        model_dir = Path(config.FACE_MODEL_DIR).expanduser().resolve()
+        self._yunet_path = model_dir / config.FACE_YUNET_MODEL_FILENAME
+        self._sface_path = model_dir / config.FACE_SFACE_MODEL_FILENAME
+        if not self._yunet_path.is_file() or not self._sface_path.is_file():
             raise FaceModelUnavailable(
-                "CUDAExecutionProvider is unavailable for the requested GPU benchmark"
+                "The configured YuNet/SFace models are not provisioned locally"
             )
-        elif "CUDAExecutionProvider" in available:
-            try:
-                self.app = self._create_app(
-                    ["CUDAExecutionProvider", "CPUExecutionProvider"], 0,
-                )
-                self.runtime_provider = "CUDAExecutionProvider"
-            except Exception as exc:
-                if provider_preference == "cuda":
-                    raise FaceModelUnavailable(
-                        "Could not initialize the local face model on GPU"
-                    ) from exc
-                self._initialize_cpu()
-        else:
-            try:
-                self._initialize_cpu()
-            except FaceModelUnavailable:
-                raise
-        self.model_name = config.FACE_MODEL_NAME
-        self.model_version = self._model_version(model_pack)
-
-    def _create_app(self, providers: list[str], context_id: int):
-        app = self._insightface_class(
-            name=str(self._model_pack),
-            providers=providers,
-        )
-        app.prepare(ctx_id=context_id, det_size=(640, 640))
-        return app
-
-    def _initialize_cpu(self) -> None:
         try:
-            self.app = self._create_app(["CPUExecutionProvider"], -1)
-            self.runtime_provider = "CPUExecutionProvider"
-        except Exception as exc:
+            self._detector = cv2.FaceDetectorYN.create(
+                str(self._yunet_path), "", (320, 320),
+                config.FACE_MIN_DETECTION_SCORE, 0.3, 5000,
+            )
+            self._recognizer = cv2.FaceRecognizerSF.create(
+                str(self._sface_path), "",
+            )
+        except cv2.error as exc:
             raise FaceModelUnavailable(
-                "Could not initialize the local face model on GPU or CPU"
+                "Could not initialize the local OpenCV YuNet/SFace models"
             ) from exc
+        self._lock = threading.Lock()
+        self.runtime_provider = "OpenCV DNN CPU"
+        self.model_name = "opencv_zoo_yunet_sface"
+        self.model_version = self._model_version(
+            (self._yunet_path, self._sface_path),
+        )
 
     @staticmethod
-    def _model_version(model_pack: Path) -> str:
+    def _model_version(model_files: tuple[Path, ...]) -> str:
         digest = hashlib.sha256()
-        model_files = sorted(model_pack.glob("*.onnx"))
-        if not model_files:
-            raise FaceModelUnavailable("The local face model package is incomplete")
         for model_file in model_files:
             with model_file.open("rb") as model_stream:
                 for block in iter(lambda: model_stream.read(1024 * 1024), b""):
@@ -507,29 +489,157 @@ class InsightFaceAnalyzer:
         return digest.hexdigest()
 
     def analyze(self, image: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+        if image is None or image.ndim != 3 or image.size == 0:
+            raise ImageRejected("unreadable")
+        height, width = image.shape[:2]
         try:
-            faces = self.app.get(image)
-        except Exception as exc:
-            if self.runtime_provider != "CUDAExecutionProvider":
-                raise FaceModelUnavailable(
-                    "Local face inference failed"
-                ) from exc
-            self._initialize_cpu()
-            try:
-                faces = self.app.get(image)
-            except Exception as cpu_exc:
-                raise FaceModelUnavailable(
-                    "Local face inference failed on GPU and CPU"
-                ) from cpu_exc
-        if not faces:
-            raise ImageRejected("no_face")
-        if len(faces) != 1:
-            raise ImageRejected("multiple_faces")
-        result = _quality_approved_face(faces[0], image)
+            with self._lock:
+                self._detector.setInputSize((width, height))
+                _, faces = self._detector.detect(image)
+                if faces is None or len(faces) == 0:
+                    raise ImageRejected("no_face")
+                if len(faces) != 1:
+                    raise ImageRejected("multiple_faces")
+                face_row = np.asarray(faces[0], dtype=np.float32).reshape(-1)
+                if face_row.size < 15:
+                    raise FaceModelUnavailable(
+                        "YuNet returned an incomplete face detection"
+                    )
+                aligned_crop = self._recognizer.alignCrop(image, face_row)
+                embedding = self._recognizer.feature(aligned_crop)
+        except ImageRejected:
+            raise
+        except cv2.error as exc:
+            raise FaceModelUnavailable("Local face inference failed") from exc
+        if face_row.size < 15:
+            raise FaceModelUnavailable("YuNet returned an incomplete face detection")
+        x, y, box_width, box_height = face_row[:4]
+        face = SimpleNamespace(
+            bbox=[
+                x, y, x + box_width, y + box_height,
+            ],
+            kps=face_row[4:14].reshape(5, 2),
+            det_score=float(face_row[14]),
+            normed_embedding=np.asarray(embedding, dtype=np.float32).reshape(-1),
+        )
+        result = _quality_approved_face(face, image)
         return result.embedding, {
             **result.measurements,
             "quality_score": result.quality_score,
         }
+
+
+class InsightFaceAnalyzer:
+    """Local SCRFD detection and aligned 512-D ArcFace embeddings."""
+
+    def __init__(self, provider_preference: str | None = None) -> None:
+        if not config.FACE_LICENSE_ACCEPTED:
+            raise FaceModelUnavailable(
+                "Set PPE_FACE_LICENSE_ACCEPTED=true only after reviewing "
+                "InsightFace and buffalo_l model terms and authorization"
+            )
+        provider_preference = provider_preference or config.FACE_PROVIDER
+        if provider_preference not in {"auto", "cuda", "cpu"}:
+            raise ValueError("Face provider preference must be auto, cuda, or cpu")
+        try:
+            import onnxruntime as ort
+            from insightface.app import FaceAnalysis
+        except ImportError as exc:
+            raise FaceModelUnavailable(
+                "Install InsightFace and ONNX Runtime to use buffalo_l"
+            ) from exc
+
+        model_directory = (
+            Path(config.FACE_MODEL_DIR).expanduser().resolve()
+            / "models" / "buffalo_l"
+        )
+        if not model_directory.is_dir() or not list(model_directory.glob("*.onnx")):
+            raise FaceModelUnavailable(
+                "Provision the buffalo_l models with scripts/download_insightface_model.py"
+            )
+        available = set(ort.get_available_providers())
+        if provider_preference == "cuda" and "CUDAExecutionProvider" not in available:
+            raise FaceModelUnavailable(
+                "CUDA was requested but ONNX Runtime CUDAExecutionProvider is unavailable"
+            )
+        if provider_preference == "cpu":
+            providers = ["CPUExecutionProvider"]
+        elif "CUDAExecutionProvider" in available:
+            providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        else:
+            providers = ["CPUExecutionProvider"]
+        try:
+            self._app = FaceAnalysis(
+                name="buffalo_l",
+                root=config.FACE_MODEL_DIR,
+                allowed_modules=["detection", "recognition"],
+                providers=providers,
+            )
+            self._app.prepare(
+                ctx_id=0 if providers[0] == "CUDAExecutionProvider" else -1,
+                det_size=(640, 640),
+            )
+        except Exception as exc:
+            raise FaceModelUnavailable(
+                "Could not initialize the local InsightFace buffalo_l models"
+            ) from exc
+        self._lock = threading.Lock()
+        self.runtime_provider = (
+            "ONNX Runtime CUDA"
+            if providers[0] == "CUDAExecutionProvider"
+            else "ONNX Runtime CPU"
+        )
+        self.model_name = "insightface_buffalo_l_scrfd_arcface"
+        self.model_version = OpenCVZooFaceAnalyzer._model_version(
+            tuple(sorted(model_directory.glob("*.onnx"))),
+        )
+
+    def analyze(self, image: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+        if image is None or image.ndim != 3 or image.size == 0:
+            raise ImageRejected("unreadable")
+        try:
+            with self._lock:
+                faces = self._app.get(image)
+        except Exception as exc:
+            raise FaceModelUnavailable("InsightFace inference failed") from exc
+        if not faces:
+            raise ImageRejected("no_face")
+
+        ordered_faces = sorted(
+            faces,
+            key=lambda face: float(
+                max(0, face.bbox[2] - face.bbox[0])
+                * max(0, face.bbox[3] - face.bbox[1])
+            ),
+            reverse=True,
+        )
+        rejected: ImageRejected | None = None
+        for face in ordered_faces:
+            try:
+                result = _quality_approved_face(face, image)
+            except ImageRejected as exc:
+                rejected = exc
+                continue
+            if result.embedding.size != 512:
+                raise FaceModelUnavailable(
+                    "InsightFace buffalo_l did not return a 512-D ArcFace embedding"
+                )
+            return result.embedding, {
+                **result.measurements,
+                "quality_score": result.quality_score,
+                "alignment": "InsightFace five-point landmark alignment",
+            }
+        raise rejected or ImageRejected("no_usable_face")
+
+
+def create_face_analyzer(provider_preference: str | None = None) -> FaceAnalyzer:
+    if config.FACE_MODEL_NAME == "opencv_zoo_yunet_sface":
+        return OpenCVZooFaceAnalyzer(provider_preference or "auto")
+    if config.FACE_MODEL_NAME == "insightface_buffalo_l":
+        return InsightFaceAnalyzer(provider_preference)
+    raise FaceModelUnavailable(
+        f"Unsupported configured face model {config.FACE_MODEL_NAME!r}"
+    )
 
 
 def _cosine_similarity(left: np.ndarray, right: np.ndarray) -> float:
@@ -591,7 +701,7 @@ async def _dry_run_import(
             "flags": [], "per_person": [],
             "report_path": str(_write_report({})),
         }
-    face_analyzer = analyzer or InsightFaceAnalyzer()
+    face_analyzer = analyzer or create_face_analyzer()
     results: dict[str, PersonResult] = {}
     vectors: dict[str, list[np.ndarray]] = defaultdict(list)
     seen_hashes: dict[str, str] = {}
@@ -603,7 +713,7 @@ async def _dry_run_import(
         for image_record in person.images:
             total_images += 1
             try:
-                image_bytes = image_record.path.read_bytes()
+                image_bytes = read_face_image(image_record.path)
             except OSError:
                 result.rejected += 1
                 result.rejection_reasons["unreadable"] = (
@@ -627,7 +737,7 @@ async def _dry_run_import(
                 reason = "unreadable"
             else:
                 try:
-                    embedding, _measurements = await asyncio.to_thread(
+                    embedding, _ = await asyncio.to_thread(
                         face_analyzer.analyze, image,
                     )
                 except ImageRejected as exc:
@@ -754,7 +864,7 @@ async def import_face_dataset(
         return {"run_id": run_id, **summary, "report_path": str(report_path)}
 
     key = _encryption_key()
-    face_analyzer = analyzer or InsightFaceAnalyzer()
+    face_analyzer = analyzer or create_face_analyzer()
 
     enrollments = await db.list_face_enrollments()
     code_to_id = {row["employee_code"]: int(row["person_id"]) for row in enrollments}
@@ -785,6 +895,7 @@ async def import_face_dataset(
         enrollment = await db.upsert_face_enrollment(
             person.employee_code, person.full_name, person.department,
             person.consent_basis, person.consent_date, actor_user_id,
+            person.designation,
         )
         code_to_id[code] = int(enrollment["person_id"])
         await db.write_audit_log(
@@ -816,7 +927,7 @@ async def import_face_dataset(
         for image_record in person.images:
             total_images += 1
             try:
-                image_bytes = image_record.path.read_bytes()
+                image_bytes = read_face_image(image_record.path)
             except OSError:
                 result.rejected += 1
                 result.rejection_reasons["unreadable"] = (
@@ -914,7 +1025,7 @@ async def import_face_dataset(
                 photo_path = str(photo_dir / f"{image_hash}{image_record.path.suffix.lower()}")
                 try:
                     with open(photo_path, "xb") as photo_file:
-                        photo_file.write(image_bytes)
+                        photo_file.write(encrypt_face_crop(image_bytes, key))
                     photo_created = True
                 except FileExistsError:
                     pass

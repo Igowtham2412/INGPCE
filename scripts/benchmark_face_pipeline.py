@@ -22,7 +22,7 @@ from app import config  # noqa: E402
 from app.faces.face_dataset import (  # noqa: E402
     FaceModelUnavailable,
     ImageRejected,
-    InsightFaceAnalyzer,
+    OpenCVZooFaceAnalyzer,
 )
 from app.faces.face_recognition import _crop_person, rank_person_scores  # noqa: E402
 
@@ -121,7 +121,7 @@ def _synthetic_match_benchmarks(iterations: int) -> dict:
 
 
 def _analyze_and_count(
-        analyzer: InsightFaceAnalyzer, image: np.ndarray,
+        analyzer: OpenCVZooFaceAnalyzer, image: np.ndarray,
         outcomes: dict[str, int],
 ) -> None:
     try:
@@ -133,11 +133,11 @@ def _analyze_and_count(
 
 def _model_benchmarks(image: np.ndarray, iterations: int) -> dict:
     report = {}
-    for provider in ("cuda", "cpu"):
+    for provider in ("cpu",):
         resources = _ResourceSampler()
         resources.start()
         try:
-            analyzer = InsightFaceAnalyzer(provider_preference=provider)
+            analyzer = OpenCVZooFaceAnalyzer(provider_preference=provider)
         except FaceModelUnavailable as exc:
             resources.stop()
             report[provider] = {
@@ -158,8 +158,8 @@ def _model_benchmarks(image: np.ndarray, iterations: int) -> dict:
                 ),
                 "outcomes": outcomes,
                 "note": (
-                    "InsightFace exposes detection and embedding together through "
-                    "FaceAnalysis.get; these timings cannot separate the two."
+                    "YuNet detection and SFace embedding are measured together; "
+                    "these timings cannot separate the two."
                 ),
             }
         finally:

@@ -1,9 +1,0 @@
-# Optional CPU-only face stack. No model weights are installed or downloaded.
-insightface==2.1
-onnxruntime==1.30.0
-numpy==2.5.3
-opencv-python==5.0.0.93
-onnx==1.23.2
-scipy==1.18.1
-scikit-image==0.26.0
-openpyxl==3.1.5

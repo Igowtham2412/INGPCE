@@ -15,8 +15,10 @@ const state = {
   analyticsStats: null, analyticsWindowHours: 24, analyticsResizeTimer: null,
   canManageAlertDelivery: false,
   canReviewFaceMatches: false,
+  canManageFaceSettings: false,
   wallColumns: 4,
   playbackActive: false,
+  faceFilterTimer: null,
 };
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -33,6 +35,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupLightbox();
   setupViolationsGallery();
   setupFaceMatches();
+  setupFaceEnrollment();
   setupCameraViewer();
   setupCameraModal();
   setupGroupsModal();
@@ -95,6 +98,7 @@ async function initializeAuthentication() {
     installCsrfFetch(session.csrf_token);
     state.canManageAlertDelivery = ["admin", "manager"].includes(session.user.role);
     state.canReviewFaceMatches = ["admin", "manager"].includes(session.user.role);
+    state.canManageFaceSettings = session.user.role === "admin";
     document.getElementById("alertDeliveryTab").hidden = !state.canManageAlertDelivery;
     document.getElementById("faceMatchesTab").hidden = !state.canReviewFaceMatches;
     if (session.user.role !== "admin") {
@@ -984,14 +988,7 @@ function setupViolationsGallery() {
     const faceButton = event.target.closest("[data-face-match-open]");
     if (faceButton) {
       event.stopPropagation();
-      const card = faceButton.closest(".violation-card");
-      const panel = card.querySelector("[data-face-match-panel]");
-      if (panel.hidden) {
-        panel.hidden = false;
-        await loadFaceMatchPanel(Number(faceButton.dataset.faceMatchOpen), panel);
-      } else {
-        panel.hidden = true;
-      }
+      await showFaceMatchDetail(Number(faceButton.dataset.faceMatchOpen));
       return;
     }
 
@@ -1146,13 +1143,16 @@ async function loadViolationsGallery(append = false) {
       const snapshotUrl = row.snapshot_url;
       const detectedAt = row.detected_at ? new Date(row.detected_at).toLocaleString() : "";
       const reviewStatus = row.review_status || "unreviewed";
-      const faceEligible = ["no_helmet", "no_vest", "phone_detected"].includes(row.violation_type);
+      const faceEligible = ["no_helmet", "no_arc_flash_suit", "phone_detected"].includes(row.violation_type);
       const faceMatchStatus = faceEligible && row.face_recognition_enabled
         ? (row.face_match_available
           ? "Face match available"
-          : (state.canReviewFaceMatches ? "Face match pending" : ""))
+          : (state.canReviewFaceMatches ? "Face match queued" : ""))
         : "";
-      card.innerHTML = `<div class="thumb-wrap">${snapshotUrl ? `<img src="${snapshotUrl}" alt="${escapeHtml(label)}" loading="lazy" />` : `<div class="thumb-placeholder">No image</div>`}<span class="thumb-badge">${label.toUpperCase()}</span></div><div class="card-meta"><div class="card-cam">${escapeHtml(row.camera_name || row.camera_id)}</div><div class="card-time">${escapeHtml(row.area_group || row.zone || "")} · ${detectedAt}</div><div class="review-status">${escapeHtml(reviewStatus.replace("_", " "))}</div>${faceMatchStatus ? `<div class="face-match-availability">${faceMatchStatus}${state.canReviewFaceMatches ? ` <button type="button" class="icon-btn" data-face-match-open="${row.id}">View face match</button>` : ""}</div>` : ""}<div class="face-match-panel" data-face-match-panel hidden></div><div class="review-actions"><button type="button" class="icon-btn" data-review="${row.id}" data-review-status="confirmed">Confirm</button><button type="button" class="icon-btn danger" data-review="${row.id}" data-review-status="false_positive">False positive</button>${row.clean_snapshot_url ? `<a class="icon-btn" href="${row.clean_snapshot_url}" target="_blank" rel="noopener">Clean</a>` : ""}${row.video_url ? `<a class="icon-btn" href="${row.video_url}" target="_blank" rel="noopener">Clip</a>` : ""}</div></div>`;
+      const faceMatchAction = state.canReviewFaceMatches && faceEligible
+        ? `<button type="button" class="icon-btn" data-face-match-open="${row.id}">Open Face Match</button>`
+        : "";
+      card.innerHTML = `<div class="thumb-wrap">${snapshotUrl ? `<img src="${snapshotUrl}" alt="${escapeHtml(label)}" loading="lazy" />` : `<div class="thumb-placeholder">No image</div>`}<span class="thumb-badge">${label.toUpperCase()}</span></div><div class="card-meta"><div class="card-cam">${escapeHtml(row.camera_name || row.camera_id)}</div><div class="card-time">${escapeHtml(row.area_group || row.zone || "")} · ${detectedAt}</div><div class="review-status">${escapeHtml(reviewStatus.replace("_", " "))}</div>${faceMatchStatus ? `<div class="face-match-availability">${faceMatchStatus}${state.canReviewFaceMatches ? ` <button type="button" class="icon-btn" data-face-match-open="${row.id}">View face match</button>` : ""}</div>` : ""}<div class="face-match-panel" data-face-match-panel hidden></div><div class="review-actions">${faceMatchAction}<button type="button" class="icon-btn" data-review="${row.id}" data-review-status="confirmed">Confirm</button><button type="button" class="icon-btn danger" data-review="${row.id}" data-review-status="false_positive">False positive</button>${row.clean_snapshot_url ? `<a class="icon-btn" href="${row.clean_snapshot_url}" target="_blank" rel="noopener">Clean</a>` : ""}${row.video_url ? `<a class="icon-btn" href="${row.video_url}" target="_blank" rel="noopener">Clip</a>` : ""}</div></div>`;
       if (snapshotUrl) {
         card.setAttribute("role", "button");
         card.tabIndex = 0;
@@ -1185,12 +1185,14 @@ async function loadFaceMatchPanel(incidentId, panel) {
       throw new Error(error.detail || `HTTP ${response.status}`);
     }
     const match = await response.json();
-    const candidates = Array.isArray(match.top3_candidates) ? match.top3_candidates : [];
+    const candidates = Array.isArray(match.top5_candidates)
+      ? match.top5_candidates
+      : (Array.isArray(match.top3_candidates) ? match.top3_candidates : []);
     const reviewed = ["Confirmed", "Reassigned"].includes(match.review_decision);
-    const hasCandidate = ["Identified", "Suggested"].includes(match.status)
+    const hasCandidate = ["MATCHED", "NEEDS_REVIEW"].includes(match.status)
       && match.matched_full_name;
     const heading = hasCandidate
-      ? `${reviewed ? "Reviewer-confirmed" : "Possible match (pending review)"}: ${escapeHtml(match.matched_full_name)}`
+      ? `${reviewed ? "Reviewer-confirmed" : "Suggested candidate"}: ${escapeHtml(match.matched_full_name)}`
       : escapeHtml(match.status || "No match details");
     const similarity = match.similarity !== null && match.similarity !== undefined
       && Number.isFinite(Number(match.similarity))
@@ -1205,8 +1207,9 @@ async function loadFaceMatchPanel(incidentId, panel) {
       ).join("")}</ul>`
       : "";
     let actions = "";
-    if (!reviewed && ["Identified", "Suggested"].includes(match.status)) {
+    if (!reviewed && ["MATCHED", "NEEDS_REVIEW"].includes(match.status)) {
       actions += `<button type="button" class="icon-btn" data-face-review="Confirmed" data-incident-id="${incidentId}">Confirm match</button><button type="button" class="icon-btn danger" data-face-review="Rejected" data-incident-id="${incidentId}">Reject match</button>`;
+      actions += `<button type="button" class="icon-btn" data-face-review="Unknown" data-incident-id="${incidentId}">Mark unknown</button>`;
       const enrollmentsResponse = await fetch("/api/face/enrollments");
       if (!enrollmentsResponse.ok) {
         const error = await enrollmentsResponse.json().catch(() => ({ detail: `HTTP ${enrollmentsResponse.status}` }));
@@ -1220,7 +1223,7 @@ async function loadFaceMatchPanel(incidentId, panel) {
         ).join("")}</select><button type="button" class="icon-btn" data-face-reassign data-incident-id="${incidentId}">Reassign</button></div>`;
       }
     }
-    if (["Not available", "Error", "No face found", "Not identified"].includes(match.status)) {
+    if (["UNKNOWN", "FACE_NOT_VISIBLE", "Error"].includes(match.status)) {
       actions += `<button type="button" class="icon-btn" data-face-reprocess data-incident-id="${incidentId}">Reprocess</button>`;
     }
     const reviewLabel = reviewed ? `Reviewed: ${escapeHtml(match.review_decision)}` : "";
@@ -1231,12 +1234,87 @@ async function loadFaceMatchPanel(incidentId, panel) {
 }
 
 function setupFaceMatches() {
-  document.getElementById("faceViolationTypeFilter").addEventListener(
-    "change", loadFaceMatches,
-  );
+  const filterIds = [
+    "faceViolationTypeFilter", "faceFromFilter", "faceToFilter",
+    "faceCameraFilter", "faceStatusFilter", "faceEmployeeFilter",
+    "faceDepartmentFilter", "faceScoreMin", "faceScoreMax",
+    "faceSearchFilter", "faceSourceFilter",
+  ];
+  filterIds.forEach((id) => {
+    const element = document.getElementById(id);
+    element.addEventListener(
+      element.type === "search" ? "input" : "change",
+      () => {
+        window.clearTimeout(state.faceFilterTimer);
+        state.faceFilterTimer = window.setTimeout(loadFaceMatches, 250);
+      },
+    );
+  });
   document.getElementById("btnRefreshFaceMatches").addEventListener(
     "click", loadFaceMatches,
   );
+  document.getElementById("btnPrintFaceMatches").addEventListener(
+    "click", () => window.print(),
+  );
+  document.getElementById("faceMatchesBody").addEventListener("click", (event) => {
+    const row = event.target.closest("[data-face-match-id]");
+    if (row) showFaceMatchDetail(Number(row.dataset.faceMatchId));
+  });
+  document.getElementById("faceMatchesBody").addEventListener("keydown", (event) => {
+    const row = event.target.closest("[data-face-match-id]");
+    if (row && ["Enter", " "].includes(event.key)) {
+      event.preventDefault();
+      showFaceMatchDetail(Number(row.dataset.faceMatchId));
+    }
+  });
+  document.getElementById("btnCloseFaceMatchDrawer").addEventListener(
+    "click", () => { document.getElementById("faceMatchDrawer").hidden = true; },
+  );
+  document.getElementById("faceMatchDrawer").addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-face-drawer-action]");
+    if (!button) return;
+    const incidentId = Number(button.dataset.incidentId);
+    const action = button.dataset.faceDrawerAction;
+    button.disabled = true;
+    try {
+      let response;
+      if (action === "rerun") {
+        response = await fetch(`/api/face-matches/${incidentId}/rerun`, {
+          method: "POST",
+        });
+      } else if (action === "history") {
+        await showEmployeeHistory(Number(button.dataset.personId));
+        button.disabled = false;
+        return;
+      } else {
+        const payload = { decision: action };
+        if (action === "Reassigned") {
+          payload.person_id = Number(
+            document.getElementById("faceDrawerReassign").value,
+          );
+        }
+        response = await fetch(`/api/face-matches/${incidentId}/review`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      }
+      if (!response.ok) {
+        const error = await response.json().catch(
+          () => ({ detail: `HTTP ${response.status}` }),
+        );
+        throw new Error(error.detail || `HTTP ${response.status}`);
+      }
+      await Promise.all([showFaceMatchDetail(incidentId), loadFaceMatches()]);
+    } catch (error) {
+      document.getElementById("faceMatchDrawerContent").insertAdjacentHTML(
+        "afterbegin",
+        `<p class="face-match-error">${escapeHtml(error.message)}</p>`,
+      );
+    } finally {
+      button.disabled = false;
+    }
+  });
   document.getElementById("faceAnalyticsTypeFilter").addEventListener(
     "change", loadFaceAnalytics,
   );
@@ -1248,6 +1326,49 @@ function setupFaceMatches() {
   );
   document.getElementById("btnRefreshFaceStatus").addEventListener(
     "click", loadFaceRecognitionStatus,
+  );
+  document.getElementById("btnRefreshFaceEmployees").addEventListener(
+    "click", loadFaceEmployees,
+  );
+  setupFaceHistorian();
+  setupFaceMatchSettings();
+  loadFaceHistorianCameras();
+  document.getElementById("faceEmployeesBody").addEventListener(
+    "click", async (event) => {
+      const historyButton = event.target.closest("[data-employee-history]");
+      if (historyButton) {
+        await showEmployeeHistory(Number(historyButton.dataset.employeeHistory));
+        return;
+      }
+      const deactivateButton = event.target.closest("[data-employee-deactivate]");
+      const deleteButton = event.target.closest("[data-employee-delete]");
+      const button = deactivateButton || deleteButton;
+      if (!button) return;
+      const personId = Number(button.dataset.employeeDeactivate || button.dataset.employeeDelete);
+      if (!window.confirm(
+        deleteButton
+          ? "Permanently delete this employee's face enrollment and embeddings?"
+          : "Opt this employee out and delete enrolled face embeddings?",
+      )) return;
+      button.disabled = true;
+      try {
+        const response = await fetch(
+          `/api/face/enrollments/${personId}${deleteButton ? "" : "/deactivate"}`,
+          { method: deleteButton ? "DELETE" : "POST" },
+        );
+        if (!response.ok) {
+          const error = await response.json().catch(
+            () => ({ detail: `HTTP ${response.status}` }),
+          );
+          throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+        await loadFaceEmployees();
+      } catch (error) {
+        window.alert(`Employee privacy action failed: ${error.message}`);
+      } finally {
+        button.disabled = false;
+      }
+    },
   );
   document.querySelectorAll("[data-face-subtab]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -1262,16 +1383,105 @@ function setupFaceMatches() {
       if (button.dataset.faceSubtab === "matches") loadFaceMatches();
       if (button.dataset.faceSubtab === "analytics") loadFaceAnalytics();
       if (button.dataset.faceSubtab === "status") loadFaceRecognitionStatus();
+      if (button.dataset.faceSubtab === "historian") {
+        loadFaceHistorianJobs();
+        loadFaceEmployees();
+      }
+      if (button.dataset.faceSubtab === "employees") loadFaceEmployees();
+      if (button.dataset.faceSubtab === "settings") loadFaceMatchSettings();
     });
+  });
+}
+
+function setupFaceEnrollment() {
+  const form = document.getElementById("faceEnrollmentForm");
+  const status = document.getElementById("faceEnrollmentStatus");
+  const button = document.getElementById("btnSubmitFaceEnrollment");
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!form.reportValidity()) return;
+
+    button.disabled = true;
+    status.textContent = "Validating the face photo and saving the employee enrollment…";
+    try {
+      const response = await fetch("/api/face/enrollments/upload", {
+        method: "POST",
+        body: new FormData(form),
+      });
+      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.detail || `HTTP ${response.status}`);
+      }
+
+      const notes = [];
+      if (result.accepted === 0 && result.duplicates > 0) {
+        notes.push("This photo was already enrolled; the existing enrollment was kept.");
+      } else {
+        notes.push(`${result.accepted} photo added to the face index.`);
+      }
+      if (result.rejected > 0) {
+        notes.push(`${result.rejected} existing photo(s) need attention.`);
+      }
+      status.textContent = `Employee ${result.employee_code} saved. ${notes.join(" ")}`;
+      form.reset();
+    } catch (error) {
+      status.textContent = `Enrollment failed: ${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  const bulkForm = document.getElementById("faceBulkEnrollmentForm");
+  bulkForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const status = document.getElementById("faceBulkEnrollmentStatus");
+    const submit = bulkForm.querySelector("button[type=submit]");
+    submit.disabled = true;
+    status.textContent = "Validating the consented ZIP dataset and importing photos…";
+    try {
+      const response = await fetch("/api/face/import-upload", {
+        method: "POST",
+        body: new FormData(bulkForm),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+      status.textContent = `Import complete: ${result.people} employees, ${result.accepted} photos accepted, ${result.rejected} rejected.`;
+      bulkForm.reset();
+      await loadFaceEmployees();
+    } catch (error) {
+      status.textContent = `Import failed: ${error.message}`;
+    } finally {
+      submit.disabled = false;
+    }
   });
 }
 
 async function loadFaceMatches() {
   const body = document.getElementById("faceMatchesBody");
-  body.innerHTML = `<tr><td colspan="7" class="empty-state">Loading face matches…</td></tr>`;
+  body.innerHTML = `<tr><td colspan="10" class="empty-state">Loading face matches…</td></tr>`;
   const params = new URLSearchParams({ limit: "100" });
-  const type = document.getElementById("faceViolationTypeFilter").value;
-  if (type) params.set("violation_type", type);
+  const values = {
+    violation_type: document.getElementById("faceViolationTypeFilter").value,
+    date_from: document.getElementById("faceFromFilter").value,
+    date_to: document.getElementById("faceToFilter").value,
+    camera_id: document.getElementById("faceCameraFilter").value,
+    status: document.getElementById("faceStatusFilter").value,
+    employee: document.getElementById("faceEmployeeFilter").value,
+    department: document.getElementById("faceDepartmentFilter").value,
+    score_min: document.getElementById("faceScoreMin").value,
+    score_max: document.getElementById("faceScoreMax").value,
+    search: document.getElementById("faceSearchFilter").value,
+    source: document.getElementById("faceSourceFilter").value,
+  };
+  Object.entries(values).forEach(([key, value]) => {
+    if (!value) return;
+    params.set(
+      key,
+      key === "date_from" || key === "date_to"
+        ? new Date(value).toISOString()
+        : value,
+    );
+  });
   try {
     const response = await fetch(`/api/face/matches?${params}`);
     if (!response.ok) {
@@ -1281,25 +1491,40 @@ async function loadFaceMatches() {
     const matches = await response.json();
     body.replaceChildren();
     if (!matches.length) {
-      body.innerHTML = `<tr><td colspan="7" class="empty-state">No face matches for this filter.</td></tr>`;
+      body.innerHTML = `<tr><td colspan="10" class="empty-state">No face matches for this filter.</td></tr>`;
       return;
     }
     matches.forEach((match) => {
       const row = document.createElement("tr");
+      row.dataset.faceMatchId = match.incident_id;
+      row.tabIndex = 0;
+      row.setAttribute("role", "button");
       const fields = [
         match.epoch_time ? new Date(Number(match.epoch_time) * 1000).toLocaleString() : "—",
         `#${match.incident_id}`,
-        match.camera_name || match.camera_id || "—",
+        `<div class="face-list-evidence">${match.snapshot_url
+          ? `<img class="face-list-thumbnail" src="${escapeHtml(match.snapshot_url)}" alt="Violation image" loading="lazy" />`
+          : `<span class="face-list-placeholder">No image</span>`}${match.face_crop_url
+          ? `<img class="face-list-thumbnail face-list-face" src="${escapeHtml(match.face_crop_url)}" alt="Detected face crop" loading="lazy" />`
+          : `<span class="face-list-placeholder">No face</span>`}</div>`,
+        [match.camera_name || match.camera_id || "—", match.area_group_name]
+          .filter(Boolean).join(" · "),
         formatViolationLabel(match.violation_type),
+        `${match.full_name || "—"}${match.employee_code ? ` (${match.employee_code})` : ""}${match.similarity == null ? "" : ` · ${(Number(match.similarity) * 100).toFixed(1)}%`}`,
         faceMatchDisplayStatus(match),
+        match.violation_status || "—",
         match.review_decision || "Pending review",
-        match.reused_from_track ? "Reused from track" : "Processed",
+        match.source || "live",
       ];
       fields.forEach((value, index) => {
         const cell = document.createElement("td");
-        cell.textContent = value;
-        if (index === 3) cell.className = "face-violation-badge";
-        if (index === 4 && match.similarity != null) {
+        if (index === 2) {
+          cell.innerHTML = value;
+        } else {
+          cell.textContent = value;
+        }
+        if (index === 4) cell.className = "face-violation-badge";
+        if (index === 5 && match.similarity != null) {
           cell.title = `Similarity ${(Number(match.similarity) * 100).toFixed(1)}%`;
         }
         row.appendChild(cell);
@@ -1307,17 +1532,330 @@ async function loadFaceMatches() {
       body.appendChild(row);
     });
   } catch (error) {
-    body.innerHTML = `<tr><td colspan="7" class="face-match-error">Could not load face matches: ${escapeHtml(error.message)}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="10" class="face-match-error">Could not load face matches: ${escapeHtml(error.message)}</td></tr>`;
   }
 }
 
 function faceMatchDisplayStatus(match) {
-  if (["Identified", "Suggested"].includes(match.status) && match.full_name) {
+  if (["MATCHED", "NEEDS_REVIEW"].includes(match.status) && match.full_name) {
     return ["Confirmed", "Reassigned"].includes(match.review_decision)
       ? `Reviewer-confirmed: ${match.full_name}`
-      : `Possible match (pending review): ${match.full_name}`;
+      : `Suggested: ${match.full_name}`;
   }
-  return match.status || "Not available";
+  return ({
+    FACE_NOT_VISIBLE: "Face Not Visible",
+    NEEDS_REVIEW: "Needs Review",
+    MATCHED: "Matched",
+    UNKNOWN: "Unknown",
+  })[match.status] || match.status || "Not available";
+}
+
+function faceBoxOverlay(box, frameWidth, frameHeight, className) {
+  if (!Array.isArray(box) || box.length !== 4 || !frameWidth || !frameHeight) return "";
+  const [x1, y1, x2, y2] = box.map(Number);
+  if (![x1, y1, x2, y2].every(Number.isFinite) || x2 <= x1 || y2 <= y1) return "";
+  return `<span class="face-box-overlay ${className}" style="left:${Math.max(0, x1 / frameWidth * 100)}%;top:${Math.max(0, y1 / frameHeight * 100)}%;width:${Math.min(100, (x2 - x1) / frameWidth * 100)}%;height:${Math.min(100, (y2 - y1) / frameHeight * 100)}%"></span>`;
+}
+
+async function showFaceMatchDetail(incidentId) {
+  const drawer = document.getElementById("faceMatchDrawer");
+  const content = document.getElementById("faceMatchDrawerContent");
+  drawer.hidden = false;
+  document.getElementById("faceMatchDrawerTitle").textContent = `FACE MATCH · INCIDENT #${incidentId}`;
+  content.innerHTML = `<p class="face-match-status">Loading face-match details…</p>`;
+  try {
+    const response = await fetch(`/api/face-matches/${incidentId}`);
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    const match = await response.json();
+    const candidates = Array.isArray(match.top5_candidates)
+      ? match.top5_candidates
+      : (Array.isArray(match.top3_candidates) ? match.top3_candidates : []);
+    const metadata = match.detection_metadata || {};
+    const frameWidth = Number(metadata.frame_width);
+    const frameHeight = Number(metadata.frame_height);
+    const original = match.snapshot_url
+      ? `<a href="${escapeHtml(match.snapshot_url)}" target="_blank" rel="noopener"><img class="face-detail-original" src="${escapeHtml(match.snapshot_url)}" alt="Original incident image" /></a>`
+      : `<div class="thumb-placeholder">Original image unavailable</div>`;
+    const overlays = faceBoxOverlay(
+      metadata.person_box, frameWidth, frameHeight, "person",
+    ) + faceBoxOverlay(match.face_bbox, frameWidth, frameHeight, "face");
+    const crop = match.face_crop_available
+      ? `<img class="face-detail-crop" src="/api/violations/${incidentId}/face-crop" alt="Detected face crop" />`
+      : `<div class="thumb-placeholder">No usable face crop</div>`;
+    const candidatesMarkup = candidates.length
+      ? `<ol class="face-match-candidates">${candidates.map((candidate) =>
+        `<li><button type="button" class="link-button" data-face-drawer-action="history" data-person-id="${Number(candidate.person_id)}">${escapeHtml(candidate.full_name || "Enrolled candidate")} (${escapeHtml(candidate.employee_code || "—")})</button> · ${(Number(candidate.similarity) * 100).toFixed(1)}%</li>`,
+      ).join("")}</ol>`
+      : `<p>No candidates were returned.</p>`;
+    let employeePhotos = "";
+    if (match.matched_person_id) {
+      const photosResponse = await fetch(
+        `/api/face/employees/${match.matched_person_id}/photos`,
+      );
+      if (photosResponse.ok) {
+        const photos = await photosResponse.json();
+        employeePhotos = photos.map((photo) =>
+          `<figure><img class="face-enrolled-photo" src="${escapeHtml(photo.url)}" alt="Enrolled employee photo" /><figcaption>Quality ${(Number(photo.quality_score) * 100).toFixed(0)}%</figcaption></figure>`,
+        ).join("");
+      }
+    }
+    const employee = match.matched_full_name
+      ? `<div class="face-detail-employee"><strong>${escapeHtml(match.matched_full_name)}</strong> · ${escapeHtml(match.matched_employee_code || "")}<br />${escapeHtml(match.matched_department || "Department unavailable")} · ${escapeHtml(match.matched_designation || "Designation unavailable")}<br /><button type="button" class="link-button" data-face-drawer-action="history" data-person-id="${Number(match.matched_person_id)}">View employee violation history</button></div>`
+      : `<p>No employee is assigned as the best match.</p>`;
+    const enrollmentResponse = await fetch("/api/face/enrollments");
+    const enrollments = enrollmentResponse.ok ? await enrollmentResponse.json() : [];
+    const activeEmployees = enrollments.filter((person) => person.active);
+    const reassign = activeEmployees.length
+      ? `<label>Reassign to <select id="faceDrawerReassign">${activeEmployees.map((person) =>
+        `<option value="${person.person_id}">${escapeHtml(person.full_name)} (${escapeHtml(person.employee_code)})</option>`,
+      ).join("")}</select></label><button type="button" data-face-drawer-action="Reassigned" data-incident-id="${incidentId}">Reassign</button>`
+      : "";
+    const status = match.status || "UNKNOWN";
+    const score = match.similarity == null ? "—" : `${(Number(match.similarity) * 100).toFixed(1)}%`;
+    content.innerHTML = `<p class="face-recognition-notice">Automated result only; a human reviewer must make the final identity decision. This result is not a disciplinary action.</p>
+      <div class="face-detail-grid"><div><h4>ORIGINAL INCIDENT · ${escapeHtml(formatViolationLabel(match.violation_type))}</h4>
+        <div class="face-original-wrap">${original}${overlays}</div>
+        <p>${escapeHtml(match.camera_name || match.camera_id || "Camera unavailable")} · ${escapeHtml(match.area_group_name || "Location unavailable")} · ${match.epoch_time ? new Date(Number(match.epoch_time) * 1000).toLocaleString() : "Time unavailable"}</p>
+        <p>Incident status: ${escapeHtml(match.violation_status || "—")} · Source: ${escapeHtml(match.source || "live")}</p></div>
+        <div><h4>FACE CROP AND EMPLOYEE PHOTOS</h4><div class="face-detail-photos">${crop}${employeePhotos || ""}</div>${employee}</div></div>
+      <p class="face-detail-result"><strong>${escapeHtml(status)}</strong> · Similarity ${escapeHtml(score)} · Model ${escapeHtml(match.model_version || "unavailable")}</p>
+      <h4>TOP CANDIDATES</h4>${candidatesMarkup}
+      <div class="face-detail-actions">
+        <button type="button" data-face-drawer-action="Confirmed" data-incident-id="${incidentId}">Confirm match</button>
+        <button type="button" data-face-drawer-action="Rejected" data-incident-id="${incidentId}">Reject match</button>
+        <button type="button" data-face-drawer-action="Unknown" data-incident-id="${incidentId}">Mark unknown</button>
+        ${reassign}
+        <button type="button" data-face-drawer-action="rerun" data-incident-id="${incidentId}">Re-run matching</button>
+        ${match.review_decision ? `<p>Reviewer decision: ${escapeHtml(match.review_decision)} · ${match.reviewed_at ? new Date(match.reviewed_at).toLocaleString() : ""}</p>` : ""}
+      </div><div id="faceEmployeeHistory"></div>`;
+  } catch (error) {
+    content.innerHTML = `<p class="face-match-error">Could not load face-match details: ${escapeHtml(error.message)}</p>`;
+  }
+}
+
+async function showEmployeeHistory(personId) {
+  const target = document.getElementById("faceEmployeeHistory");
+  if (!target) return;
+  target.textContent = "Loading employee violation history…";
+  try {
+    const response = await fetch(`/api/face/employees/${personId}/history`);
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    const result = await response.json();
+    const rows = result.violations || [];
+    target.innerHTML = `<h4>${escapeHtml(result.employee.full_name)} · REPEAT VIOLATIONS: ${rows.length}</h4>
+      <div class="status-log-scroll"><table class="ops-table"><thead><tr><th>TIME</th><th>INCIDENT</th><th>VIOLATION</th><th>CAMERA</th><th>MATCH</th><th>INCIDENT STATUS</th></tr></thead><tbody>${rows.map((row) =>
+        `<tr><td>${row.epoch_time ? new Date(Number(row.epoch_time) * 1000).toLocaleString() : "—"}</td><td><button type="button" class="link-button" data-face-history-open="${row.incident_id}">#${row.incident_id}</button></td><td>${escapeHtml(formatViolationLabel(row.violation_type))}</td><td>${escapeHtml(row.camera_name || row.camera_id || "—")}</td><td>${escapeHtml(row.status)}</td><td>${escapeHtml(row.violation_status || "—")}</td></tr>`,
+      ).join("")}</tbody></table></div>`;
+    target.querySelectorAll("[data-face-history-open]").forEach((button) => {
+      button.addEventListener("click", () => showFaceMatchDetail(Number(button.dataset.faceHistoryOpen)));
+    });
+  } catch (error) {
+    target.innerHTML = `<p class="face-match-error">${escapeHtml(error.message)}</p>`;
+  }
+}
+
+async function loadFaceHistorianCameras() {
+  const select = document.getElementById("faceHistorianCameras");
+  select.replaceChildren();
+  state.cameras.forEach((camera) => {
+    const id = camera.camera_id || camera.id;
+    if (!id) return;
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = camera.name || id;
+    select.appendChild(option);
+  });
+}
+
+function setupFaceHistorian() {
+  const form = document.getElementById("faceHistorianForm");
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const status = document.getElementById("faceHistorianStatus");
+    const button = form.querySelector("button[type=submit]");
+    button.disabled = true;
+    status.textContent = "Creating a resumable historian job…";
+    try {
+      const from = document.getElementById("faceHistorianFrom").value;
+      const to = document.getElementById("faceHistorianTo").value;
+      const violation_types = [...form.querySelectorAll(
+        'input[name="historian_type"]:checked',
+      )].map((input) => input.value);
+      const payload = {
+        date_from: new Date(from).toISOString(),
+        date_to: new Date(to).toISOString(),
+        camera_ids: [...document.getElementById("faceHistorianCameras").selectedOptions]
+          .map((option) => option.value),
+        violation_types,
+      };
+      const response = await fetch("/api/face/historian-jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+      status.textContent = `Job #${result.id} created with ${result.total_count} unprocessed images.`;
+      await loadFaceHistorianJobs();
+    } catch (error) {
+      status.textContent = `Could not start historian job: ${error.message}`;
+    } finally {
+      button.disabled = false;
+    }
+  });
+  document.getElementById("faceHistorianJobsBody").addEventListener(
+    "click", async (event) => {
+      const button = event.target.closest("[data-historian-action]");
+      if (!button) return;
+      button.disabled = true;
+      try {
+        const response = await fetch(
+          `/api/face/historian-jobs/${button.dataset.jobId}/${button.dataset.historianAction}`,
+          { method: "POST" },
+        );
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+        await loadFaceHistorianJobs();
+      } catch (error) {
+        document.getElementById("faceHistorianStatus").textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    },
+  );
+  document.getElementById("faceAdHocSearchForm").addEventListener(
+    "submit", async (event) => {
+      event.preventDefault();
+      const output = document.getElementById("faceAdHocResults");
+      output.textContent = "Searching the consented gallery…";
+      try {
+        const formData = new FormData();
+        formData.append("image", document.getElementById("faceAdHocImage").files[0]);
+        const response = await fetch("/api/face/search", {
+          method: "POST", body: formData,
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+        const candidates = result.top5_candidates || [];
+        output.innerHTML = `<p>${escapeHtml(result.status)}${result.similarity == null ? "" : ` · ${(Number(result.similarity) * 100).toFixed(1)}%`}</p>
+          <ol>${candidates.map((candidate) => `<li>${escapeHtml(candidate.full_name)} (${escapeHtml(candidate.employee_code)}) · ${(Number(candidate.similarity) * 100).toFixed(1)}%</li>`).join("")}</ol>`;
+      } catch (error) {
+        output.textContent = `Search failed: ${error.message}`;
+      }
+    },
+  );
+  window.setInterval(() => {
+    if (!document.getElementById("face-panel-historian").hidden) loadFaceHistorianJobs();
+  }, 4000);
+}
+
+async function loadFaceHistorianJobs() {
+  const body = document.getElementById("faceHistorianJobsBody");
+  try {
+    const response = await fetch("/api/face/historian-jobs");
+    const jobs = await response.json();
+    if (!response.ok) throw new Error(jobs.detail || `HTTP ${response.status}`);
+    body.replaceChildren();
+    if (!jobs.length) {
+      body.innerHTML = `<tr><td colspan="9" class="empty-state">No historian jobs yet.</td></tr>`;
+      return;
+    }
+    jobs.forEach((job) => {
+      const row = document.createElement("tr");
+      const percentage = job.total_count
+        ? Math.round(Number(job.processed_count) * 100 / Number(job.total_count))
+        : 100;
+      const actions = job.status === "running"
+        ? `<button type="button" data-historian-action="pause" data-job-id="${job.id}">Pause</button><button type="button" data-historian-action="cancel" data-job-id="${job.id}">Cancel</button>`
+        : (job.status === "paused"
+          ? `<button type="button" data-historian-action="resume" data-job-id="${job.id}">Resume</button><button type="button" data-historian-action="cancel" data-job-id="${job.id}">Cancel</button>`
+          : "—");
+      row.innerHTML = `<td>#${job.id}</td><td>${escapeHtml(job.status)}</td>
+        <td><progress max="100" value="${percentage}"></progress> ${job.processed_count}/${job.total_count}</td>
+        <td>${job.matched_count}</td><td>${job.needs_review_count}</td>
+        <td>${job.unknown_count}</td><td>${job.not_visible_count}</td>
+        <td>${job.failed_count}</td><td>${actions}</td>`;
+      body.appendChild(row);
+    });
+  } catch (error) {
+    body.innerHTML = `<tr><td colspan="9" class="face-match-error">${escapeHtml(error.message)}</td></tr>`;
+  }
+}
+
+async function loadFaceEmployees() {
+  const body = document.getElementById("faceEmployeesBody");
+  try {
+    const response = await fetch("/api/face/enrollments");
+    const employees = await response.json();
+    if (!response.ok) throw new Error(employees.detail || `HTTP ${response.status}`);
+    body.replaceChildren();
+    employees.forEach((employee) => {
+      const row = document.createElement("tr");
+      row.innerHTML = `<td>${escapeHtml(employee.employee_code)}</td>
+        <td>${escapeHtml(employee.full_name)}</td><td>${escapeHtml(employee.department || "—")}</td>
+        <td>${escapeHtml(employee.designation || "—")}</td><td>${employee.embedding_count || 0}</td>
+        <td>${employee.consent_recorded ? escapeHtml(employee.consent_date || "Recorded") : "Missing"}</td>
+        <td>${employee.active ? "Active" : "Opted out"}</td>
+        <td><button type="button" data-employee-history="${employee.person_id}">History</button>
+        ${employee.active ? `<button type="button" data-employee-deactivate="${employee.person_id}">Opt out</button>` : ""}
+        ${state.canManageFaceSettings ? `<button type="button" data-employee-delete="${employee.person_id}">Delete</button>` : ""}</td>`;
+      body.appendChild(row);
+    });
+  } catch (error) {
+    body.innerHTML = `<tr><td colspan="8" class="face-match-error">${escapeHtml(error.message)}</td></tr>`;
+  }
+}
+
+function setupFaceMatchSettings() {
+  const form = document.getElementById("faceSettingsForm");
+  const submit = form.querySelector("button[type=submit]");
+  if (!state.canManageFaceSettings) submit.hidden = true;
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const status = document.getElementById("faceSettingsStatus");
+    submit.disabled = true;
+    try {
+      const payload = {
+        high_threshold: Number(document.getElementById("faceHighThreshold").value),
+        low_threshold: Number(document.getElementById("faceLowThreshold").value),
+        minimum_margin: Number(document.getElementById("faceMinimumMargin").value),
+        quality_min_by_violation: {},
+      };
+      const response = await fetch("/api/face/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+      status.textContent = "Thresholds saved. Subsequent results will record these values.";
+    } catch (error) {
+      status.textContent = `Could not save settings: ${error.message}`;
+    } finally {
+      submit.disabled = false;
+    }
+  });
+}
+
+async function loadFaceMatchSettings() {
+  const status = document.getElementById("faceSettingsStatus");
+  try {
+    const response = await fetch("/api/face/settings");
+    const settings = await response.json();
+    if (!response.ok) throw new Error(settings.detail || `HTTP ${response.status}`);
+    document.getElementById("faceHighThreshold").value = settings.high_threshold;
+    document.getElementById("faceLowThreshold").value = settings.low_threshold;
+    document.getElementById("faceMinimumMargin").value = settings.minimum_margin;
+    status.textContent = `Current values loaded from ${settings.source}. Model: ${settings.model_name || "InsightFace buffalo_l"}.`;
+  } catch (error) {
+    status.textContent = `Could not load settings: ${error.message}`;
+  }
 }
 
 async function loadFaceAnalytics() {

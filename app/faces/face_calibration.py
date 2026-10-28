@@ -104,9 +104,14 @@ def load_labeled_incident_crops(
 ) -> tuple[list[CalibrationSample], dict[str, int], dict[str, int]]:
     """Read labeled crops, including camera/type/employee folders."""
     root = crop_root.resolve(strict=True)
-    if not root.is_dir():
-        raise ValueError("Incident crop path must be a directory")
     labels = set(enrolled_codes)
+    if root.is_file():
+        if root.suffix.lower() != ".csv":
+            raise ValueError("Incident-crop manifest must be a CSV file")
+        candidates = _incident_manifest_candidates(root, labels)
+        return _load_calibration_candidates(candidates, analyzer)
+    if not root.is_dir():
+        raise ValueError("Incident crop path must be a directory or CSV file")
     top_level_dirs = sorted(path for path in root.iterdir() if path.is_dir())
     direct_layout = any(
         any(path.is_file() and path.suffix.lower() in _IMAGE_SUFFIXES
@@ -171,6 +176,13 @@ def load_labeled_incident_crops(
     else:
         raise ValueError("No labeled incident-crop folders were found")
 
+    return _load_calibration_candidates(candidates, analyzer)
+
+
+def _load_calibration_candidates(
+        candidates: Sequence[tuple[Path, str, str, str]],
+        analyzer: FaceAnalyzer,
+) -> tuple[list[CalibrationSample], dict[str, int], dict[str, int]]:
     samples: list[CalibrationSample] = []
     rejected: Counter[str] = Counter()
     per_camera_total: Counter[str] = Counter()
@@ -214,6 +226,8 @@ def load_labeled_incident_crops(
             seen_hashes[image_hash] = (label, sample)
         except ImageRejected as exc:
             rejected[exc.reason] += 1
+    if not candidates:
+        raise ValueError("No labeled incident crops were found")
     return samples, dict(rejected), dict(per_camera_total)
 
 
@@ -227,15 +241,77 @@ def _normalize_label(folder_name: str, enrolled_codes: set[str]) -> str:
         )
     return folder_name
 
+
+def _incident_manifest_candidates(
+        manifest_path: Path, enrolled_codes: set[str],
+) -> list[tuple[Path, str, str, str]]:
+    manifest_root = manifest_path.parent.resolve(strict=True)
+    required = {"image_path", "camera_id", "violation_type", "employee_id"}
+    candidates = []
+    with manifest_path.open("r", encoding="utf-8-sig", newline="") as stream:
+        reader = csv.DictReader(stream)
+        if not reader.fieldnames or not required.issubset(reader.fieldnames):
+            raise ValueError(
+                "Incident-crop CSV requires image_path, camera_id, "
+                "violation_type, and employee_id columns"
+            )
+        for line_number, row in enumerate(reader, start=2):
+            if None in row:
+                raise ValueError(
+                    f"Incident-crop CSV row {line_number} has extra columns"
+                )
+            values = {
+                name: (row.get(name) or "").strip() for name in required
+            }
+            if not any(values.values()):
+                continue
+            if not all(values.values()):
+                raise ValueError(
+                    f"Incident-crop CSV row {line_number} has a missing value"
+                )
+            relative_path = Path(values["image_path"])
+            if relative_path.is_absolute():
+                raise ValueError(
+                    f"Incident-crop CSV row {line_number} must use a relative image_path"
+                )
+            try:
+                image_path = (manifest_root / relative_path).resolve(strict=True)
+                image_path.relative_to(manifest_root)
+            except (OSError, ValueError) as exc:
+                raise ValueError(
+                    f"Incident-crop CSV row {line_number} image_path is missing "
+                    "or outside the manifest directory"
+                ) from exc
+            if (
+                not image_path.is_file()
+                or image_path.suffix.lower() not in _IMAGE_SUFFIXES
+            ):
+                raise ValueError(
+                    f"Incident-crop CSV row {line_number} must reference a JPG, "
+                    "JPEG, or PNG image"
+                )
+            candidates.append((
+                image_path,
+                _normalize_label(values["employee_id"], enrolled_codes),
+                values["camera_id"],
+                _normalize_violation_type(values["violation_type"]),
+            ))
+    return candidates
+
+
 def _normalize_violation_type(folder_name: str) -> str:
     aliases = {
         "missing_helmet": "no_helmet", "no_helmet": "no_helmet",
+        "missing_arc_flash_suit": "no_arc_flash_suit",
+        "no_arc_flash_suit": "no_arc_flash_suit",
         "missing_vest": "no_vest", "no_vest": "no_vest",
         "phone_detected": "phone_detected",
     }
     violation_type = aliases.get(folder_name.strip().lower())
     if violation_type is None:
-        raise ValueError("Incident-crop type folders must be helmet, vest, or phone")
+        raise ValueError(
+            "Incident-crop type must be helmet, arc-flash suit, vest, or phone"
+        )
     return violation_type
 
 

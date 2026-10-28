@@ -44,6 +44,9 @@ class _Pool:
 class FaceJobQueueCapacityTests(unittest.IsolatedAsyncioTestCase):
     async def test_full_queue_defers_job_before_insert(self):
         connection = _Connection()
+        connection.fetchrow = AsyncMock(return_value={
+            "violation_type": "no_helmet", "has_evidence": True,
+        })
         with patch.object(db, "get_pool", return_value=_Pool(connection)), patch.object(
             db.config, "FACE_JOB_QUEUE_MAX", 1,
         ):
@@ -51,24 +54,37 @@ class FaceJobQueueCapacityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(queued)
         connection.execute.assert_awaited_once()
-        connection.fetchrow.assert_not_awaited()
-
-    async def test_track_reuse_copies_only_same_camera_track_match(self):
-        connection = _Connection()
-        connection.fetchrow = AsyncMock(return_value={"incident_id": 9})
-        with patch.object(db, "get_pool", return_value=_Pool(connection)):
-            source_incident_id = await db.reuse_face_match_for_track(
-                12, "CAM01", 7, 120, ["no_helmet", "no_vest", "phone_detected"],
-            )
-
-        self.assertEqual(source_incident_id, 9)
-        query = connection.fetchrow.await_args.args[0]
-        self.assertIn("prior.camera_id = $2", query)
-        self.assertIn("prior.track_id = $3", query)
-        self.assertIn("m.reused_from_track = false", query)
-        self.assertIn("'No face found'", query)
-        self.assertEqual(
-            connection.fetchrow.await_args.args[1:],
-            (12, "CAM01", 7, 120, ["no_helmet", "no_vest", "phone_detected"]),
+        connection.fetchrow.assert_awaited_once()
+        self.assertIn(
+            "SELECT count(*) FROM face_recognition_jobs",
+            connection.fetchval.await_args_list[1].args[0],
         )
-        self.assertIn("UPDATE face_recognition_jobs", connection.execute.await_args.args[0])
+
+    async def test_rerun_is_available_without_reviewing_incident_first(self):
+        connection = _Connection()
+        connection.fetchrow = AsyncMock(return_value={
+            "violation_type": "no_helmet",
+            "has_evidence": True,
+        })
+        with patch.object(db, "get_pool", return_value=_Pool(connection)):
+            queued = await db.requeue_face_recognition_job(42)
+
+        self.assertTrue(queued)
+        query = connection.fetchrow.await_args.args[0]
+        self.assertNotIn("review_status", query)
+        self.assertIn("clean_snapshot_path IS NOT NULL OR snapshot_path IS NOT NULL", query)
+        self.assertEqual(connection.execute.await_count, 2)
+
+    async def test_rerun_rejects_ineligible_or_evidence_free_incident(self):
+        for incident in (
+            {"violation_type": "no_vest", "has_evidence": True},
+            {"violation_type": "no_helmet", "has_evidence": False},
+            None,
+        ):
+            connection = _Connection()
+            connection.fetchrow = AsyncMock(return_value=incident)
+            with patch.object(db, "get_pool", return_value=_Pool(connection)):
+                queued = await db.requeue_face_recognition_job(42)
+
+            self.assertFalse(queued)
+            connection.execute.assert_not_awaited()

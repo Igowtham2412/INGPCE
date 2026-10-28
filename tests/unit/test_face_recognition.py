@@ -19,15 +19,15 @@ from app.faces.face_recognition import (
 
 
 class FaceMatchTests(unittest.TestCase):
-    def test_helmet_vest_and_near_person_phone_violations_are_eligible(self):
+    def test_only_supported_violation_types_are_eligible_by_default(self):
         self.assertTrue(violation_requires_face_recognition("no_helmet"))
-        self.assertTrue(violation_requires_face_recognition("no_vest"))
         self.assertTrue(violation_requires_face_recognition("phone_detected"))
-        self.assertFalse(violation_requires_face_recognition("no_arc_flash_suit"))
+        self.assertFalse(violation_requires_face_recognition("no_vest"))
+        self.assertTrue(violation_requires_face_recognition("no_arc_flash_suit"))
 
     def test_violation_eligibility_uses_configured_types(self):
-        with patch.object(config, "FACE_VIOLATION_TYPES", frozenset({"no_vest"})):
-            self.assertTrue(violation_requires_face_recognition("no_vest"))
+        with patch.object(config, "FACE_VIOLATION_TYPES", frozenset({"phone_detected"})):
+            self.assertTrue(violation_requires_face_recognition("phone_detected"))
             self.assertFalse(violation_requires_face_recognition("no_helmet"))
 
     def test_face_violation_config_maps_supported_aliases_and_warns_unknown(self):
@@ -39,7 +39,7 @@ class FaceMatchTests(unittest.TestCase):
             configured = config._face_violation_types()
 
         self.assertEqual(configured, frozenset({
-            "no_helmet", "no_vest", "phone_detected",
+            "no_helmet", "no_arc_flash_suit", "phone_detected",
         }))
         self.assertIn("unknown PPE_FACE_VIOLATION_TYPES", logs.output[0])
 
@@ -54,7 +54,7 @@ class FaceMatchTests(unittest.TestCase):
             min_margin=0.05,
         )
 
-        self.assertEqual(decision[0], "Identified")
+        self.assertEqual(decision[0], "MATCHED")
         self.assertEqual(decision[1], 1)
         self.assertAlmostEqual(decision[3], 0.07)
 
@@ -64,7 +64,7 @@ class FaceMatchTests(unittest.TestCase):
             match_threshold=0.85, suggest_threshold=0.65,
             min_margin=0.05,
         )
-        self.assertEqual(ambiguous[0], "Suggested")
+        self.assertEqual(ambiguous[0], "NEEDS_REVIEW")
 
     def test_below_suggestion_threshold_is_not_identified_or_named(self):
         decision = decide_face_match(
@@ -72,9 +72,9 @@ class FaceMatchTests(unittest.TestCase):
             match_threshold=0.9, suggest_threshold=0.7, min_margin=0.05,
         )
 
-        self.assertEqual(decision[0], "Not identified")
+        self.assertEqual(decision[0], "UNKNOWN")
         self.assertIsNone(decision[1])
-        self.assertEqual(decision[4], [])
+        self.assertEqual(decision[4], [{"person_id": 1, "similarity": 0.62}])
 
     def test_employee_score_strategy_is_configurable(self):
         query = np.array([1.0, 0.0], dtype=np.float32)
@@ -181,16 +181,16 @@ class FaceRecognitionQueueTests(unittest.IsolatedAsyncioTestCase):
         ) as enqueue:
             for incident_id, violation_type in (
                 (43, "no_helmet"), (46, "no_vest"), (47, "phone_detected"),
+                (48, "no_arc_flash_suit"),
             ):
                 worker.enqueue_confirmed_incident(
                     incident_id, "CAM01", 7, violation_type,
                 )
-            worker.enqueue_confirmed_incident(48, "CAM01", 7, "no_arc_flash_suit")
             worker.enqueue_confirmed_incident(49, "CAM01", 7, "no_mask")
             await asyncio.gather(*worker._enqueue_tasks)
             self.assertEqual(
                 [call.args[0] for call in enqueue.await_args_list],
-                [43, 46, 47],
+                [43, 47, 48],
             )
         worker._running = False
 
@@ -240,11 +240,14 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
         worker = FaceRecognitionWorker(analyzer_factory=_Analyzer)
         worker._analyzer = _Analyzer()
         with patch(
+            "app.faces.face_recognition.db.get_face_match_settings",
+            new=AsyncMock(return_value={
+                "high_threshold": 0.6, "low_threshold": 0.45,
+                "minimum_margin": 0.1, "quality_min_by_violation": {},
+            }),
+        ), patch(
             "app.faces.face_recognition._read_person_crop",
             return_value=(np.zeros((64, 64, 3), dtype=np.uint8), [10, 10, 74, 74]),
-        ), patch(
-            "app.faces.face_recognition.db.reuse_face_match_for_track",
-            new=AsyncMock(return_value=None),
         ), patch(
             "app.faces.face_recognition._encryption_key", return_value=b"k" * 32,
         ), patch(
@@ -267,10 +270,10 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "clean_snapshot_path": "not-read-by-test",
             })
 
-        self.assertEqual(complete.await_args.args[1], "Not identified")
+        self.assertEqual(complete.await_args.args[1], "UNKNOWN")
         self.assertIsNone(complete.await_args.args[2])
         self.assertEqual(complete.await_args.args[7], [])
-        self.assertIsNone(complete.await_args.args[-1])
+        self.assertIsInstance(complete.await_args.args[-1], bytes)
 
     async def test_identified_face_crop_is_encrypted_for_manager_review(self):
         key = b"k" * 32
@@ -289,11 +292,14 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
         worker = FaceRecognitionWorker(analyzer_factory=_Analyzer)
         worker._analyzer = _Analyzer()
         with patch(
+            "app.faces.face_recognition.db.get_face_match_settings",
+            new=AsyncMock(return_value={
+                "high_threshold": 0.8, "low_threshold": 0.7,
+                "minimum_margin": 0.1, "quality_min_by_violation": {},
+            }),
+        ), patch(
             "app.faces.face_recognition._read_person_crop",
             return_value=(np.zeros((64, 64, 3), dtype=np.uint8), [0, 0, 64, 64]),
-        ), patch(
-            "app.faces.face_recognition.db.reuse_face_match_for_track",
-            new=AsyncMock(return_value=None),
         ), patch(
             "app.faces.face_recognition._encryption_key", return_value=key,
         ), patch(
@@ -342,7 +348,7 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "clean_snapshot_path": "not-read-by-test",
             })
 
-        self.assertEqual(complete.await_args.args[1], "Identified")
+        self.assertEqual(complete.await_args.args[1], "MATCHED")
         encrypted_crop = complete.await_args.args[-1]
         self.assertIsInstance(encrypted_crop, bytes)
         decoded = cv2.imdecode(
@@ -363,11 +369,14 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
         worker = FaceRecognitionWorker(analyzer_factory=_Analyzer)
         worker._analyzer = _Analyzer()
         with patch(
+            "app.faces.face_recognition.db.get_face_match_settings",
+            new=AsyncMock(return_value={
+                "high_threshold": 0.6, "low_threshold": 0.45,
+                "minimum_margin": 0.1, "quality_min_by_violation": {},
+            }),
+        ), patch(
             "app.faces.face_recognition._read_person_crop",
             return_value=(np.zeros((64, 64, 3), dtype=np.uint8), [10, 10, 74, 74]),
-        ), patch(
-            "app.faces.face_recognition.db.reuse_face_match_for_track",
-            new=AsyncMock(return_value=None),
         ), patch(
             "app.faces.face_recognition.db.complete_face_recognition_job",
             new=AsyncMock(),
@@ -382,33 +391,57 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "clean_snapshot_path": "not-read-by-test",
             })
 
-        self.assertEqual(complete.await_args.args[1], "No face found")
+        self.assertEqual(complete.await_args.args[1], "FACE_NOT_VISIBLE")
         self.assertEqual(complete.await_args.args[7], [])
 
-    async def test_recent_track_match_is_reused_without_model_inference(self):
-        worker = FaceRecognitionWorker(
-            analyzer_factory=lambda: self.fail("model should not be loaded"),
-        )
+    async def test_track_frames_are_analyzed_for_each_new_violation(self):
+        class _Analyzer:
+            model_name = "test-model"
+            model_version = "test-version"
+            runtime_provider = "CPUExecutionProvider"
+
+            def __init__(self):
+                self.calls = 0
+
+            def analyze(self, _image):
+                self.calls += 1
+                raise ImageRejected("no_face")
+
+        analyzer = _Analyzer()
+        worker = FaceRecognitionWorker(analyzer_factory=lambda: analyzer)
+        worker._analyzer = analyzer
+        image = np.zeros((64, 64, 3), dtype=np.uint8)
+        encoded_ok, encoded = cv2.imencode(".jpg", image)
+        self.assertTrue(encoded_ok)
+        worker._pending_crops[101] = [(encoded.tobytes(), [0, 0, 64, 64])]
         with patch(
+            "app.faces.face_recognition.db.get_face_match_settings",
+            new=AsyncMock(return_value={
+                "high_threshold": 0.6, "low_threshold": 0.45,
+                "minimum_margin": 0.1, "quality_min_by_violation": {},
+            }),
+        ), patch(
+            "app.faces.face_recognition._read_person_crop",
+            return_value=(None, None),
+        ), patch(
+            "app.faces.face_recognition.db.complete_face_recognition_job",
+            new=AsyncMock(),
+        ) as complete, patch(
             "app.faces.face_recognition.db.reuse_face_match_for_track",
-            new=AsyncMock(return_value=100),
+            new=AsyncMock(),
         ) as reuse, patch(
             "app.faces.face_recognition.db.write_audit_log", new=AsyncMock(),
-        ) as audit:
+        ):
             await worker._process_job({
                 "incident_id": 101,
                 "camera_id": "CAM01",
                 "track_id": 7,
-                "violation_type": "no_vest",
+                "violation_type": "no_helmet",
             })
 
-        reuse.assert_awaited_once_with(
-            101, "CAM01", 7, config.FACE_TRACK_REUSE_SECONDS,
-            sorted(config.FACE_VIOLATION_TYPES),
-        )
-        self.assertEqual(
-            audit.await_args.args[0], "face_match_reused_from_track",
-        )
+        self.assertEqual(analyzer.calls, 1)
+        self.assertEqual(complete.await_args.args[1], "FACE_NOT_VISIBLE")
+        reuse.assert_not_awaited()
 
 
 if __name__ == "__main__":

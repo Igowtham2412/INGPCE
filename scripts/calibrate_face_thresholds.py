@@ -19,7 +19,7 @@ from app.faces.face_calibration import (  # noqa: E402
     load_reference_samples,
     write_calibration_report,
 )
-from app.faces.face_dataset import InsightFaceAnalyzer  # noqa: E402
+from app.faces.face_dataset import create_face_analyzer  # noqa: E402
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -61,7 +61,7 @@ async def _run(args: argparse.Namespace) -> int:
     if args.min_margin < 0:
         raise ValueError("--min-margin cannot be negative")
 
-    analyzer = InsightFaceAnalyzer()
+    analyzer = create_face_analyzer()
     references, rejected_references = load_reference_samples(
         args.dataset, analyzer, args.consent_name,
         args.consent_date, args.consent_reference,

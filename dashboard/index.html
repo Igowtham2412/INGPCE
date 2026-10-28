@@ -129,7 +129,7 @@
           <button class="ops-btn-sec" id="btnCleanOldViolations" title="Permanently delete incidents and evidence older than 2 days">CLEAN OLDER THAN 2 DAYS</button>
           <span id="violationCleanupStatus" role="status" aria-live="polite"></span>
         </div>
-        <p class="face-recognition-notice">Face recognition is incident-triggered only for confirmed helmet (including combined helmet-and-vest) or phone incidents. It does not identify people on the live wall. Possible matches require manager review.</p>
+        <p class="face-recognition-notice">Face Match runs asynchronously for no-helmet, no-arc-flash-suit, and phone incidents, regardless of incident review status. Results are suggestions for a human reviewer only and must never be treated as automatic disciplinary decisions.</p>
         <div class="incidents-grid" id="violationsGallery"><div class="empty-state">LOADING INCIDENT DATA…</div></div>
         <button class="ops-btn-sec load-more-violations" id="btnLoadMoreViolations" type="button" hidden>LOAD MORE INCIDENTS</button>
       </div>
@@ -138,6 +138,10 @@
         <div class="face-match-subnav" role="tablist" aria-label="Face recognition">
           <button class="face-subtab-btn active" type="button" data-face-subtab="matches">MATCHES</button>
           <button class="face-subtab-btn" type="button" data-face-subtab="analytics">ANALYTICS</button>
+          <button class="face-subtab-btn" type="button" data-face-subtab="enroll">ENROLL EMPLOYEE</button>
+          <button class="face-subtab-btn" type="button" data-face-subtab="historian">HISTORIAN</button>
+          <button class="face-subtab-btn" type="button" data-face-subtab="employees">EMPLOYEES</button>
+          <button class="face-subtab-btn" type="button" data-face-subtab="settings">SETTINGS</button>
           <button class="face-subtab-btn" type="button" data-face-subtab="status">STATUS</button>
         </div>
         <section class="face-subtab-pane active" id="face-panel-matches">
@@ -146,17 +150,40 @@
             <select id="faceViolationTypeFilter">
               <option value="">ALL ELIGIBLE TYPES</option>
               <option value="no_helmet">MISSING HELMET</option>
-              <option value="no_vest">MISSING VEST</option>
+              <option value="no_arc_flash_suit">MISSING ARC FLASH SUIT</option>
               <option value="phone_detected">PHONE DETECTED NEAR PERSON</option>
             </select>
+            <label for="faceFromFilter">FROM</label><input id="faceFromFilter" type="datetime-local" />
+            <label for="faceToFilter">TO</label><input id="faceToFilter" type="datetime-local" />
+            <label for="faceCameraFilter">CAMERA</label><input id="faceCameraFilter" type="search" placeholder="Camera ID" />
+            <label for="faceStatusFilter">MATCH STATUS</label>
+            <select id="faceStatusFilter">
+              <option value="">ALL</option><option value="MATCHED">MATCHED</option>
+              <option value="NEEDS_REVIEW">NEEDS REVIEW</option><option value="UNKNOWN">UNKNOWN</option>
+              <option value="FACE_NOT_VISIBLE">FACE NOT VISIBLE</option><option value="Error">ERROR</option>
+            </select>
+            <label for="faceEmployeeFilter">EMPLOYEE ID</label><input id="faceEmployeeFilter" type="search" />
+            <label for="faceDepartmentFilter">DEPARTMENT</label><input id="faceDepartmentFilter" type="search" />
+            <label for="faceScoreMin">SCORE</label><input id="faceScoreMin" type="number" min="-1" max="1" step="0.01" placeholder="Min" />
+            <input id="faceScoreMax" type="number" min="-1" max="1" step="0.01" placeholder="Max" />
+            <label for="faceSearchFilter">SEARCH</label><input id="faceSearchFilter" type="search" placeholder="Name or employee ID" />
+            <label for="faceSourceFilter">SOURCE</label>
+            <select id="faceSourceFilter"><option value="">ALL</option><option value="live">LIVE</option><option value="historian">HISTORIAN</option></select>
             <button class="ops-btn-sec" id="btnRefreshFaceMatches" type="button">↻ REFRESH</button>
+            <a class="ops-btn-sec" href="/api/face/matches/export.csv">EXPORT CSV</a>
+            <button class="ops-btn-sec" id="btnPrintFaceMatches" type="button">PRINT / PDF</button>
           </div>
           <div class="status-log-scroll">
             <table class="ops-table">
-              <thead><tr><th>TIME</th><th>INCIDENT</th><th>CAMERA</th><th>VIOLATION</th><th>FACE MATCH</th><th>REVIEW</th><th>SOURCE</th></tr></thead>
-              <tbody id="faceMatchesBody"><tr><td colspan="7" class="empty-state">Face matches will appear here after eligible incidents are processed.</td></tr></tbody>
+              <thead><tr><th>TIME</th><th>INCIDENT</th><th>EVIDENCE</th><th>CAMERA / LOCATION</th><th>VIOLATION</th><th>EMPLOYEE / SCORE</th><th>MATCH</th><th>INCIDENT</th><th>REVIEW</th><th>SOURCE</th></tr></thead>
+              <tbody id="faceMatchesBody"><tr><td colspan="10" class="empty-state">Face matches will appear here after eligible incidents are processed.</td></tr></tbody>
             </table>
           </div>
+          <aside id="faceMatchDrawer" class="face-match-drawer" role="dialog" aria-modal="true" aria-labelledby="faceMatchDrawerTitle" hidden>
+            <button class="icon-btn face-drawer-close" id="btnCloseFaceMatchDrawer" type="button" aria-label="Close details">×</button>
+            <h3 id="faceMatchDrawerTitle">FACE MATCH DETAILS</h3>
+            <div id="faceMatchDrawerContent"></div>
+          </aside>
         </section>
         <section class="face-subtab-pane" id="face-panel-analytics" hidden>
           <div class="filter-bar">
@@ -164,7 +191,7 @@
             <select id="faceAnalyticsTypeFilter">
               <option value="">ALL ELIGIBLE TYPES</option>
               <option value="no_helmet">MISSING HELMET</option>
-              <option value="no_vest">MISSING VEST</option>
+              <option value="no_arc_flash_suit">MISSING ARC FLASH SUIT</option>
               <option value="phone_detected">PHONE DETECTED NEAR PERSON</option>
             </select>
             <label for="faceAnalyticsWindow">PERIOD</label>
@@ -186,6 +213,92 @@
           <div class="status-report-panel">
             <div class="status-report-heading"><h3>FACE RECOGNITION STATUS</h3><button class="ops-btn-sec" id="btnRefreshFaceStatus" type="button">↻ REFRESH</button></div>
             <div id="faceRecognitionStatus" class="face-status-content" role="status" aria-live="polite">Loading face-recognition status…</div>
+          </div>
+        </section>
+        <section class="face-subtab-pane" id="face-panel-enroll" hidden>
+          <div class="status-report-panel face-enrollment-panel">
+            <div class="status-report-heading">
+              <div><h3>ENROLL EMPLOYEE</h3><p class="face-recognition-notice">Enroll only employees with documented consent. Photos are encrypted locally; quality-rejected images show a reason. Admin and Manager accounts can enroll people.</p></div>
+            </div>
+            <form id="faceEnrollmentForm" class="face-enrollment-form">
+              <label for="faceEmployeeCode">EMPLOYEE ID
+                <input id="faceEmployeeCode" name="employee_code" type="text" maxlength="64" autocomplete="off" required />
+              </label>
+              <label for="faceEmployeeName">FULL NAME
+                <input id="faceEmployeeName" name="full_name" type="text" maxlength="160" autocomplete="name" required />
+              </label>
+              <label for="faceEmployeeDepartment">DEPARTMENT
+                <input id="faceEmployeeDepartment" name="department" type="text" maxlength="120" required />
+              </label>
+              <label for="faceEmployeeDesignation">DESIGNATION
+                <input id="faceEmployeeDesignation" name="designation" type="text" maxlength="120" />
+              </label>
+              <label for="faceEmployeePhoto">EMPLOYEE PHOTO (JPG OR PNG, UP TO 10 MB)
+                <input id="faceEmployeePhoto" name="photo" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" required />
+              </label>
+              <label class="face-consent-confirmation" for="faceConsentConfirmed">
+                <input id="faceConsentConfirmed" name="consent_confirmed" type="checkbox" value="true" required />
+                <span>I confirm the employee has received the required notice and has documented consent for this face-recognition enrollment.</span>
+              </label>
+              <button class="ops-btn" id="btnSubmitFaceEnrollment" type="submit">SAVE EMPLOYEE AND PHOTO</button>
+            </form>
+            <p id="faceEnrollmentStatus" class="face-enrollment-status" role="status" aria-live="polite">The image and employee details are stored locally in the face dataset. The upload is validated and enrolled immediately.</p>
+            <form id="faceBulkEnrollmentForm" class="face-enrollment-form">
+              <label for="faceBulkArchive">BULK ZIP (CSV/XLSX MANIFEST + PHOTOS)
+                <input id="faceBulkArchive" name="archive" type="file" accept=".zip,application/zip" required />
+              </label>
+              <label for="faceBulkConsentName">BULK CONSENT CONFIRMER (IF MANIFEST HAS NO CONSENT COLUMNS)
+                <input id="faceBulkConsentName" name="consent_name" type="text" maxlength="200" />
+              </label>
+              <label for="faceBulkConsentDate">CONSENT DATE
+                <input id="faceBulkConsentDate" name="consent_date" type="date" />
+              </label>
+              <label for="faceBulkConsentReference">CONSENT RECORD REFERENCE
+                <input id="faceBulkConsentReference" name="consent_reference" type="text" maxlength="500" />
+              </label>
+              <button class="ops-btn" type="submit">IMPORT CONSENTED ZIP DATASET</button>
+            </form>
+            <p id="faceBulkEnrollmentStatus" role="status" aria-live="polite"></p>
+          </div>
+        </section>
+        <section class="face-subtab-pane" id="face-panel-historian" hidden>
+          <div class="status-report-panel">
+            <div class="status-report-heading"><div><h3>RUN ON HISTORIAN IMAGES</h3><p>Backfill stored violation images; already-processed images are skipped.</p></div></div>
+            <form id="faceHistorianForm" class="face-enrollment-form">
+              <label for="faceHistorianFrom">FROM<input id="faceHistorianFrom" type="datetime-local" required /></label>
+              <label for="faceHistorianTo">TO<input id="faceHistorianTo" type="datetime-local" required /></label>
+              <label for="faceHistorianCameras">CAMERAS (EMPTY = ALL)<select id="faceHistorianCameras" multiple size="5"></select></label>
+              <fieldset><legend>VIOLATION TYPES</legend>
+                <label><input type="checkbox" name="historian_type" value="no_helmet" checked /> No helmet</label>
+                <label><input type="checkbox" name="historian_type" value="no_arc_flash_suit" checked /> No arc-flash suit</label>
+                <label><input type="checkbox" name="historian_type" value="phone_detected" checked /> Phone detected</label>
+              </fieldset>
+              <button class="ops-btn" type="submit">START BACKFILL</button>
+            </form>
+            <p id="faceHistorianStatus" role="status" aria-live="polite"></p>
+            <div class="status-log-scroll"><table class="ops-table"><thead><tr><th>JOB</th><th>STATUS</th><th>PROGRESS</th><th>MATCHED</th><th>REVIEW</th><th>UNKNOWN</th><th>NOT VISIBLE</th><th>FAILED</th><th>ACTIONS</th></tr></thead><tbody id="faceHistorianJobsBody"></tbody></table></div>
+          </div>
+          <div class="status-report-panel">
+            <h3>AD-HOC SEARCH</h3><p>Upload an image to search the consented gallery. This is not a violation result.</p>
+            <form id="faceAdHocSearchForm"><input id="faceAdHocImage" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" required /><button class="ops-btn-sec" type="submit">SEARCH TOP MATCHES</button></form>
+            <div id="faceAdHocResults" role="status" aria-live="polite"></div>
+          </div>
+        </section>
+        <section class="face-subtab-pane" id="face-panel-employees" hidden>
+          <div class="status-report-panel"><div class="status-report-heading"><h3>CONSENTED EMPLOYEE GALLERY</h3><button class="ops-btn-sec" id="btnRefreshFaceEmployees" type="button">↻ REFRESH</button></div>
+            <div class="status-log-scroll"><table class="ops-table"><thead><tr><th>EMPLOYEE ID</th><th>NAME</th><th>DEPARTMENT</th><th>DESIGNATION</th><th>PHOTOS</th><th>CONSENT</th><th>STATUS</th><th>ACTIONS</th></tr></thead><tbody id="faceEmployeesBody"></tbody></table></div>
+          </div>
+          <div class="status-report-panel" id="faceEmployeeHistory" aria-live="polite"></div>
+        </section>
+        <section class="face-subtab-pane" id="face-panel-settings" hidden>
+          <div class="status-report-panel"><h3>FACE MATCH THRESHOLDS</h3><p>Initial values are provisional until the labeled local evaluation has been reviewed. Threshold edits are audited and stored with each result.</p>
+            <form id="faceSettingsForm" class="face-enrollment-form">
+              <label for="faceHighThreshold">HIGH (MATCHED)<input id="faceHighThreshold" type="number" min="-1" max="1" step="0.01" required /></label>
+              <label for="faceLowThreshold">LOW (UNKNOWN BELOW)<input id="faceLowThreshold" type="number" min="-1" max="1" step="0.01" required /></label>
+              <label for="faceMinimumMargin">MINIMUM TOP-1 MARGIN<input id="faceMinimumMargin" type="number" min="0" max="2" step="0.01" required /></label>
+              <button class="ops-btn" type="submit">SAVE THRESHOLDS</button>
+            </form>
+            <p id="faceSettingsStatus" role="status" aria-live="polite"></p>
           </div>
         </section>
       </div>

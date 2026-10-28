@@ -9,8 +9,8 @@ from app.faces.face_calibration import (
     CalibrationSample,
     evaluate_queries,
     incident_queries,
-    load_labeled_incident_crops,
     leave_one_out_queries,
+    load_labeled_incident_crops,
 )
 
 
@@ -126,6 +126,64 @@ class FaceCalibrationTests(unittest.TestCase):
         self.assertEqual({sample.label for sample in samples}, {"E001", "not_in_dataset"})
         self.assertEqual(camera_counts, {"CAM01": 2})
         self.assertEqual(rejected, {})
+
+    def test_loads_identity_labeled_csv_manifest(self):
+        class _Analyzer:
+            def analyze(self, _image):
+                return np.array([1.0, 0.0]), {"quality_score": 0.9}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, value in (("known.png", 127), ("unknown.png", 63)):
+                cv2.imwrite(
+                    str(root / name),
+                    np.full((32, 32, 3), value, dtype=np.uint8),
+                )
+            manifest = root / "labels.csv"
+            manifest.write_text(
+                "image_path,camera_id,violation_type,employee_id\n"
+                "known.png,CAM01,no_arc_flash_suit,E001\n"
+                "unknown.png,CAM01,no_arc_flash_suit,not_in_dataset\n",
+                encoding="utf-8",
+            )
+
+            samples, rejected, camera_counts = load_labeled_incident_crops(
+                manifest, {"E001"}, _Analyzer(),
+            )
+
+        self.assertEqual(len(samples), 2)
+        self.assertEqual({sample.violation_type for sample in samples}, {
+            "no_arc_flash_suit",
+        })
+        self.assertEqual({sample.camera for sample in samples}, {"CAM01"})
+        self.assertEqual({sample.label for sample in samples}, {
+            "E001", "not_in_dataset",
+        })
+        self.assertEqual(camera_counts, {"CAM01": 2})
+        self.assertEqual(rejected, {})
+
+    def test_incident_manifest_rejects_paths_outside_its_directory(self):
+        class _Analyzer:
+            def analyze(self, _image):
+                return np.array([1.0, 0.0]), {"quality_score": 0.9}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            image_path = root / "outside.png"
+            cv2.imwrite(
+                str(image_path), np.zeros((32, 32, 3), dtype=np.uint8),
+            )
+            manifest_dir = root / "labels"
+            manifest_dir.mkdir()
+            manifest = manifest_dir / "labels.csv"
+            manifest.write_text(
+                "image_path,camera_id,violation_type,employee_id\n"
+                "../outside.png,CAM01,no_helmet,E001\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "outside the manifest"):
+                load_labeled_incident_crops(manifest, {"E001"}, _Analyzer())
 
     def test_incident_queries_compare_only_to_enrolled_gallery(self):
         references = {
