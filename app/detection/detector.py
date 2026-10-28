@@ -9,7 +9,7 @@ from pathlib import Path
 import torch
 from ultralytics import YOLO
 
-from . import config
+from .. import config
 
 logger = logging.getLogger("ppe.detector")
 _FALLBACK_INFERENCE_LOCK = threading.Lock()

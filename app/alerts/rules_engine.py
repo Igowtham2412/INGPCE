@@ -5,7 +5,7 @@ import logging
 import time
 from dataclasses import dataclass
 
-from . import db
+from .. import db
 
 logger = logging.getLogger("ppe.rules")
 

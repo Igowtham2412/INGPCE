@@ -11,8 +11,8 @@ import argparse
 import cv2
 
 from app import config
-from app.compliance_engine import ComplianceEngine
-from app.detector import PPEDetector
+from app.detection.compliance_engine import ComplianceEngine
+from app.detection.detector import PPEDetector
 
 
 def draw(frame, statuses):

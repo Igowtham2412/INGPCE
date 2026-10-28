@@ -41,9 +41,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from . import auth, config, db, feedback
-from .alert_manager import AlertManager
-from .camera_manager import CameraManager
-from .detector import PPEDetector
+from .alerts.alert_manager import AlertManager
+from .cameras.camera_manager import CameraManager
+from .detection.detector import PPEDetector
 from .faces.face_recognition import FaceRecognitionWorker
 from .ws_hub import hub
 

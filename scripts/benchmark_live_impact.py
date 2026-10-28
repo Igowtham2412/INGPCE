@@ -15,8 +15,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app import config  # noqa: E402
-from app.camera_manager import _encode_annotated_frame  # noqa: E402
-from app.detector import PPEDetector  # noqa: E402
+from app.cameras.camera_manager import _encode_annotated_frame  # noqa: E402
+from app.detection.detector import PPEDetector  # noqa: E402
 from app.faces.face_recognition import (  # noqa: E402
     _crop_person,
     _lower_face_worker_priority,

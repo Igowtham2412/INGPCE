@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from app.camera_manager import CameraManager
+from app.cameras.camera_manager import CameraManager
 
 
 class CameraManagerRefreshTests(unittest.IsolatedAsyncioTestCase):
@@ -47,15 +47,15 @@ class CameraManagerRefreshTests(unittest.IsolatedAsyncioTestCase):
         try:
             with (
                 patch(
-                    "app.camera_manager.db.get_camera",
+                    "app.cameras.camera_manager.db.get_camera",
                     new=AsyncMock(return_value=camera),
                 ),
                 patch(
-                    "app.camera_manager.db.delete_camera_status",
+                    "app.cameras.camera_manager.db.delete_camera_status",
                     new=AsyncMock(),
                 ),
                 patch(
-                    "app.camera_manager.RTSPStream",
+                    "app.cameras.camera_manager.RTSPStream",
                     return_value=replacement_stream,
                 ) as stream_factory,
             ):
@@ -92,10 +92,10 @@ class CameraManagerRefreshTests(unittest.IsolatedAsyncioTestCase):
         manager._detection_metrics["CAM01"] = {"detection_fps": 1}
 
         with patch(
-            "app.camera_manager.db.get_camera",
+            "app.cameras.camera_manager.db.get_camera",
             new=AsyncMock(return_value=camera),
         ), patch(
-            "app.camera_manager.db.delete_camera_status",
+            "app.cameras.camera_manager.db.delete_camera_status",
             new=AsyncMock(),
         ) as delete_status:
             self.assertTrue(

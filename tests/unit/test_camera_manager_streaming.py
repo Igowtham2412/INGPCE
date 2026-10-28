@@ -3,13 +3,13 @@ from unittest.mock import patch
 
 import numpy as np
 
-from app.camera_manager import _encode_annotated_frame
+from app.cameras.camera_manager import _encode_annotated_frame
 
 
 class CameraManagerStreamingTests(unittest.TestCase):
-    @patch("app.camera_manager.cv2.imencode")
-    @patch("app.camera_manager._resize_to_tile")
-    @patch("app.camera_manager._draw_annotations")
+    @patch("app.cameras.camera_manager.cv2.imencode")
+    @patch("app.cameras.camera_manager._resize_to_tile")
+    @patch("app.cameras.camera_manager._draw_annotations")
     def test_annotated_frame_is_encoded_to_jpeg_bytes(
         self, draw, resize, imencode,
     ):
@@ -26,9 +26,9 @@ class CameraManagerStreamingTests(unittest.TestCase):
         resize.assert_called_once_with(frame)
         self.assertIs(draw.call_args.args[0], annotated)
 
-    @patch("app.camera_manager.cv2.imencode", return_value=(False, None))
-    @patch("app.camera_manager._resize_to_tile")
-    @patch("app.camera_manager._draw_annotations")
+    @patch("app.cameras.camera_manager.cv2.imencode", return_value=(False, None))
+    @patch("app.cameras.camera_manager._resize_to_tile")
+    @patch("app.cameras.camera_manager._draw_annotations")
     def test_failed_jpeg_encode_is_not_reported_as_a_frame(
         self, _draw, _resize, _imencode,
     ):

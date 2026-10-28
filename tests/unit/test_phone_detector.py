@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 from app import config
-from app.detector import PPEDetector
+from app.detection.detector import PPEDetector
 
 
 class Value:
@@ -54,8 +54,8 @@ class PhoneDetectorTests(unittest.TestCase):
             phone_model_path.touch()
             with (
                 patch.object(config, "PHONE_MODEL_PATH", str(phone_model_path)),
-                patch("app.detector.YOLO", side_effect=[ppe_model, phone_model]),
-                patch("app.detector.torch.set_num_threads") as set_num_threads,
+                patch("app.detection.detector.YOLO", side_effect=[ppe_model, phone_model]),
+                patch("app.detection.detector.torch.set_num_threads") as set_num_threads,
             ):
                 detector = PPEDetector(model_path="ppe-model.pt", device="cpu")
                 detections = detector.infer(
@@ -88,7 +88,7 @@ class PhoneDetectorTests(unittest.TestCase):
         detector.device = "0"
         detector.half = True
 
-        with patch("app.detector.torch.set_num_threads") as set_num_threads:
+        with patch("app.detection.detector.torch.set_num_threads") as set_num_threads:
             result = detector._predict(model, source=np.zeros((2, 2, 3)))
 
         self.assertEqual(result, ["cpu result"])

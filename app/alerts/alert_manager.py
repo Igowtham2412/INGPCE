@@ -8,7 +8,7 @@ import base64
 from typing import Optional, List
 from urllib.parse import urlsplit
 
-from . import config, db
+from .. import config, db
 from .rules_engine import RulesEngine, ViolationEvent, MatchedAlert
 
 logger = logging.getLogger("ppe.alerts")

@@ -22,16 +22,16 @@ from datetime import UTC, datetime, timedelta
 import cv2
 import numpy as np
 
-from . import config, db
-from .compliance_engine import (
+from .. import config, db
+from ..detection.compliance_engine import (
     ComplianceEngine,
     cooldown_active,
     prune_expired_cooldowns,
     violation_class_for,
 )
-from .faces.face_recognition import violation_requires_face_recognition
+from ..faces.face_recognition import violation_requires_face_recognition
 from .stream_handler import RTSPStream
-from .ws_hub import hub
+from ..ws_hub import hub
 
 logger = logging.getLogger("ppe.camera_manager")
 

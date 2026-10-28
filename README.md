@@ -134,12 +134,10 @@ phone-detected incidents. It does not upload video clips to the flow.
 |---|---|
 | `app/main.py` | FastAPI API, authentication middleware, app startup |
 | `app/config.py` | Environment variables and seed camera/area configuration |
-| `app/camera_manager.py` | Camera worker lifecycle and reconnect/watchdog behavior |
-| `app/stream_handler.py` | Camera capture and frame streaming |
-| `app/detector.py`, `app/compliance_engine.py` | PPE/phone inference, person tracking, and violation decisions |
+| `app/cameras/` | RTSP capture, camera worker lifecycle, reconnect/watchdog behavior |
+| `app/detection/` | PPE/phone inference, person tracking, and compliance decisions |
 | `app/faces/` | Face enrollment, recognition, calibration, validation, and readiness |
-| `app/rules_engine.py` | Rule evaluation and cooldowns |
-| `app/alert_manager.py` | Durable alert outbox and Power Automate delivery |
+| `app/alerts/` | Rule evaluation, cooldowns, durable outbox, and Power Automate delivery |
 | `app/db.py` | PostgreSQL schema, queries, seed synchronization |
 | `dashboard/` | Browser dashboard |
 | `migrations/versions/` | Ordered Alembic database migrations |

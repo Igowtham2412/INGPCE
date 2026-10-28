@@ -5,8 +5,8 @@ from unittest.mock import Mock
 import numpy as np
 
 from app import config
-from app.compliance_engine import ComplianceEngine, _phone_belongs_to_person
-from app.detector import Detection
+from app.detection.compliance_engine import ComplianceEngine, _phone_belongs_to_person
+from app.detection.detector import Detection
 
 
 class ComplianceEnginePhoneTests(unittest.TestCase):

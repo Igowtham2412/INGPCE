@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from app.stream_handler import RTSPStream
+from app.cameras.stream_handler import RTSPStream
 
 
 class _FailedCapture:
@@ -40,7 +40,7 @@ class StreamHandlerReconnectTests(unittest.TestCase):
         main_stream = _OpenedCapture(True)
 
         with patch(
-            "app.stream_handler.cv2.VideoCapture",
+            "app.cameras.stream_handler.cv2.VideoCapture",
             side_effect=[substream, main_stream],
         ) as video_capture:
             capture = stream._open()
@@ -88,9 +88,9 @@ class StreamHandlerReconnectTests(unittest.TestCase):
         )
         stream.last_frame_monotonic = 100
 
-        with patch("app.stream_handler.time.monotonic", return_value=109):
+        with patch("app.cameras.stream_handler.time.monotonic", return_value=109):
             self.assertFalse(stream.is_stale())
-        with patch("app.stream_handler.time.monotonic", return_value=110.1):
+        with patch("app.cameras.stream_handler.time.monotonic", return_value=110.1):
             self.assertTrue(stream.is_stale())
 
     def test_frame_age_reports_age_and_missing_frame(self):
@@ -98,7 +98,7 @@ class StreamHandlerReconnectTests(unittest.TestCase):
         self.assertIsNone(stream.frame_age_seconds())
 
         stream.last_frame_monotonic = 100
-        with patch("app.stream_handler.time.monotonic", return_value=103.5):
+        with patch("app.cameras.stream_handler.time.monotonic", return_value=103.5):
             self.assertEqual(stream.frame_age_seconds(), 3.5)
 
     def test_reconnect_request_marks_stream_offline(self):
@@ -122,7 +122,7 @@ class StreamHandlerReconnectTests(unittest.TestCase):
             stream._running = False
             return capture
 
-        with patch("app.stream_handler.cv2.VideoCapture", side_effect=failed_open):
+        with patch("app.cameras.stream_handler.cv2.VideoCapture", side_effect=failed_open):
             stream._update_loop()
 
         self.assertTrue(capture.released)
@@ -151,7 +151,7 @@ class StreamHandlerReconnectTests(unittest.TestCase):
                 stream._running = False
 
         capture = ReadFailureCapture()
-        with patch("app.stream_handler.cv2.VideoCapture", return_value=capture):
+        with patch("app.cameras.stream_handler.cv2.VideoCapture", return_value=capture):
             stream._update_loop()
 
         self.assertTrue(capture.released)
@@ -181,7 +181,7 @@ class StreamHandlerReconnectTests(unittest.TestCase):
                 stream._running = False
 
         capture = StalledCapture()
-        with patch("app.stream_handler.cv2.VideoCapture", return_value=capture):
+        with patch("app.cameras.stream_handler.cv2.VideoCapture", return_value=capture):
             stream._update_loop()
 
         self.assertTrue(capture.released)

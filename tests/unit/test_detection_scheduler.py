@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from app.camera_manager import CameraManager, DetectionScheduler
+from app.cameras.camera_manager import CameraManager, DetectionScheduler
 
 
 class DetectionSchedulerTests(unittest.TestCase):
@@ -47,7 +47,7 @@ class CameraWatchdogTests(unittest.IsolatedAsyncioTestCase):
         manager._streams["CAM01"] = stream
 
         with patch(
-            "app.camera_manager.asyncio.sleep",
+            "app.cameras.camera_manager.asyncio.sleep",
             new=AsyncMock(side_effect=asyncio.CancelledError),
         ), self.assertRaises(asyncio.CancelledError):
             await manager._watchdog()

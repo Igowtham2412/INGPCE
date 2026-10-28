@@ -7,9 +7,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from app import config
-from app.alert_manager import AlertManager
+from app.alerts.alert_manager import AlertManager
 from app.faces.face_recognition import FaceRecognitionWorker
-from app.rules_engine import MatchedAlert
+from app.alerts.rules_engine import MatchedAlert
 
 
 class FakeResponse:
@@ -33,12 +33,12 @@ class PowerAutomateAlertTests(unittest.IsolatedAsyncioTestCase):
             },
         }
         with patch.object(config, "FACE_INCLUDE_IN_EMAIL", False), patch(
-            "app.alert_manager.db.get_face_match_for_email",
+            "app.alerts.alert_manager.db.get_face_match_for_email",
             new=AsyncMock(),
         ) as get_match, patch.object(
             self.manager, "_dispatch", new=AsyncMock(return_value=True),
         ) as dispatch, patch(
-            "app.alert_manager.db.finish_alert_job", new=AsyncMock(),
+            "app.alerts.alert_manager.db.finish_alert_job", new=AsyncMock(),
         ):
             await self.manager._deliver_job(job)
 
@@ -82,7 +82,7 @@ class PowerAutomateAlertTests(unittest.IsolatedAsyncioTestCase):
         ) as fail_face_job, patch.object(
             self.manager, "_dispatch", new=AsyncMock(return_value=True),
         ) as dispatch, patch(
-            "app.alert_manager.db.finish_alert_job", new=AsyncMock(),
+            "app.alerts.alert_manager.db.finish_alert_job", new=AsyncMock(),
         ):
             await worker.start()
             try:
@@ -112,7 +112,7 @@ class PowerAutomateAlertTests(unittest.IsolatedAsyncioTestCase):
             },
         }
         with patch.object(config, "FACE_INCLUDE_IN_EMAIL", True), patch(
-            "app.alert_manager.db.get_face_match_for_email",
+            "app.alerts.alert_manager.db.get_face_match_for_email",
             new=AsyncMock(return_value={
                 "full_name": "Example Person", "similarity": 0.91,
                 "review_decision": None,
@@ -120,7 +120,7 @@ class PowerAutomateAlertTests(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             self.manager, "_dispatch", new=AsyncMock(return_value=True),
         ) as dispatch, patch(
-            "app.alert_manager.db.finish_alert_job", new=AsyncMock(),
+            "app.alerts.alert_manager.db.finish_alert_job", new=AsyncMock(),
         ):
             await self.manager._deliver_job(job)
 
@@ -139,7 +139,7 @@ class PowerAutomateAlertTests(unittest.IsolatedAsyncioTestCase):
                     "https://flow.example.test/trigger?sig=private",
                 ),
                 patch(
-                    "app.alert_manager.requests.post",
+                    "app.alerts.alert_manager.requests.post",
                     return_value=FakeResponse(200),
                 ) as post,
             ):
@@ -182,7 +182,7 @@ class PowerAutomateAlertTests(unittest.IsolatedAsyncioTestCase):
                 "POWER_AUTOMATE_WEBHOOK_URL",
                 "http://flow.example.test/trigger?sig=private",
             ),
-            patch("app.alert_manager.requests.post") as post,
+            patch("app.alerts.alert_manager.requests.post") as post,
         ):
             delivered = self.manager._send_power_automate(
                 ["safety@example.test"], "Subject", "Body",
@@ -203,7 +203,7 @@ class PowerAutomateAlertTests(unittest.IsolatedAsyncioTestCase):
                     "https://flow.example.test/trigger?sig=private",
                 ),
                 patch(
-                    "app.alert_manager.requests.post",
+                    "app.alerts.alert_manager.requests.post",
                     return_value=FakeResponse(401),
                 ),
             ):
@@ -265,7 +265,7 @@ class PowerAutomateAlertTests(unittest.IsolatedAsyncioTestCase):
                     "https://flow.example.test/trigger?sig=private",
                 ),
                 patch(
-                    "app.alert_manager.requests.post",
+                    "app.alerts.alert_manager.requests.post",
                     return_value=FakeResponse(200),
                 ) as post,
             ):
@@ -299,7 +299,7 @@ class PowerAutomateAlertTests(unittest.IsolatedAsyncioTestCase):
                     "https://flow.example.test/trigger?sig=private",
                 ),
                 patch(
-                    "app.alert_manager.requests.post",
+                    "app.alerts.alert_manager.requests.post",
                     return_value=FakeResponse(200),
                 ) as post,
             ):
@@ -341,7 +341,7 @@ class PowerAutomateAlertTests(unittest.IsolatedAsyncioTestCase):
         match = MatchedAlert(1, "Helmet rule", ["power_automate"], ["safety@example.test"])
         with (
             patch.object(self.manager.rules_engine, "evaluate", AsyncMock(return_value=[match])) as evaluate,
-            patch("app.alert_manager.db.enqueue_alert_job", AsyncMock()) as enqueue,
+            patch("app.alerts.alert_manager.db.enqueue_alert_job", AsyncMock()) as enqueue,
         ):
             queued = await self.manager.handle_violation(
                 10, "CAM01", "CAM01", "Loading Bay", 3, "no_helmet",

@@ -11,7 +11,7 @@ import numpy as np
 from ultralytics.engine.results import Boxes
 from ultralytics.trackers.byte_tracker import BYTETracker
 
-from . import config
+from .. import config
 from .detector import Detection
 
 logger = logging.getLogger("ppe.compliance")
