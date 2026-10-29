@@ -10,6 +10,8 @@ const state = {
   cameras: [], areaGroups: [], rules: [], wsEventsConnected: false,
   wallVideoSocket: null, wallVideoReconnectTimer: null,
   wallVideoReconnectAttempts: 0,
+  wallSubscribedIds: "", wallResubscribeTimer: null,
+  wallFrameBuffer: new Map(), wallRenderQueued: false,
   violationGallery: [], violationGalleryIndex: 0, violationGalleryOffset: 0, cameraViewerId: null,
   cameraStatusReport: null,
   cameraStatusAbortController: null, cameraStatusDebounceTimer: null,
@@ -457,8 +459,8 @@ function renderFeedsGroupedByArea() {
       }
     });
   });
-  connectVideoWall();
   applyLiveWallFilters();
+  connectVideoWall();
 }
 
 function setupLiveWall() {
@@ -504,6 +506,7 @@ function applyLiveWallFilters() {
     group.hidden = visibleTiles === 0;
   });
   updateWallFeedCount();
+  scheduleWallResubscribe();
 }
 
 function updateWallFeedCount() {
@@ -647,19 +650,44 @@ function closeVideoWall() {
   }
   const ws = state.wallVideoSocket;
   state.wallVideoSocket = null;
+  state.wallFrameBuffer.clear();
+  state.wallSubscribedIds = "";
   if (ws) {
     ws.onclose = null;
     ws.onerror = null;
+    ws.onmessage = null;
     try { ws.close(); } catch (error) {
       console.error("Could not close the live wall stream:", error);
     }
   }
 }
 
-function connectVideoWall(replaceExisting = false) {
-  const cameraIds = state.cameras
-    .filter((camera) => camera.enabled && document.getElementById(`canvas-${camera.camera_id}`))
+function visibleWallCameraIds() {
+  return state.cameras
+    .filter((camera) => camera.enabled)
+    .filter((camera) => {
+      const tile = document.getElementById(`tile-${camera.camera_id}`);
+      return tile && !tile.hidden;
+    })
     .map((camera) => camera.camera_id);
+}
+
+// Re-check the wall subscription shortly after filters change so quick
+// successive searches do not reopen the socket for every keystroke.
+function scheduleWallResubscribe() {
+  if (state.wallResubscribeTimer) clearTimeout(state.wallResubscribeTimer);
+  state.wallResubscribeTimer = setTimeout(() => {
+    state.wallResubscribeTimer = null;
+    connectVideoWall();
+  }, 250);
+}
+
+function connectVideoWall(replaceExisting = false) {
+  // Subscribe only to tiles that are actually visible on the wall. Hidden
+  // tiles (filtered by area or search) would otherwise force the server to
+  // keep encoding and pushing frames nobody is watching.
+  const cameraIds = visibleWallCameraIds();
+  const desiredIds = cameraIds.join(",");
   if (!cameraIds.length) {
     closeVideoWall();
     return;
@@ -667,8 +695,10 @@ function connectVideoWall(replaceExisting = false) {
 
   const existing = state.wallVideoSocket;
   if (existing && !replaceExisting
+      && state.wallSubscribedIds === desiredIds
       && [WebSocket.CONNECTING, WebSocket.OPEN].includes(existing.readyState)) return;
   closeVideoWall();
+  state.wallSubscribedIds = desiredIds;
 
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const params = new URLSearchParams({ camera_ids: cameraIds.join(",") });
@@ -680,44 +710,25 @@ function connectVideoWall(replaceExisting = false) {
     state.wallVideoReconnectAttempts = 0;
   };
 
-  ws.onmessage = async (event) => {
+  // Coalesced delivery: only the newest frame per camera is buffered and
+  // all buffered frames are decoded in one animation-frame pass, so a slow
+  // decode drops stale frames instead of falling behind the live scene.
+  ws.onmessage = (event) => {
     try {
-      const packet = new DataView(event.data);
-      if (packet.byteLength < 2) return;
-      const idLength = packet.getUint16(0);
-      if (packet.byteLength <= idLength + 2) return;
+      if (!(event.data instanceof ArrayBuffer) || event.data.byteLength < 3) return;
+      const idLength = new DataView(event.data).getUint16(0);
+      if (event.data.byteLength <= idLength + 2) return;
       const cameraId = new TextDecoder().decode(
         new Uint8Array(event.data, 2, idLength),
       );
-      const canvas = document.getElementById(`canvas-${cameraId}`);
-      if (!canvas) return;
-      const blob = new Blob([event.data.slice(idLength + 2)], { type: "image/jpeg" });
-      const bitmap = await createImageBitmap(blob);
-      if (state.wallVideoSocket !== ws) {
-        bitmap.close();
-        return;
+      if (!document.getElementById(`canvas-${cameraId}`)) return;
+      state.wallFrameBuffer.set(cameraId, event.data.slice(idLength + 2));
+      if (!state.wallRenderQueued) {
+        state.wallRenderQueued = true;
+        requestAnimationFrame(renderWallFrames);
       }
-      if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
-      }
-      canvas.getContext("2d", { alpha: false }).drawImage(bitmap, 0, 0);
-      if (state.cameraViewerId === cameraId) {
-        const viewer = document.getElementById("cameraViewerCanvas");
-        const backdrop = document.getElementById("cameraViewerBackdrop");
-        if (viewer && backdrop && backdrop.classList.contains("open")) {
-          if (viewer.width !== bitmap.width || viewer.height !== bitmap.height) {
-            viewer.width = bitmap.width;
-            viewer.height = bitmap.height;
-          }
-          viewer.getContext("2d", { alpha: false }).drawImage(bitmap, 0, 0);
-        }
-      }
-      bitmap.close();
-      const placeholder = document.getElementById(`placeholder-${cameraId}`);
-      if (placeholder) placeholder.style.display = "none";
     } catch (error) {
-      console.warn("Could not decode a live wall frame:", error);
+      console.warn("Could not buffer a live wall frame:", error);
     }
   };
 
@@ -739,6 +750,48 @@ function connectVideoWall(replaceExisting = false) {
   ws.onerror = () => {
     if (state.wallVideoSocket === ws) ws.close();
   };
+}
+
+// One decode-and-draw pass per animation frame for every camera that has a
+// newer frame, keeping the wall in sync with the newest available image.
+async function renderWallFrames() {
+  state.wallRenderQueued = false;
+  if (!state.wallVideoSocket) return;
+  const frames = Array.from(state.wallFrameBuffer.entries());
+  state.wallFrameBuffer.clear();
+  for (const [cameraId, jpegBytes] of frames) {
+    try {
+      const tile = document.getElementById(`tile-${cameraId}`);
+      if (tile && tile.hidden) continue;
+      const bitmap = await createImageBitmap(
+        new Blob([jpegBytes], { type: "image/jpeg" }),
+      );
+      const canvas = document.getElementById(`canvas-${cameraId}`);
+      if (canvas) drawBitmapToCanvas(canvas, bitmap);
+      if (state.cameraViewerId === cameraId) {
+        const viewer = document.getElementById("cameraViewerCanvas");
+        const backdrop = document.getElementById("cameraViewerBackdrop");
+        if (viewer && backdrop && backdrop.classList.contains("open")) {
+          drawBitmapToCanvas(viewer, bitmap);
+        }
+      }
+      bitmap.close();
+      const placeholder = document.getElementById(`placeholder-${cameraId}`);
+      if (placeholder) placeholder.style.display = "none";
+    } catch (error) {
+      console.warn("Could not decode a live wall frame:", error);
+    }
+  }
+}
+
+function drawBitmapToCanvas(canvas, bitmap) {
+  if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+  }
+  const context = canvas._wallContext
+    || (canvas._wallContext = canvas.getContext("2d", { alpha: false }));
+  context.drawImage(bitmap, 0, 0);
 }
 
 async function refreshCameraStatuses() {
