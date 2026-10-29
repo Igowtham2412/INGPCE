@@ -25,6 +25,11 @@ from .face_dataset import (
     decrypt_embedding,
     encrypt_face_crop,
 )
+from .track_identity import (
+    aggregate_embeddings,
+    best_observation,
+    collect_face_observations,
+)
 
 logger = logging.getLogger("ppe.face_recognition")
 _MAX_TRACK_BUFFERS = 64
@@ -548,14 +553,19 @@ class FaceRecognitionWorker:
             crops = _include_helmet_head_regions(
                 crops, job["violation_type"],
             )
-            best_face, rejected_reasons = await self._run_blocking(
-                _best_face_from_crops, analyzer, crops,
+            observations, rejected_reasons = await self._run_blocking(
+                collect_face_observations, analyzer, crops,
                 thresholds_used["quality_min_by_violation"].get(
                     job["violation_type"], 0.0,
                 ),
+                config.FACE_IDENTIFY_BEST_N,
+            )
+            best_face = best_observation(observations)
+            aggregated_embedding = aggregate_embeddings(
+                observations, config.FACE_IDENTIFY_AGGREGATION,
             )
             elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
-            if best_face is None:
+            if best_face is None or aggregated_embedding is None:
                 status = (
                     "FACE_NOT_VISIBLE"
                 )
@@ -577,7 +587,7 @@ class FaceRecognitionWorker:
                 key, analyzer.model_name, analyzer.model_version,
             )
             ranked = rank_person_scores(
-                best_face["embedding"], gallery,
+                aggregated_embedding, gallery,
                 config.FACE_MATCH_STRATEGY, config.FACE_MATCH_TOP_K,
             )
             status, matched_person_id, score, margin, candidates = decide_face_match(
@@ -589,6 +599,7 @@ class FaceRecognitionWorker:
                 **best_face["measurements"],
                 "quality_score": best_face["quality_score"],
                 "crop_source": best_face["source"],
+                "faces_aggregated": len(observations),
                 "runtime_provider": getattr(analyzer, "runtime_provider", "unknown"),
                 "processing_ms": elapsed_ms,
             }

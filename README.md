@@ -1038,3 +1038,22 @@ location. Do not record secrets or the signed URL here.
   configured flow's HTTP response.
 - Review the detector model's license and accuracy against representative
   site footage before operational use.
+
+## 13. Violation-to-employee identification & demo
+
+When `PPE_FACE_ENABLED=true`, confirmed helmet/phone violations are linked to
+a named employee end to end: the face-recognition worker collects the best
+faces of the violating person's track across frames, averages their ArcFace
+embeddings (`PPE_FACE_IDENTIFY_BEST_N`, `PPE_FACE_IDENTIFY_AGGREGATION`), and
+matches them against enrolled employees with a threshold + margin decision
+(`MATCHED` / `NEEDS_REVIEW` / `UNKNOWN` / `FACE_NOT_VISIBLE`). Borderline and
+unknown incidents appear in the dashboard review queue, where a supervisor
+confirms, reassigns, or enrolls the person — every action is audit-logged.
+
+A dependency-free proof of concept (simulation mode, no cameras or models
+needed), the employee seed script, an identification evaluation harness,
+Docker setup, and the full configuration reference live in
+[demo/README.md](demo/README.md). Tests:
+`python -m unittest tests.unit.test_track_identity tests.unit.test_debounce
+tests.unit.test_association tests.integration.test_demo_simulation`
+

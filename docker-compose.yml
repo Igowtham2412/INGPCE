@@ -1,0 +1,63 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ppe
+      POSTGRES_PASSWORD: ppe
+      POSTGRES_DB: ppe
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ppe -d ppe"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Postgres (inside compose network)
+      PPE_PG_HOST: db
+      PPE_PG_PORT: "5432"
+      PPE_PG_DB: ppe
+      PPE_PG_USER: ppe
+      PPE_PG_PASSWORD: ppe
+      # Face identification pipeline
+      PPE_FACE_ENABLED: "true"
+      PPE_FACE_MATCH_THRESHOLD: "0.60"
+      PPE_FACE_SUGGEST_THRESHOLD: "0.45"
+      PPE_FACE_MIN_MARGIN: "0.10"
+      PPE_FACE_IDENTIFY_BEST_N: "5"
+      PPE_FACE_IDENTIFY_MIN_FACES: "1"
+      PPE_FACE_IDENTIFY_AGGREGATION: "mean"
+      # Violation debouncing
+      PPE_VIOLATION_CONFIRM_FRAMES: "3"
+      # SECURITY: set these via `docker compose run` secrets or an env file;
+      # never commit real secrets. Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+      PPE_FACE_ENCRYPTION_KEY: "${PPE_FACE_ENCRYPTION_KEY:-change-me-32-bytes-hex-or-longer}"
+      PPE_JWT_SECRET: "${PPE_JWT_SECRET:-change-me-too}"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models:ro
+      - ./evidence:/app/evidence
+      - ./dataset:/app/dataset
+    restart: unless-stopped
+    # The app runs its detection + face-recognition workers as asyncio tasks
+    # inside one process; a dedicated worker service is not needed. Add a GPU
+    # by uncommenting the block below (requires nvidia-container-toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+volumes:
+  pgdata:

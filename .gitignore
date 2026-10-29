@@ -24,3 +24,9 @@ models/
 IMG_2729.jpeg
 build/
 dist/
+
+# Demo generated artifacts (never commit real or LFW face photos)
+demo/eval_report.json
+demo/employees/**/*.jpg
+demo/employees/**/*.jpeg
+demo/employees/**/*.png

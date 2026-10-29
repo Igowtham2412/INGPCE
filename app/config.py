@@ -254,6 +254,17 @@ FACE_SUGGEST_THRESHOLD: float = float(_env("PPE_FACE_SUGGEST_THRESHOLD", "0.45")
 FACE_MIN_MARGIN: float = float(_env("PPE_FACE_MIN_MARGIN", "0.10"))
 FACE_MATCH_STRATEGY: str = _env("PPE_FACE_MATCH_STRATEGY", "max").lower()
 FACE_MATCH_TOP_K: int = int(_env("PPE_FACE_MATCH_TOP_K", "5"))
+# Track-based identification: how many best-quality faces per track are
+# collected and aggregated into a single embedding before matching.
+FACE_IDENTIFY_BEST_N: int = int(_env("PPE_FACE_IDENTIFY_BEST_N", "5"))
+# How many usable faces a track must show before the identity is decided
+# (1 keeps the legacy single-frame behaviour; 2+ waits for better frames,
+# e.g. a phone user looking up).
+FACE_IDENTIFY_MIN_FACES: int = int(_env("PPE_FACE_IDENTIFY_MIN_FACES", "1"))
+# Aggregation of the best-N face embeddings: mean | weighted_mean | first.
+FACE_IDENTIFY_AGGREGATION: str = _env(
+    "PPE_FACE_IDENTIFY_AGGREGATION", "mean",
+).lower()
 FACE_BUFFER_FRAMES: int = int(_env("PPE_FACE_BUFFER_FRAMES", "4"))
 FACE_BUFFER_TTL_SECONDS: float = float(_env("PPE_FACE_BUFFER_TTL_SECONDS", "10"))
 FACE_JOB_POLL_SECONDS: float = float(_env("PPE_FACE_JOB_POLL_SECONDS", "1"))
@@ -279,6 +290,10 @@ if (FACE_MIN_SIZE < 1 or FACE_MIN_SHARPNESS < 0
         or not 0 <= FACE_MIN_MARGIN <= 2
         or FACE_MATCH_STRATEGY not in {"max", "top_k_mean"}
         or FACE_MATCH_TOP_K < 1
+        or FACE_IDENTIFY_BEST_N < 1
+        or FACE_IDENTIFY_MIN_FACES < 1
+        or FACE_IDENTIFY_MIN_FACES > FACE_IDENTIFY_BEST_N
+        or FACE_IDENTIFY_AGGREGATION not in {"mean", "weighted_mean", "first"}
         or not 1 <= FACE_BUFFER_FRAMES <= 8
         or any(not isfinite(value) for value in FACE_QUALITY_MIN_BY_VIOLATION.values())
         or not isfinite(FACE_BUFFER_TTL_SECONDS)

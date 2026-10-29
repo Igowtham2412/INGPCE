@@ -1,0 +1,39 @@
+{
+  "employees": [
+    {
+      "employee_code": "EMP001",
+      "name": "Ravi Kumar",
+      "department": "Electrical",
+      "shift": "A",
+      "photo_paths": []
+    },
+    {
+      "employee_code": "EMP002",
+      "name": "Anita Sharma",
+      "department": "Mechanical",
+      "shift": "B",
+      "photo_paths": []
+    },
+    {
+      "employee_code": "EMP003",
+      "name": "John Mathew",
+      "department": "Civil",
+      "shift": "A",
+      "photo_paths": []
+    },
+    {
+      "employee_code": "EMP004",
+      "name": "Priya Nair",
+      "department": "Electrical",
+      "shift": "C",
+      "photo_paths": []
+    },
+    {
+      "employee_code": "EMP005",
+      "name": "Imran Khan",
+      "department": "Operations",
+      "shift": "B",
+      "photo_paths": []
+    }
+  ]
+}
