@@ -68,9 +68,10 @@ class CameraManagerRefreshTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(other_stream.stopped)
             stream_factory.assert_called_once()
             self.assertEqual(
-                stream_factory.call_args.kwargs["fallback_url"],
-                camera["main_stream_url"],
+                stream_factory.call_args.args[:2],
+                ("CAM01", camera["sub_stream_url"]),
             )
+            self.assertNotIn("fallback_url", stream_factory.call_args.kwargs)
         finally:
             for task in manager._tasks.values():
                 task.cancel()

@@ -1,4 +1,4 @@
-"""Asynchronous, post-confirmation face matching for eligible PPE incidents."""
+"""Asynchronous face matching for eligible PPE incidents."""
 import asyncio
 import ctypes
 import json
@@ -141,6 +141,30 @@ def _crop_person(
     if crop.size == 0:
         return None, None
     return crop, [x1, y1, x2, y2]
+
+
+def _include_helmet_head_regions(
+        crops: Sequence[tuple[np.ndarray, str, list[int] | None]],
+        violation_type: str,
+) -> list[tuple[np.ndarray, str, list[int] | None]]:
+    expanded = list(crops)
+    if violation_type != "no_helmet":
+        return expanded
+
+    for image, source, origin in crops:
+        height, width = image.shape[:2]
+        head_height = int(round(height * 0.45))
+        if head_height < 1 or head_height >= height:
+            continue
+        head_region = image[:head_height, :].copy()
+        head_origin = None
+        if origin is not None:
+            head_origin = [
+                origin[0], origin[1],
+                origin[0] + width, origin[1] + head_height,
+            ]
+        expanded.append((head_region, f"{source}_head_roi", head_origin))
+    return expanded
 
 
 def _encode_person_crops(
@@ -521,6 +545,9 @@ class FaceRecognitionWorker:
 
             if not crops:
                 raise FileNotFoundError("incident evidence image unavailable")
+            crops = _include_helmet_head_regions(
+                crops, job["violation_type"],
+            )
             best_face, rejected_reasons = await self._run_blocking(
                 _best_face_from_crops, analyzer, crops,
                 thresholds_used["quality_min_by_violation"].get(

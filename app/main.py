@@ -983,9 +983,13 @@ async def list_cameras():
         raise HTTPException(status_code=503, detail="Could not list cameras") from e
 
     out = []
+    stream_telemetry = (
+        _camera_manager.stream_telemetry() if _camera_manager else {}
+    )
     for cam in cameras:
         persisted = statuses.get(cam["camera_id"], {})
         live_running = _camera_manager.is_running(cam["camera_id"]) if _camera_manager else False
+        stream_info = stream_telemetry.get(cam["camera_id"], {})
         out.append({
             "camera_id": cam["camera_id"],
             "name": cam["name"],
@@ -998,6 +1002,11 @@ async def list_cameras():
             "enabled": cam["enabled"],
             "connected": persisted.get("connected", False) if live_running else False,
             "worker_running": live_running,
+            "connection_state": (
+                stream_info.get("state", "connecting")
+                if live_running else "stopped"
+            ),
+            "connection_error": stream_info.get("error") if live_running else None,
         })
     return out
 
@@ -1907,6 +1916,11 @@ async def list_face_matches(
             f"/api/violations/{incident_id}/face-crop"
             if row.get("face_crop_available") else None
         )
+        row["gallery_photo_url"] = (
+            f"/api/face/employees/{row['gallery_photo_person_id']}/photos/{row['gallery_photo_id']}"
+            if row.get("gallery_photo_person_id") and row.get("gallery_photo_id")
+            else None
+        )
     await db.write_audit_log(
         "face_matches_filtered",
         int(actor["user_id"]), actor["email"],
@@ -1935,8 +1949,12 @@ async def get_face_match_detail(violation_id: int, request: Request):
         "face_match_detail_viewed", int(actor["user_id"]), actor["email"],
         target_type="incident", target_id=str(violation_id),
     )
+    match["face_crop_available"] = bool(match.get("face_crop"))
     match.pop("face_crop", None)
-    for key in ("face_quality", "face_bbox", "top3_candidates", "top5_candidates", "thresholds", "detection_metadata"):
+    for key in (
+        "face_quality", "face_bbox", "top3_candidates", "top5_candidates",
+        "thresholds", "detection_metadata",
+    ):
         if isinstance(match.get(key), str):
             match[key] = json.loads(match[key])
     match["top3_candidates"] = match.get("top5_candidates") or match.get(

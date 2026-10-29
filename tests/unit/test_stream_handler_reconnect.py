@@ -20,37 +20,7 @@ class _FailedCapture:
         self.released = True
 
 
-class _OpenedCapture(_FailedCapture):
-    def __init__(self, opened):
-        super().__init__()
-        self.opened = opened
-
-    def isOpened(self):
-        return self.opened
-
-
 class StreamHandlerReconnectTests(unittest.TestCase):
-    def test_failed_substream_open_falls_back_to_main_stream(self):
-        stream = RTSPStream(
-            "CAM16",
-            "rtsp://nvr/Streaming/Channels/202",
-            fallback_url="rtsp://nvr/Streaming/Channels/201",
-        )
-        substream = _OpenedCapture(False)
-        main_stream = _OpenedCapture(True)
-
-        with patch(
-            "app.cameras.stream_handler.cv2.VideoCapture",
-            side_effect=[substream, main_stream],
-        ) as video_capture:
-            capture = stream._open()
-
-        self.assertIs(capture, main_stream)
-        self.assertTrue(substream.released)
-        self.assertTrue(stream._using_fallback)
-        self.assertEqual(video_capture.call_args_list[0].args[0], stream.rtsp_url)
-        self.assertEqual(video_capture.call_args_list[1].args[0], stream.fallback_url)
-
     def test_read_new_returns_each_latest_frame_only_once(self):
         stream = RTSPStream("CAM01", "rtsp://example.invalid/stream")
         stream._frame = np.array([[1]], dtype=np.uint8)
@@ -93,6 +63,17 @@ class StreamHandlerReconnectTests(unittest.TestCase):
         with patch("app.cameras.stream_handler.time.monotonic", return_value=110.1):
             self.assertTrue(stream.is_stale())
 
+    def test_missing_first_frame_is_not_stale_during_startup_grace(self):
+        stream = RTSPStream(
+            "CAM01", "rtsp://example.invalid/stream", frame_timeout_seconds=10,
+        )
+        stream._connection_started_monotonic = 100
+
+        with patch("app.cameras.stream_handler.time.monotonic", return_value=109):
+            self.assertFalse(stream.is_stale())
+        with patch("app.cameras.stream_handler.time.monotonic", return_value=110.1):
+            self.assertTrue(stream.is_stale())
+
     def test_frame_age_reports_age_and_missing_frame(self):
         stream = RTSPStream("CAM01", "rtsp://example.invalid/stream")
         self.assertIsNone(stream.frame_age_seconds())
@@ -108,6 +89,7 @@ class StreamHandlerReconnectTests(unittest.TestCase):
         stream.request_reconnect()
 
         self.assertFalse(stream.connected)
+        self.assertEqual(stream.connection_state, "connecting")
         self.assertTrue(stream._reconnect_event.is_set())
 
     def test_failed_open_releases_capture_before_retry(self):
@@ -128,6 +110,8 @@ class StreamHandlerReconnectTests(unittest.TestCase):
         self.assertTrue(capture.released)
         self.assertIsNone(stream._cap)
         self.assertFalse(stream.connected)
+        self.assertEqual(stream.connection_state, "failed")
+        self.assertIn("RTSP port", stream.last_error)
         self.assertIsNone(stream.read())
         self.assertEqual(stream.last_frame_time, 0.0)
 
@@ -157,36 +141,10 @@ class StreamHandlerReconnectTests(unittest.TestCase):
         self.assertTrue(capture.released)
         self.assertIsNone(stream._cap)
         self.assertFalse(stream.connected)
+        self.assertEqual(stream.connection_state, "failed")
+        self.assertIn("did not deliver a frame", stream.last_error)
         self.assertIsNone(stream.read())
         self.assertEqual(stream.last_frame_time, 0.0)
-
-    def test_failed_substream_read_switches_to_main_stream(self):
-        stream = RTSPStream(
-            "CAM16", "rtsp://nvr/Streaming/Channels/202",
-            fallback_url="rtsp://nvr/Streaming/Channels/201",
-            reconnect_delay=0,
-        )
-        stream._running = True
-        stream.connected = True
-
-        class StalledCapture(_FailedCapture):
-            def isOpened(self):
-                return True
-
-            def read(self):
-                return False, None
-
-            def release(self):
-                super().release()
-                stream._running = False
-
-        capture = StalledCapture()
-        with patch("app.cameras.stream_handler.cv2.VideoCapture", return_value=capture):
-            stream._update_loop()
-
-        self.assertTrue(capture.released)
-        self.assertTrue(stream._using_fallback)
-
 
 if __name__ == "__main__":
     unittest.main()

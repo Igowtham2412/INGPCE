@@ -58,6 +58,8 @@ class FaceApiAccessTests(unittest.TestCase):
                 "incident_id": 21, "violation_type": "no_helmet",
                 "status": "Suggested", "full_name": "Example Person",
                 "snapshot_available": True, "face_crop_available": True,
+                "person_id": 5, "gallery_photo_person_id": 5,
+                "gallery_photo_id": 12,
             }]),
         ) as list_matches, patch(
             "app.main.db.write_audit_log", new=AsyncMock(),
@@ -70,6 +72,10 @@ class FaceApiAccessTests(unittest.TestCase):
         self.assertEqual(
             response.json()[0]["face_crop_url"],
             "/api/violations/21/face-crop",
+        )
+        self.assertEqual(
+            response.json()[0]["gallery_photo_url"],
+            "/api/face/employees/5/photos/12",
         )
         self.assertEqual(
             list_matches.await_args.args,
@@ -92,6 +98,33 @@ class FaceApiAccessTests(unittest.TestCase):
             ["no_helmet", "phone_detected"],
         )
         self.assertEqual(status_audit.await_args.args[0], "face_recognition_status_viewed")
+
+    def test_match_detail_exposes_face_crop_availability_without_crop_bytes(self):
+        client = self._client_as("manager")
+        with patch(
+            "app.main.db.get_violation_by_id",
+            new=AsyncMock(return_value={
+                "id": 21, "snapshot_path": "private-snapshot.jpg",
+                "clean_snapshot_path": None,
+            }),
+        ), patch(
+            "app.main.db.get_face_match",
+            new=AsyncMock(return_value={
+                "incident_id": 21, "status": "NEEDS_REVIEW",
+                "face_crop": b"private-face-crop",
+                "top5_candidates": [], "top3_candidates": [],
+                "face_quality": {}, "face_bbox": None, "thresholds": {},
+                "detection_metadata": {},
+            }),
+        ), patch(
+            "app.main.db.write_audit_log", new=AsyncMock(),
+        ):
+            response = client.get("/api/face-matches/21")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["face_crop_available"])
+        self.assertNotIn("face_crop", response.json())
+        self.assertEqual(response.json()["snapshot_url"], "/api/snapshot/21")
 
     def test_face_analytics_accepts_violation_type_filter(self):
         client = self._client_as("manager")

@@ -39,6 +39,40 @@ class ApiSafetyContractsTests(unittest.TestCase):
         self.assertNotIn("should-not-leak", response.text)
         self.assertNotIn("Traceback", response.text)
 
+    def test_camera_list_includes_safe_live_stream_status(self):
+        camera = {
+            "camera_id": "CAM01",
+            "name": "Front gate",
+            "rtsp_url": "rtsp://user:secret@camera.local/sub",
+            "main_stream_url": "rtsp://user:secret@camera.local/main",
+            "area_group_id": None,
+            "area_group_name": None,
+            "required_ppe": ["helmet"],
+            "enabled": True,
+        }
+        manager = Mock()
+        manager.is_running.return_value = True
+        manager.stream_telemetry.return_value = {
+            "CAM01": {"state": "connecting", "error": None},
+        }
+
+        with (
+            patch("app.main.db.list_cameras", AsyncMock(return_value=[camera])),
+            patch(
+                "app.main.db.get_camera_statuses",
+                AsyncMock(return_value=[{"camera_id": "CAM01", "connected": False}]),
+            ),
+            patch("app.main._camera_manager", manager),
+        ):
+            response = self.client.get("/api/cameras")
+
+        self.assertEqual(response.status_code, 200)
+        result = response.json()[0]
+        self.assertEqual(result["connection_state"], "connecting")
+        self.assertIsNone(result["connection_error"])
+        self.assertNotIn("secret", response.text)
+        self.assertNotIn("rtsp://", response.text)
+
     def test_rules_database_datetimes_are_json_serialized(self):
         created_at = datetime(2026, 1, 1, tzinfo=UTC)
         with patch(

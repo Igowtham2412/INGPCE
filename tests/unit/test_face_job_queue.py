@@ -88,3 +88,34 @@ class FaceJobQueueCapacityTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertFalse(queued)
             connection.execute.assert_not_awaited()
+
+
+class FaceJobResultPersistenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_complete_result_supplies_required_violation_type(self):
+        connection = _Connection()
+        connection.fetchrow = AsyncMock(return_value=None)
+        with patch.object(db, "get_pool", return_value=_Pool(connection)):
+            await db.complete_face_recognition_job(
+                42, "UNKNOWN", None, 0.1, 0.0, {}, None, [],
+                "unit-model", "unit-version",
+            )
+
+        insert = connection.execute.await_args_list[0].args[0]
+        self.assertIn("violation_type", insert)
+        self.assertIn(
+            "(SELECT violation_type FROM violations WHERE id = $1)",
+            insert,
+        )
+
+    async def test_failed_result_supplies_required_violation_type(self):
+        connection = _Connection()
+        connection.fetchrow = AsyncMock(return_value=None)
+        with patch.object(db, "get_pool", return_value=_Pool(connection)):
+            await db.fail_face_recognition_job(42, "unit_error")
+
+        insert = connection.execute.await_args_list[0].args[0]
+        self.assertIn("violation_type", insert)
+        self.assertIn(
+            "(SELECT violation_type FROM violations WHERE id = $1)",
+            insert,
+        )

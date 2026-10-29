@@ -23,11 +23,9 @@ class RTSPStream:
                  max_reconnect_delay: float = 60, clip_fps: float = 4,
                  clip_buffer_seconds: float = 12, clip_width: int = 640,
                  frame_timeout_seconds: float = 10,
-                 reconnect_semaphore=None, fallback_url: str | None = None):
+                 reconnect_semaphore=None):
         self.camera_id = camera_id
         self.rtsp_url = rtsp_url
-        self.fallback_url = fallback_url if fallback_url != rtsp_url else None
-        self._using_fallback = False
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_delay = max_reconnect_delay
         self.frame_timeout_seconds = frame_timeout_seconds
@@ -47,11 +45,14 @@ class RTSPStream:
         self._thread = None
         self.last_frame_time = 0.0
         self.last_frame_monotonic = 0.0
+        self._connection_started_monotonic = None
         self.capture_fps = 0.0
         self._fps_window_start = time.monotonic()
         self._fps_window_frames = 0
         self.reconnect_count = 0
         self.connected = False
+        self.connection_state = "connecting"
+        self.last_error = None
 
     def start(self):
         self._running = True
@@ -68,41 +69,23 @@ class RTSPStream:
             self._thread.join(timeout=2)
         if self._cap:
             self._cap.release()
+        self.connected = False
+        self.connection_state = "stopped"
 
     def _open(self):
         timeout_ms = max(1, int(self.frame_timeout_seconds * 1000))
-        urls = (
-            [self.fallback_url]
-            if self._using_fallback and self.fallback_url
-            else [self.rtsp_url]
+        cap = cv2.VideoCapture(
+            self.rtsp_url,
+            cv2.CAP_FFMPEG,
+            [
+                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, timeout_ms,
+                cv2.CAP_PROP_READ_TIMEOUT_MSEC, timeout_ms,
+            ],
         )
-        if not self._using_fallback and self.fallback_url:
-            urls.append(self.fallback_url)
-
-        for index, url in enumerate(urls):
-            cap = cv2.VideoCapture(
-                url,
-                cv2.CAP_FFMPEG,
-                [
-                    cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, timeout_ms,
-                    cv2.CAP_PROP_READ_TIMEOUT_MSEC, timeout_ms,
-                ],
-            )
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            if cap.isOpened():
-                if index:
-                    self._using_fallback = True
-                    logger.warning(
-                        "[%s] sub-stream unavailable; using configured main stream",
-                        self.camera_id,
-                    )
-                return cap
-            cap.release()
-            if index == 0 and len(urls) > 1:
-                logger.warning(
-                    "[%s] sub-stream could not be opened; trying main stream",
-                    self.camera_id,
-                )
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if cap.isOpened():
+            return cap
+        cap.release()
         return None
 
     def _clear_frame(self):
@@ -115,6 +98,7 @@ class RTSPStream:
         retry_delay = self.reconnect_delay
         while self._running:
             if self._cap is None or not self._cap.isOpened():
+                self.connection_state = "connecting"
                 logger.info("[%s] connecting to RTSP source", self.camera_id)
                 try:
                     with self._reconnect_semaphore:
@@ -128,6 +112,12 @@ class RTSPStream:
                     self._cap = None
                 if self._cap is None or not self._cap.isOpened():
                     self.connected = False
+                    self.connection_state = "failed"
+                    self.last_error = (
+                        "Could not open the configured stream. Check the host, "
+                        "RTSP port, channel path, credentials, and NVR access."
+                    )
+                    self._connection_started_monotonic = None
                     if self._cap:
                         self._cap.release()
                     self._cap = None
@@ -140,6 +130,8 @@ class RTSPStream:
                     retry_delay = min(retry_delay * 2, self.max_reconnect_delay)
                     continue
                 self.connected = True
+                self.connection_state = "connecting"
+                self._connection_started_monotonic = time.monotonic()
                 self._reconnect_event.clear()
                 logger.info("[%s] connected", self.camera_id)
 
@@ -154,15 +146,15 @@ class RTSPStream:
             if not ok or frame is None or self._reconnect_event.is_set():
                 logger.warning("[%s] frame capture stalled or failed; reconnecting", self.camera_id)
                 self.connected = False
+                self.connection_state = "failed"
+                self.last_error = (
+                    "The stream opened but did not deliver a frame. Check the "
+                    "stream/channel, keyframe interval, NVR session limit, and network."
+                )
+                self._connection_started_monotonic = None
                 self._cap.release()
                 self._cap = None
                 self._clear_frame()
-                if self.fallback_url and not self._using_fallback:
-                    self._using_fallback = True
-                    logger.warning(
-                        "[%s] sub-stream stalled; switching to configured main stream",
-                        self.camera_id,
-                    )
                 self._stop_event.wait(retry_delay)
                 retry_delay = min(retry_delay * 2, self.max_reconnect_delay)
                 continue
@@ -174,6 +166,8 @@ class RTSPStream:
                 self._frame_sequence += 1
                 self.last_frame_time = time.time()
                 self.last_frame_monotonic = now
+                self.connection_state = "live"
+                self.last_error = None
                 self._fps_window_frames += 1
                 elapsed = now - self._fps_window_start
                 if elapsed >= 1:
@@ -231,7 +225,13 @@ class RTSPStream:
         )
         with self._lock:
             last_frame = self.last_frame_monotonic
-        return last_frame == 0 or time.monotonic() - last_frame > max_age
+            connection_started = self._connection_started_monotonic
+        now = time.monotonic()
+        if last_frame:
+            return now - last_frame > max_age
+        if connection_started is None:
+            return False
+        return now - connection_started > max_age
 
     def frame_age_seconds(self):
         with self._lock:
@@ -242,4 +242,5 @@ class RTSPStream:
 
     def request_reconnect(self):
         self.connected = False
+        self.connection_state = "connecting"
         self._reconnect_event.set()

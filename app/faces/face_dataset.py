@@ -9,7 +9,7 @@ import threading
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from typing import Any, Protocol
 
@@ -21,7 +21,11 @@ from .face_manifest import read_face_manifest
 
 logger = logging.getLogger("ppe.face_dataset")
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
-_RESERVED_DATASET_DIRS = {"reports", "enrolled_photos"}
+_RESERVED_DATASET_DIRS = {
+    "reports", "enrolled_photos", "face_test_crops",
+    "face_incident_calibration", "feedback", "false_positive",
+    "confirmed", "violations", "historian", "evaluation", "eval",
+}
 _ENCRYPTION_PREFIX = b"AFV1"
 _FACE_CROP_PREFIX = b"PPEFCROP1"
 
@@ -135,6 +139,73 @@ def _inside_root(root: Path, candidate: Path) -> Path:
     return resolved
 
 
+def _resolve_dataset_image(root: Path, image_reference: str) -> Path:
+    relative = Path(image_reference)
+    root = root.resolve(strict=True)
+    if (
+        ".." in relative.parts
+        or ".." in PureWindowsPath(image_reference).parts
+    ):
+        raise ValueError(
+            "Manifest image_path must refer to a file inside the dataset root"
+        )
+    if (
+        PureWindowsPath(image_reference).is_absolute()
+        and not relative.is_absolute()
+    ):
+        raise ValueError(
+            "Manifest image_path must use a path valid on this operating system"
+        )
+    direct_candidate = (
+        relative
+        if relative.is_absolute() or PureWindowsPath(image_reference).is_absolute()
+        else root / relative
+    )
+    direct_options = [direct_candidate]
+    if not relative.suffix:
+        direct_options.extend(
+            direct_candidate.with_suffix(suffix)
+            for suffix in sorted(_IMAGE_SUFFIXES)
+        )
+    for candidate in direct_options:
+        if candidate.is_file():
+            return _inside_root(root, candidate)
+
+    reference_name = relative.name.casefold()
+    reference_stem = relative.stem.casefold()
+    candidates = []
+    for candidate in root.rglob("*"):
+        if not candidate.is_file() or candidate.suffix.lower() not in _IMAGE_SUFFIXES:
+            continue
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        if any(
+            component.casefold() in _RESERVED_DATASET_DIRS
+            for component in candidate.relative_to(root).parts[:-1]
+        ):
+            continue
+        matches_reference = (
+            candidate.name.casefold() == reference_name
+            if relative.suffix
+            else candidate.stem.casefold() == reference_stem
+        )
+        if matches_reference:
+            candidates.append(candidate)
+
+    if len(candidates) == 1:
+        return _inside_root(root, candidates[0])
+    if len(candidates) > 1:
+        raise ValueError(
+            "Manifest image_path matches multiple employee photos; specify "
+            "a unique relative path"
+        )
+    raise ValueError(
+        "Manifest image_path does not match an image inside the dataset root"
+    )
+
+
 def _add_person_image(
         people: dict[str, PersonImport], image: EmployeeImage) -> None:
     existing = people.get(image.employee_code)
@@ -168,9 +239,24 @@ def discover_dataset(
             path for path in root.iterdir()
             if path.is_file() and path.suffix.lower() in {".csv", ".xlsx"}
         )
-        if len(manifests) > 1:
+        employee_manifests = [
+            path for path in manifests
+            if path.name.casefold().startswith(("employee", "roster"))
+            and not any(
+                marker in path.stem.casefold()
+                for marker in ("example", "sample", "template")
+            )
+        ]
+        if len(employee_manifests) == 1:
+            manifest_path = employee_manifests[0]
+            dataset_root = root
+        elif len(employee_manifests) > 1:
+            raise ValueError(
+                "Dataset root must contain one employee roster manifest"
+            )
+        elif len(manifests) > 1:
             raise ValueError("Dataset root must contain at most one CSV or Excel manifest")
-        if manifests:
+        elif manifests:
             manifest_path = manifests[0]
             dataset_root = root
         else:
@@ -187,7 +273,7 @@ def _discover_folders(
         folder for folder in root.iterdir()
         if (
             folder.is_dir()
-            and folder.name not in _RESERVED_DATASET_DIRS
+            and folder.name.casefold() not in _RESERVED_DATASET_DIRS
             and not folder.name.startswith(".")
             and "_" in folder.name
         )
@@ -263,7 +349,7 @@ def _discover_manifest(
                 or "Manifest consent_recorded=true"
             )
             consent_day = row_date
-        resolved_path = _inside_root(root, root / image_path)
+        resolved_path = _resolve_dataset_image(root, image_path)
         _add_person_image(people, EmployeeImage(
             employee_code, full_name, department, resolved_path, True,
             consent_basis, consent_day, designation,
@@ -632,14 +718,142 @@ class InsightFaceAnalyzer:
         raise rejected or ImageRejected("no_usable_face")
 
 
+class YoloFaceAnalyzer:
+    """Detect face boxes with YOLO, then align/embed each crop with the gallery model."""
+
+    def __init__(
+            self, embedder: FaceAnalyzer, model_path: str | Path | None = None,
+            model_loader: Any = None,
+    ) -> None:
+        weights_path = Path(
+            model_path or config.FACE_DETECTOR_MODEL_PATH,
+        ).expanduser().resolve()
+        if not weights_path.is_file():
+            raise FaceModelUnavailable(
+                "YOLO face detector weights are unavailable; place "
+                f"yolov8n-face.pt at {weights_path} or configure "
+                "PPE_FACE_DETECTOR_MODEL_PATH"
+            )
+        if model_loader is None:
+            try:
+                from ultralytics import YOLO
+            except ImportError as exc:
+                raise FaceModelUnavailable(
+                    "Install Ultralytics to use the configured YOLO face detector"
+                ) from exc
+            model_loader = YOLO
+        try:
+            self._detector = model_loader(str(weights_path), task="detect")
+        except Exception as exc:
+            raise FaceModelUnavailable(
+                "Could not initialize the local YOLO face detector"
+            ) from exc
+        self._embedder = embedder
+        self._lock = threading.Lock()
+        self.model_name = embedder.model_name
+        self.model_version = embedder.model_version
+        self.detector_model_name = weights_path.name
+        self.detector_model_version = OpenCVZooFaceAnalyzer._model_version(
+            (weights_path,),
+        )
+
+    @property
+    def runtime_provider(self) -> str:
+        return getattr(self._embedder, "runtime_provider", "unknown")
+
+    def analyze(self, image: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+        if image is None or image.ndim != 3 or image.size == 0:
+            raise ImageRejected("unreadable")
+        try:
+            with self._lock:
+                results = self._detector.predict(
+                    source=image,
+                    imgsz=config.FACE_DETECTOR_IMAGE_SIZE,
+                    conf=config.FACE_DETECTOR_CONFIDENCE,
+                    verbose=False,
+                )
+        except Exception as exc:
+            raise FaceModelUnavailable("YOLO face detection failed") from exc
+        if not results or getattr(results[0], "boxes", None) is None:
+            raise ImageRejected("no_face")
+        boxes = results[0].boxes
+        try:
+            coordinates = boxes.xyxy.cpu().numpy()
+            confidences = boxes.conf.cpu().numpy()
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise FaceModelUnavailable(
+                "YOLO face detector returned malformed boxes",
+            ) from exc
+        if len(coordinates) == 0:
+            raise ImageRejected("no_face")
+
+        height, width = image.shape[:2]
+        padding = config.FACE_DETECTOR_CROP_PADDING
+        accepted: list[tuple[np.ndarray, dict[str, Any]]] = []
+        rejected: list[ImageRejected] = []
+        for box, confidence in zip(coordinates, confidences):
+            x1, y1, x2, y2 = [float(value) for value in box[:4]]
+            box_width, box_height = x2 - x1, y2 - y1
+            if box_width <= 0 or box_height <= 0:
+                continue
+            pad_x, pad_y = box_width * padding, box_height * padding
+            crop_x1 = max(0, int(np.floor(x1 - pad_x)))
+            crop_y1 = max(0, int(np.floor(y1 - pad_y)))
+            crop_x2 = min(width, int(np.ceil(x2 + pad_x)))
+            crop_y2 = min(height, int(np.ceil(y2 + pad_y)))
+            if crop_x2 <= crop_x1 or crop_y2 <= crop_y1:
+                continue
+            face_region = image[crop_y1:crop_y2, crop_x1:crop_x2]
+            try:
+                embedding, measurements = self._embedder.analyze(face_region)
+            except ImageRejected as exc:
+                rejected.append(exc)
+                continue
+            face_box = measurements.get("bbox")
+            if isinstance(face_box, (list, tuple)) and len(face_box) == 4:
+                measurements = {
+                    **measurements,
+                    "bbox": [
+                        int(face_box[0]) + crop_x1,
+                        int(face_box[1]) + crop_y1,
+                        int(face_box[2]) + crop_x1,
+                        int(face_box[3]) + crop_y1,
+                    ],
+                }
+            measurements.update({
+                "face_detector": self.detector_model_name,
+                "face_detector_version": self.detector_model_version,
+                "face_detector_confidence": round(float(confidence), 4),
+                "yolo_bbox": [
+                    max(0, int(np.floor(x1))),
+                    max(0, int(np.floor(y1))),
+                    min(width, int(np.ceil(x2))),
+                    min(height, int(np.ceil(y2))),
+                ],
+            })
+            accepted.append((embedding, measurements))
+        if not accepted:
+            if rejected:
+                raise rejected[0]
+            raise ImageRejected("invalid_face_box")
+        return max(
+            accepted,
+            key=lambda result: float(result[1].get("quality_score", 0.0)),
+        )
+
+
 def create_face_analyzer(provider_preference: str | None = None) -> FaceAnalyzer:
     if config.FACE_MODEL_NAME == "opencv_zoo_yunet_sface":
-        return OpenCVZooFaceAnalyzer(provider_preference or "auto")
-    if config.FACE_MODEL_NAME == "insightface_buffalo_l":
-        return InsightFaceAnalyzer(provider_preference)
-    raise FaceModelUnavailable(
-        f"Unsupported configured face model {config.FACE_MODEL_NAME!r}"
-    )
+        embedder: FaceAnalyzer = OpenCVZooFaceAnalyzer(
+            provider_preference or "auto",
+        )
+    elif config.FACE_MODEL_NAME == "insightface_buffalo_l":
+        embedder = InsightFaceAnalyzer(provider_preference)
+    else:
+        raise FaceModelUnavailable(
+            f"Unsupported configured face model {config.FACE_MODEL_NAME!r}"
+        )
+    return YoloFaceAnalyzer(embedder)
 
 
 def _cosine_similarity(left: np.ndarray, right: np.ndarray) -> float:

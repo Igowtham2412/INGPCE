@@ -1357,11 +1357,13 @@ async def complete_face_recognition_job(
                        incident_id, status, matched_person_id, similarity,
                        margin_to_second, face_quality, face_bbox, face_crop,
                        top3_candidates, top5_candidates, model_name,
-                       model_version, processed_at, source, thresholds
+                       model_version, processed_at, source, thresholds,
+                       violation_type
                    )
                    VALUES (
                        $1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb,
-                       $9::jsonb,$10,$11,now(),$12,$13::jsonb
+                       $9::jsonb,$10,$11,now(),$12,$13::jsonb,
+                       (SELECT violation_type FROM violations WHERE id = $1)
                    )
                    ON CONFLICT (incident_id) DO UPDATE SET
                        status = EXCLUDED.status,
@@ -1377,6 +1379,7 @@ async def complete_face_recognition_job(
                        model_version = EXCLUDED.model_version,
                        source = EXCLUDED.source,
                        thresholds = EXCLUDED.thresholds,
+                       violation_type = EXCLUDED.violation_type,
                        processed_at = now()""",
             incident_id, status, matched_person_id, similarity,
             margin_to_second, json.dumps(face_quality),
@@ -1398,11 +1401,16 @@ async def fail_face_recognition_job(incident_id: int, error_code: str) -> None:
     async with get_pool().acquire() as conn, conn.transaction():
         await conn.execute(
             """INSERT INTO incident_face_matches (
-                       incident_id, status, face_quality, processed_at
+                       incident_id, status, face_quality, processed_at,
+                       violation_type
                    )
-                   VALUES ($1, 'Error', $2::jsonb, now())
+                   VALUES (
+                       $1, 'Error', $2::jsonb, now(),
+                       (SELECT violation_type FROM violations WHERE id = $1)
+                   )
                    ON CONFLICT (incident_id) DO UPDATE SET
                        status = 'Error', face_quality = EXCLUDED.face_quality,
+                       violation_type = EXCLUDED.violation_type,
                        face_crop = NULL,
                        processed_at = now()""",
             incident_id, json.dumps({"error_code": error_code}),
@@ -1425,7 +1433,8 @@ async def get_face_match(incident_id: int) -> dict[str, Any] | None:
                       e.department AS matched_department,
                       e.designation AS matched_designation,
                       e.active AS matched_person_active,
-                      v.camera_id, v.camera_name, v.area_group_name,
+                      v.camera_id, v.camera_name,
+                      v.area_group AS area_group_name,
                       v.epoch_time, v.review_status AS violation_status,
                       v.clean_snapshot_path, v.snapshot_path,
                       v.detection_metadata
@@ -1472,18 +1481,40 @@ async def list_face_matches(
                       m.review_decision, m.reviewed_by, m.reviewed_at,
                       m.processed_at, m.face_bbox, m.model_version,
                       m.thresholds, m.top5_candidates,
-                      v.camera_id, v.camera_name, v.area_group_name,
+                      v.camera_id, v.camera_name,
+                      v.area_group AS area_group_name,
                       (v.snapshot_path IS NOT NULL) AS snapshot_available,
                       (v.clean_snapshot_path IS NOT NULL) AS clean_snapshot_available,
                       (m.face_crop IS NOT NULL) AS face_crop_available,
                       v.epoch_time, v.review_status AS violation_status,
                       e.person_id, e.employee_code, e.full_name,
                       e.department, e.designation,
+                      enrolled_photo.person_id AS gallery_photo_person_id,
+                      enrolled_photo.embedding_id AS gallery_photo_id,
                       count(*) OVER() AS total_count
                FROM incident_face_matches AS m
                JOIN violations AS v ON v.id = m.incident_id
                LEFT JOIN face_enrollments AS e
                  ON e.person_id = m.matched_person_id
+               LEFT JOIN LATERAL (
+                   SELECT fe.person_id, fe.embedding_id
+                   FROM face_embeddings AS fe
+                   JOIN face_enrollments AS gallery_employee
+                     ON gallery_employee.person_id = fe.person_id
+                   WHERE fe.person_id = COALESCE(
+                     m.matched_person_id,
+                     CASE
+                       WHEN (m.top5_candidates->0->>'person_id') ~ '^[0-9]+$'
+                       THEN (m.top5_candidates->0->>'person_id')::bigint
+                     END
+                   )
+                     AND fe.active AND fe.photo_path IS NOT NULL
+                     AND gallery_employee.active
+                   ORDER BY
+                     CASE WHEN fe.model_version = m.model_version THEN 0 ELSE 1 END,
+                     fe.quality_score DESC, fe.embedding_id
+                   LIMIT 1
+               ) AS enrolled_photo ON true
                WHERE ($1::text IS NULL OR m.violation_type = $1)
                  AND ($2::double precision IS NULL OR v.epoch_time >= $2)
                  AND ($3::double precision IS NULL OR v.epoch_time <= $3)
@@ -1731,7 +1762,7 @@ async def get_face_employee_history(
         rows = await conn.fetch(
             """SELECT m.incident_id, m.violation_type, m.status, m.similarity,
                       m.review_decision, m.source, v.camera_id, v.camera_name,
-                      v.area_group_name, v.epoch_time,
+                      v.area_group AS area_group_name, v.epoch_time,
                       v.review_status AS violation_status,
                       count(*) OVER() AS repeat_offender_count
                FROM incident_face_matches AS m

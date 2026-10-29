@@ -5,41 +5,69 @@ from typing import Any
 
 from .. import config
 
-_SUPPORTED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
-
 
 def get_face_readiness(active_enrolled_people: int | None) -> dict[str, Any]:
     packages = {}
-    for distribution in ("opencv-python", "cryptography", "openpyxl"):
+    for distribution in (
+            "ultralytics", "insightface", "onnxruntime",
+            "cryptography", "openpyxl"):
         try:
             packages[distribution] = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError:
             packages[distribution] = None
-    providers = ["OpenCV DNN CPU"] if packages["opencv-python"] else []
-    provider_error = None if providers else "opencv_not_installed"
+    providers = []
+    if packages["onnxruntime"]:
+        providers.append("ONNX Runtime CPU")
+    provider_error = None if providers else "onnxruntime_not_installed"
     model_dir = Path(config.FACE_MODEL_DIR).expanduser()
-    model_files = (
-        model_dir / config.FACE_YUNET_MODEL_FILENAME,
-        model_dir / config.FACE_SFACE_MODEL_FILENAME,
+    if config.FACE_MODEL_NAME == "insightface_buffalo_l":
+        embedding_model_dir = model_dir / "models" / "buffalo_l"
+        embedding_model_files = tuple(embedding_model_dir.glob("*.onnx"))
+    else:
+        embedding_model_files = (
+            model_dir / config.FACE_YUNET_MODEL_FILENAME,
+            model_dir / config.FACE_SFACE_MODEL_FILENAME,
+        )
+    detector_model_path = Path(
+        config.FACE_DETECTOR_MODEL_PATH,
+    ).expanduser()
+    detector_model_present = (
+        detector_model_path.is_file() and detector_model_path.stat().st_size > 0
     )
-    model_present = all(path.is_file() and path.stat().st_size > 0 for path in model_files)
+    embedding_models_present = bool(embedding_model_files) and all(
+        path.is_file() and path.stat().st_size > 0
+        for path in embedding_model_files
+    )
+    model_present = detector_model_present and embedding_models_present
     dataset_dir = Path(config.FACE_DATASET_PATH).expanduser()
     dataset_present = _has_dataset_inputs(dataset_dir)
     excel_manifest_present = _has_excel_manifest(dataset_dir)
     encryption_key_configured = _has_valid_encryption_key()
     missing = []
-    if not packages["opencv-python"]:
-        missing.append("Install OpenCV with YuNet and SFace support")
+    if not packages["ultralytics"]:
+        missing.append("Install Ultralytics for YOLO face detection")
+    if not packages["insightface"]:
+        missing.append("Install InsightFace for buffalo_l ArcFace embeddings")
+    if not packages["onnxruntime"]:
+        missing.append("Install ONNX Runtime for local face embedding inference")
     if not packages["cryptography"]:
         missing.append("Install cryptography for encrypted biometric data")
     if excel_manifest_present and not packages["openpyxl"]:
         missing.append("Install openpyxl to read the Excel face manifest")
     if provider_error:
-        missing.append("OpenCV DNN is unavailable")
+        missing.append("ONNX Runtime is unavailable")
     if not config.FACE_LICENSE_ACCEPTED:
         missing.append("Review model terms and set PPE_FACE_LICENSE_ACCEPTED=true after authorization")
     if not model_present:
-        missing.append("Install the checksum-verified local YuNet and SFace models")
+        if not detector_model_present:
+            missing.append(
+                "Install the local YOLO face detector weights configured by "
+                "PPE_FACE_DETECTOR_MODEL_PATH"
+            )
+        if not embedding_models_present:
+            missing.append(
+                "Install the configured buffalo_l or YuNet/SFace embedding models"
+            )
     if not dataset_present:
         missing.append("Upload a validated consented face dataset")
     if not active_enrolled_people:
@@ -58,11 +86,17 @@ def get_face_readiness(active_enrolled_people: int | None) -> dict[str, Any]:
         "model_name": config.FACE_MODEL_NAME,
         "model_directory_configured": config.FACE_MODEL_DIR,
         "model_present": model_present,
+        "detector_model_path_configured": str(detector_model_path),
+        "detector_model_present": detector_model_present,
+        "embedding_model_present": embedding_models_present,
         "dataset_directory_configured": config.FACE_DATASET_PATH,
         "dataset_present": dataset_present,
         "excel_manifest_present": excel_manifest_present,
         "excel_manifest_supported": bool(packages["openpyxl"]),
-        "face_model_files": [path.name for path in model_files],
+        "face_model_files": [
+            detector_model_path.name,
+            *(path.name for path in embedding_model_files),
+        ],
         "encryption_key_configured": encryption_key_configured,
         "active_enrolled_people": active_enrolled_people,
         "feature_enabled": config.FACE_ENABLED,
@@ -71,32 +105,8 @@ def get_face_readiness(active_enrolled_people: int | None) -> dict[str, Any]:
 
 
 def _has_dataset_inputs(path: Path) -> bool:
-    if path.is_file():
-        return (
-            path.suffix.lower() in {".csv", ".xlsx"}
-            and _manifest_has_enrollments(path)
-        )
-    if not path.is_dir():
+    if not path.is_file() and not path.is_dir():
         return False
-    manifests = sorted(
-        item for item in path.iterdir()
-        if item.is_file() and item.suffix.lower() in {".csv", ".xlsx"}
-    )
-    if manifests:
-        return len(manifests) == 1 and _manifest_has_enrollments(manifests[0])
-    return any(
-        folder.is_dir()
-        and "_" in folder.name
-        and folder.name not in {"reports", "enrolled_photos"}
-        and any(
-            image.is_file() and image.suffix.lower() in _SUPPORTED_IMAGE_SUFFIXES
-            for image in folder.rglob("*")
-        )
-        for folder in path.iterdir()
-    )
-
-
-def _manifest_has_enrollments(path: Path) -> bool:
     try:
         from .face_dataset import discover_dataset
 

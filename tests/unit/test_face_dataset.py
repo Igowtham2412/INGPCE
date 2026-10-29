@@ -1,7 +1,7 @@
 import base64
 import csv
-import threading
 import tempfile
+import threading
 import types
 import unittest
 from pathlib import Path
@@ -17,6 +17,7 @@ from app.faces.face_dataset import (
     ConsentError,
     ImageRejected,
     OpenCVZooFaceAnalyzer,
+    YoloFaceAnalyzer,
     _quality_approved_face,
     decrypt_embedding,
     decrypt_face_crop,
@@ -226,6 +227,53 @@ class FaceDatasetDiscoveryTests(unittest.TestCase):
         self.assertEqual(person.consent_date.isoformat(), "2026-10-27")
         self.assertEqual(person.images[0].path, image_path.resolve())
 
+    def test_employee_roster_wins_over_template_and_resolves_extensionless_photo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            faces = root / "faces"
+            faces.mkdir()
+            test_crops = root / "face_test_crops"
+            test_crops.mkdir()
+            (faces / "Image.jpg").write_bytes(b"employee-photo")
+            (test_crops / "Image.jpg").write_bytes(b"test-photo")
+
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append([
+                "employee_code", "full_name", "department", "image_path",
+                "consent_recorded",
+            ])
+            sheet.append([
+                "E001", "Roster Person", "Operations",
+                str((faces / "Image").resolve()), True,
+            ])
+            workbook.save(root / "employees.xlsx.xlsx")
+
+            template = Workbook()
+            template.active.append(["sample"])
+            template.save(root / "faces_manifest.example.xlsx")
+
+            people = discover_dataset(root)
+
+        self.assertEqual(list(people), ["E001"])
+        self.assertEqual(people["E001"].images[0].path, (faces / "Image.jpg").resolve())
+
+    def test_extensionless_photo_resolution_rejects_ambiguous_employee_copies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for folder in ("faces", "employees"):
+                image_dir = root / folder
+                image_dir.mkdir()
+                (image_dir / "Image.jpg").write_bytes(b"photo")
+            (root / "employees.csv").write_text(
+                "employee_code,full_name,department,image_path,consent_recorded\n"
+                "E001,Jane Doe,Safety,Image,true\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "multiple employee photos"):
+                discover_dataset(root)
+
 
 class FaceQualityTests(unittest.TestCase):
     def test_quality_gate_rejects_small_face(self):
@@ -286,6 +334,73 @@ class FaceQualityTests(unittest.TestCase):
         np.testing.assert_allclose(embedding, [0.6, 0.8])
         self.assertGreater(measurements["quality_score"], 0.7)
         self.assertEqual(measurements["bbox"], [20, 20, 120, 120])
+
+    def test_yolo_detector_crops_each_face_and_embeds_best_quality_crop(self):
+        class _Tensor:
+            def __init__(self, value):
+                self.value = np.asarray(value, dtype=np.float32)
+
+            def cpu(self):
+                return self
+
+            def numpy(self):
+                return self.value
+
+        class _Detector:
+            def predict(self, **kwargs):
+                self.kwargs = kwargs
+                return [types.SimpleNamespace(boxes=types.SimpleNamespace(
+                    xyxy=_Tensor([[10, 10, 30, 30], [50, 20, 80, 50]]),
+                    conf=_Tensor([0.8, 0.95]),
+                ))]
+
+        class _Embedder:
+            model_name = "buffalo_l"
+            model_version = "arcface-version"
+            runtime_provider = "ONNX Runtime CPU"
+
+            def __init__(self):
+                self.crop_shapes = []
+
+            def analyze(self, image):
+                self.crop_shapes.append(image.shape[:2])
+                is_second = image.shape[:2] == (42, 42)
+                return np.asarray([1.0, 0.0]), {
+                    "quality_score": 0.9 if is_second else 0.7,
+                    "bbox": [5, 6, 30, 31] if is_second else [2, 3, 20, 21],
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            weights = Path(directory) / "yolov8n-face.pt"
+            weights.write_bytes(b"test detector weights")
+            detector = _Detector()
+            embedder = _Embedder()
+            analyzer = YoloFaceAnalyzer(
+                embedder, weights, model_loader=lambda *_args, **_kwargs: detector,
+            )
+            embedding, measurements = analyzer.analyze(
+                np.zeros((100, 100, 3), dtype=np.uint8),
+            )
+
+        np.testing.assert_array_equal(embedding, [1.0, 0.0])
+        self.assertEqual(embedder.crop_shapes, [(28, 28), (42, 42)])
+        self.assertEqual(measurements["bbox"], [49, 20, 74, 45])
+        self.assertEqual(measurements["yolo_bbox"], [50, 20, 80, 50])
+        self.assertEqual(measurements["face_detector"], "yolov8n-face.pt")
+        self.assertEqual(measurements["face_detector_confidence"], 0.95)
+        self.assertEqual(analyzer.model_name, "buffalo_l")
+        self.assertEqual(analyzer.model_version, "arcface-version")
+        self.assertEqual(detector.kwargs["imgsz"], face_dataset.config.FACE_DETECTOR_IMAGE_SIZE)
+        self.assertEqual(detector.kwargs["conf"], face_dataset.config.FACE_DETECTOR_CONFIDENCE)
+        self.assertFalse(detector.kwargs["verbose"])
+
+    def test_yolo_face_detector_requires_a_local_weights_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing.pt"
+            with self.assertRaisesRegex(
+                face_dataset.FaceModelUnavailable, "weights are unavailable",
+            ):
+                YoloFaceAnalyzer(_FakeAnalyzer(), missing)
 
     def test_opencv_zoo_model_requires_explicit_license_approval(self):
         with patch.object(face_dataset.config, "FACE_LICENSE_ACCEPTED", False):

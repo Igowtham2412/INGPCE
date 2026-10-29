@@ -8,36 +8,42 @@ or send them to chat or external services. The directories
 
 ## Recommended folder and Excel layout
 
-Put 5–10 photos per person in a folder named with the unique employee code,
-an underscore, and the person's full name. Keep one Excel manifest at the
-dataset root:
+Keep the employee roster workbook and employee photo folders under the
+configured dataset root (`dataset` by default). For the local roster layout:
 
 ```text
-dataset\faces\
-  employees.xlsx
-  E001_Jane Doe\
-    image01.jpg
-    image02.png
-  E002_Ravi Kumar\
-    image01.jpg
+dataset\
+  employees.xlsx.xlsx
+  faces\
+    Image.jpg
+    Image2.jpg
+  faces_manifest.example.xlsx
+  face_test_crops\
+    (test-only image copies; never enrolled)
 ```
 
-Copy the blank template and fill one row per photo. Set `image_path` relative
-to `dataset\faces\`, including the employee folder:
+The importer selects the non-example employee roster workbook ahead of
+sample/template workbooks. Use one row per employee photo, with
+`employee_code`, `full_name`, `department`, `image_path`, and
+`consent_recorded` columns. An extensionless `image_path` is supported when
+exactly one corresponding employee-gallery image exists. Test, feedback,
+violation, and historian folders are not used to resolve such references.
+If the same basename is present in multiple eligible employee folders, the
+import is stopped and the manifest must be corrected to include an explicit
+relative path. Absolute paths are accepted only when they resolve inside the
+configured dataset root; paths outside it and traversal paths are rejected.
 
 ```text
 employee_code | full_name | department | image_path | consent_recorded | consent_reference
-E001          | Jane Doe  | Operations | E001_Jane Doe\image01.jpg | true | CONSENT-REF-001
+E001          | Jane Doe  | Operations | faces\image01.jpg | true | CONSENT-REF-001
 ```
 
-Use `dataset\faces_manifest.example.xlsx` and copy it to
-`dataset\faces\employees.xlsx`, then replace all sample rows with actual
-consented employee records. The example workbook is not an enrollment roster.
-`image_path` must point to a JPG, JPEG, or PNG inside the dataset. Loose images
-directly under `dataset\faces\` are not associated with an identity and will
-not be enrolled. Alternatively, use `employees.csv` with the same columns.
-Do not put multiple manifests in the dataset root. Folder-only imports (no
-manifest) are also supported and use the explicit bulk-consent confirmation.
+Replace the sample rows in the actual employee roster with valid
+consented-employee records; the example workbook is never used as a roster.
+`consent_recorded` must be true. `consent_reference` and `consent_date` retain
+the internal consent record. Alternatively, use an `employees.csv` roster
+with the same columns. Folder-only imports (no roster) are also supported
+and use the explicit bulk-consent confirmation.
 `openpyxl==3.1.5` is installed with the application to read Excel.
 
 ### Enroll from the dashboard
@@ -68,8 +74,12 @@ Matches tab. Select the date range, camera(s), and eligible violation types;
 already processed incidents are skipped.
 
 ```powershell
-Copy-Item dataset\faces_manifest.example.xlsx dataset\faces\employees.xlsx
+Copy-Item dataset\faces_manifest.example.xlsx dataset\employees.xlsx
 ```
+
+Use this copy command only for a new dataset that does not already have an
+employee roster; do not create a second employee manifest alongside the
+existing roster.
 
 ## Photo selection and consent
 

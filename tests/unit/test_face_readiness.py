@@ -10,6 +10,45 @@ from app.faces.face_readiness import get_face_readiness
 
 
 class FaceReadinessTests(unittest.TestCase):
+    def test_readiness_requires_local_yolo_and_embedding_models(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            detector = root / "yolov8n-face.pt"
+            detector.write_bytes(b"detector weights")
+            model_dir = root / "models"
+            buffalo_dir = model_dir / "models" / "buffalo_l"
+            buffalo_dir.mkdir(parents=True)
+            (buffalo_dir / "recognition.onnx").write_bytes(b"ArcFace model")
+            with patch(
+                "app.faces.face_readiness.config.FACE_DETECTOR_MODEL_PATH",
+                str(detector),
+            ), patch(
+                "app.faces.face_readiness.config.FACE_MODEL_DIR",
+                str(model_dir),
+            ), patch(
+                "app.faces.face_readiness.config.FACE_MODEL_NAME",
+                "insightface_buffalo_l",
+            ):
+                result = get_face_readiness(0)
+
+        self.assertTrue(result["detector_model_present"])
+        self.assertTrue(result["embedding_model_present"])
+        self.assertTrue(result["model_present"])
+
+    def test_readiness_reports_missing_yolo_detector_weights(self):
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "app.faces.face_readiness.config.FACE_DETECTOR_MODEL_PATH",
+            str(Path(directory) / "missing-yolov8n-face.pt"),
+        ):
+            result = get_face_readiness(0)
+
+        self.assertFalse(result["detector_model_present"])
+        self.assertFalse(result["model_present"])
+        self.assertTrue(any(
+            "PPE_FACE_DETECTOR_MODEL_PATH" in item
+            for item in result["missing"]
+        ))
+
     def test_readiness_lists_missing_dependencies_and_inputs(self):
         with tempfile.TemporaryDirectory() as directory, patch(
                 "app.faces.face_readiness.importlib.metadata.version",

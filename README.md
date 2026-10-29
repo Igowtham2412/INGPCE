@@ -266,13 +266,15 @@ flowchart LR
   CAM[Camera PPE detection] -->|eligible violation + bbox| DB[(PostgreSQL)]
   DB -->|persistent async job| WORKER[Face worker]
   WORKER --> CROP[Person crop + same-track buffered frames]
-  CROP --> INSIGHT[InsightFace buffalo_l: SCRFD + ArcFace]
+  CROP --> YOLO[Local YOLOv8n-face: detect and crop]
+  YOLO --> INSIGHT[InsightFace buffalo_l: align and ArcFace embed]
   INSIGHT --> GALLERY[Consent-filtered encrypted employee gallery]
   INSIGHT --> RESULT[(Encrypted match result + audit metadata)]
   UI[Authorized Face Match UI] --> API[FastAPI role-checked API]
   API --> DB
   API --> GALLERY
   HIST[Historian backfill jobs] --> DB
+  UPLOAD[Manual historian/ad-hoc upload] --> API
 ```
 
 Only `no_helmet`, `no_arc_flash_suit`, and `phone_detected` are eligible.
@@ -300,12 +302,24 @@ also use the existing CSRF protection.
 - Ad-hoc search: `POST /api/face/search` accepts a multipart `image` and
   returns top candidates without creating a violation or match record.
 
-Face recognition is disabled by default. The configured local pipeline uses
-InsightFace `buffalo_l` (SCRFD detection and 512-dimensional ArcFace
-embeddings) with ONNX Runtime. Review the applicable InsightFace and model-pack
-terms and confirm organizational authorization before enabling model
-provisioning. Images and embeddings are processed locally; do not send real
-employee images to external services.
+Face recognition is disabled by default. A shared analyzer first uses the
+local Ultralytics YOLO face detector to find face boxes, crops each candidate,
+and then uses InsightFace `buffalo_l` for landmark alignment and
+512-dimensional ArcFace embeddings with ONNX Runtime. Live violations,
+historian backfills, manual image searches, and employee-photo enrollment all
+use this analyzer. Review the detector, InsightFace, and model-pack terms and
+confirm organizational authorization before enabling model provisioning.
+Images and embeddings are processed locally; do not send real employee images
+to external services.
+
+Place the authorized `yolov8n-face.pt` weights at
+`PPE_FACE_DETECTOR_MODEL_PATH` (default
+`models\face\yolov8n-face.pt`). The detector uses `imgsz=1280` and `conf=0.15`
+by default; configure `PPE_FACE_DETECTOR_IMAGE_SIZE`,
+`PPE_FACE_DETECTOR_CONFIDENCE`, and `PPE_FACE_DETECTOR_CROP_PADDING` for the
+local installation. The app deliberately does not download this detector
+weights file automatically. If it is missing or cannot be loaded, matching
+reports a model error rather than silently switching detection methods.
 
 After reviewing and accepting the terms, set
 `PPE_FACE_LICENSE_ACCEPTED=true` in the private `.env` and provision the
@@ -322,20 +336,23 @@ downloads the model pack under
 `models\face\models\buffalo_l`). Provisioning alone does not enable matching.
 GPU execution is optional; CPU inference is supported.
 
-The configured dataset path (`PPE_FACE_DATASET_PATH`, default
-`dataset\faces`) supports employee folders with a CSV or Excel manifest:
-
-See [DATASET_GUIDE.md](./DATASET_GUIDE.md) for photo guidance and the
+The configured dataset path (`PPE_FACE_DATASET_PATH`, default `dataset`)
+supports the employee roster workbook and employee photos in the local
+dataset tree. A non-example `employees*.xlsx` or `roster*.xlsx` workbook is
+preferred over sample/template manifests. See [DATASET_GUIDE.md](./DATASET_GUIDE.md)
+for the supported roster and photo-folder layout and the
 validate/import/calibrate/pilot command sequence.
 
 Employee folders should be named `<EMPLOYEE_CODE>_<Full Name>` and contain
-JPG, JPEG, or PNG photos. A single `employees.csv` or `employees.xlsx`
-manifest may sit in the dataset root alongside these folders. Use one row per
-photo, with `employee_code`, `full_name`, `department`, `image_path`,
-`consent_recorded`, and `consent_reference` columns. Image paths are relative
-to the manifest and must remain inside the dataset directory. Optional
-`consent_basis` and `consent_date` columns retain the recorded consent source
-and date. The Excel manifest reader is included in the optional face install.
+JPG, JPEG, or PNG photos. Use one manifest row per photo, with
+`employee_code`, `full_name`, `department`, `image_path`, `consent_recorded`,
+and `consent_reference` columns. Image paths may be relative to the manifest,
+absolute paths that resolve inside the dataset root, or a unique image
+basename (including extensionless references) within the dataset tree.
+Ambiguous, outside-root, sample, and test/incident image copies are rejected
+rather than silently enrolled. Optional `consent_basis` and
+`consent_date` columns retain the recorded consent source and date. The Excel
+manifest reader is included in the optional face install.
 
 Folder-only imports require a documented bulk-consent confirmation. CSV or
 Excel imports require `consent_recorded=true` for each employee; alternatively
@@ -427,8 +444,11 @@ Eligibility is limited to `no_helmet`, `no_arc_flash_suit`, and
 `phone_detected`; `no_vest` is never queued. A status change does not trigger
 reprocessing. Only an explicit rerun does. The pipeline uses the person's
 violation bounding box plus buffered frames of the same camera/track, checks
-face quality, and records `FACE_NOT_VISIBLE` when no usable face is found.
-It never guesses an identity.
+face quality, and records `FACE_NOT_VISIBLE` when no usable face is found. For
+missing-helmet incidents, it additionally searches an upper-person/head region
+to improve face detection in full-body CCTV crops; any accepted face is aligned,
+embedded, and compared with the consented employee gallery. It never guesses an
+identity.
 Face recognition is not run or displayed on the live wall. A bounded,
 short-lived person-crop buffer is keyed by camera and ByteTrack ID; face
 detection and matching are not performed on normal frames, and buffered crops
@@ -450,8 +470,9 @@ production cameras.
 Run `scripts\benchmark_face_pipeline.py` for model-free queue/crop/matching
 microbenchmarks, reported with violation-type and camera labels. After model
 authorization and provisioning, it can measure local inference on a synthetic
-or explicitly consented sample; SCRFD detection and ArcFace embedding are
-measured together, so the tool reports combined latency.
+or explicitly consented sample; YOLO face detection, InsightFace alignment,
+and ArcFace embedding are measured together, so the tool reports combined
+latency.
 `scripts\benchmark_live_impact.py`
 compares the PPE detector and annotated-tile encoding on synthetic paced frames
 or a local recorded video while a bounded, simulated face-job worker runs; it
@@ -510,14 +531,17 @@ evaluated against representative, labeled footage from these cameras.
 
 ### Camera stream and inference settings
 
-Each camera uses one shared sub-stream RTSP capture for the Live Wall and
-detection, falling back to its configured main stream only when the sub-stream
-cannot open or stops delivering frames. The browser receives visible tiles
-over one multiplexed WebSocket, with JPEG frames encoded once and reused for
-subscribers. Opening
-a camera's full-screen viewer opens its configured main stream on demand;
-recorded evidence requests the NVR playback URL built from that main stream.
-Existing camera rows remain supported through their legacy `rtsp_url` value.
+Each camera uses one shared configured sub-stream capture for the Live Wall
+and detection; it does not silently promote a failed grid feed to the
+high-bitrate main stream. RTSP capture uses FFmpeg over TCP. The browser
+receives visible tiles over one multiplexed WebSocket, with JPEG frames encoded
+once and reused for subscribers. Opening a camera's full-screen viewer opens
+its configured main stream on demand; recorded evidence requests the NVR
+playback URL built from that main stream. Existing camera rows remain
+supported through their legacy `rtsp_url` value. The stream status remains
+`CONNECTING` until the first frame arrives, and the watchdog allows the
+configured frame-timeout interval for that initial frame before requesting a
+reconnect.
 For cameras/NVRs that provide a supported HTTP video-preview endpoint, you
 can enter that exact, device-documented HTTP stream URL in the sub-stream URL
 field; the capture backend uses FFmpeg for either RTSP or HTTP. Do not replace
@@ -545,9 +569,11 @@ The relevant optional settings and defaults are:
 | `PPE_FULLSCREEN_FPS` | `12` | Full-screen main-stream delivery rate (maximum 15 FPS). |
 | `PPE_FULLSCREEN_WIDTH` | `1920` | Maximum full-screen JPEG width in pixels. |
 
-`GET /api/health` includes per-camera capture/detection FPS, latest-frame age,
-reconnect count, and inference duration. The Live Wall's **STREAM DIAGNOSTICS**
-panel displays these values while it is open.
+`GET /api/cameras` reports each feed as `connecting`, `live`, `failed` (retrying),
+or `stopped`, with a password-free error hint when available. `GET /api/health`
+includes these states plus per-camera capture/detection FPS, latest-frame age,
+reconnect count, and inference duration. The Live Wall shows the current state
+and the error hint on the tile.
 
 The COCO phone class detects visible phone objects, not the behavior of using
 one. A phone incident is created only after it is associated with the existing

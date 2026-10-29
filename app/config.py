@@ -211,12 +211,24 @@ FACE_VIOLATION_TYPES: frozenset[str] = _face_violation_types()
 FACE_QUALITY_MIN_BY_VIOLATION: dict[str, float] = (
     _face_quality_min_by_violation()
 )
-FACE_DATASET_PATH: str = _env("PPE_FACE_DATASET_PATH", "dataset/faces")
+FACE_DATASET_PATH: str = _env("PPE_FACE_DATASET_PATH", "dataset")
 FACE_MODEL_NAME: str = _env(
     "PPE_FACE_MODEL_NAME", "insightface_buffalo_l",
 )
 FACE_MODEL_DIR: str = _env("PPE_FACE_MODEL_DIR", "models/face")
 FACE_PROVIDER: str = _env("PPE_FACE_PROVIDER", "auto").lower()
+FACE_DETECTOR_MODEL_PATH: str = _env(
+    "PPE_FACE_DETECTOR_MODEL_PATH", "models/face/yolov8n-face.pt",
+)
+FACE_DETECTOR_IMAGE_SIZE: int = int(
+    _env("PPE_FACE_DETECTOR_IMAGE_SIZE", "1280"),
+)
+FACE_DETECTOR_CONFIDENCE: float = float(
+    _env("PPE_FACE_DETECTOR_CONFIDENCE", "0.15"),
+)
+FACE_DETECTOR_CROP_PADDING: float = float(
+    _env("PPE_FACE_DETECTOR_CROP_PADDING", "0.20"),
+)
 FACE_YUNET_MODEL_FILENAME: str = "face_detection_yunet_2023mar.onnx"
 FACE_SFACE_MODEL_FILENAME: str = "face_recognition_sface_2021dec.onnx"
 FACE_LICENSE_ACCEPTED: bool = _env_bool(
@@ -250,6 +262,11 @@ FACE_MATCH_RETENTION_DAYS: int = int(_env("PPE_FACE_MATCH_RETENTION_DAYS", "365"
 FACE_INCLUDE_IN_EMAIL: bool = _env_bool("PPE_FACE_INCLUDE_IN_EMAIL", False)
 if (FACE_MIN_SIZE < 1 or FACE_MIN_SHARPNESS < 0
         or not 0 <= FACE_MIN_DETECTION_SCORE <= 1
+        or FACE_DETECTOR_IMAGE_SIZE < 320
+        or not isfinite(FACE_DETECTOR_CONFIDENCE)
+        or not 0 < FACE_DETECTOR_CONFIDENCE <= 1
+        or not isfinite(FACE_DETECTOR_CROP_PADDING)
+        or not 0 <= FACE_DETECTOR_CROP_PADDING <= 1
         or not 0 <= FACE_MIN_BRIGHTNESS < FACE_MAX_BRIGHTNESS <= 255
         or FACE_PROVIDER not in {"auto", "cpu", "cuda"}
         or FACE_MAX_YAW <= 0 or FACE_MAX_PITCH <= 0

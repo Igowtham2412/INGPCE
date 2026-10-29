@@ -167,16 +167,12 @@ class CameraManager:
             logger.info(f"[{camera_id}] already running, skipping start")
             return
         sub_stream_url = camera.get("sub_stream_url") or camera["rtsp_url"]
-        main_stream_url = camera.get("main_stream_url") or camera["rtsp_url"]
         stream = RTSPStream(
             camera_id, sub_stream_url,
             reconnect_delay=config.CAMERA_RECONNECT_INITIAL_SECONDS,
             max_reconnect_delay=config.CAMERA_RECONNECT_MAX_SECONDS,
             frame_timeout_seconds=config.CAMERA_FRAME_TIMEOUT_SECONDS,
             reconnect_semaphore=self._reconnect_semaphore,
-            fallback_url=(
-                main_stream_url if main_stream_url != sub_stream_url else None
-            ),
             clip_fps=config.EVIDENCE_CLIP_FPS,
             clip_buffer_seconds=(
                 config.EVIDENCE_CLIP_PRE_SECONDS
@@ -771,7 +767,8 @@ class CameraManager:
                 if now - last_status_write >= config.CAMERA_STATUS_UPDATE_INTERVAL:
                     try:
                         await db.update_camera_status(camera_id, camera_name, area_group_name,
-                                                       stream.connected and not stream.is_stale(
+                                                       stream.connection_state == "live"
+                                                       and not stream.is_stale(
                                                            config.CAMERA_FRAME_TIMEOUT_SECONDS
                                                        ),
                                                        stream.last_frame_time)
@@ -784,15 +781,28 @@ class CameraManager:
             logger.info("[%s] display worker cancelled", camera_id)
             raise
 
-    def stream_telemetry(self) -> dict[str, dict[str, float | None]]:
+    def stream_telemetry(
+        self,
+    ) -> dict[str, dict[str, float | int | str | None]]:
         telemetry = {}
         for camera_id, stream in self._streams.items():
             metrics = self._detection_metrics.get(camera_id, {})
+            stale = stream.is_stale(config.CAMERA_FRAME_TIMEOUT_SECONDS)
+            stream_state = stream.connection_state
+            stream_error = stream.last_error
+            if stream_state == "live" and stale:
+                stream_state = "failed"
+                stream_error = (
+                    "No recent video frame. Check network stability and the "
+                    "camera/NVR session limit."
+                )
             telemetry[camera_id] = {
                 "capture_fps": round(stream.capture_fps, 2),
                 "detection_fps": round(metrics.get("detection_fps", 0.0), 2),
                 "latest_frame_age_seconds": stream.frame_age_seconds(),
                 "reconnect_count": stream.reconnect_count,
                 "inference_ms": round(metrics.get("inference_ms", 0.0), 2),
+                "state": stream_state,
+                "error": stream_error,
             }
         return telemetry
