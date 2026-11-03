@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 from .. import config, db
+from ..ws_hub import hub
 from .face_dataset import (
     FaceAnalyzer,
     ImageRejected,
@@ -152,10 +153,10 @@ def _include_helmet_head_regions(
         crops: Sequence[tuple[np.ndarray, str, list[int] | None]],
         violation_type: str,
 ) -> list[tuple[np.ndarray, str, list[int] | None]]:
-    expanded = list(crops)
     if violation_type != "no_helmet":
-        return expanded
+        return list(crops)
 
+    head_regions = []
     for image, source, origin in crops:
         height, width = image.shape[:2]
         head_height = int(round(height * 0.45))
@@ -168,8 +169,30 @@ def _include_helmet_head_regions(
                 origin[0], origin[1],
                 origin[0] + width, origin[1] + head_height,
             ]
-        expanded.append((head_region, f"{source}_head_roi", head_origin))
-    return expanded
+        head_regions.append((head_region, f"{source}_head_roi", head_origin))
+    return head_regions
+
+
+def _include_face_focus_regions(
+        crops: Sequence[tuple[np.ndarray, str, list[int] | None]],
+) -> list[tuple[np.ndarray, str, list[int] | None]]:
+    """Add enlarged head-search candidates for small faces in wide shots."""
+    focused = []
+    for image, source, origin in crops:
+        height, width = image.shape[:2]
+        if height < 1 or width < 1 or height < width * 1.25:
+            continue
+        for fraction, label in ((0.42, "head"), (0.62, "upper")):
+            focus_height = max(1, int(round(height * fraction)))
+            focus = image[:focus_height, :]
+            scale = min(3.5, max(2.0, 520.0 / max(focus.shape[1], 1)))
+            enlarged = cv2.resize(
+                focus, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC,
+            )
+            # Coordinates are intentionally omitted because the analyzer sees
+            # a resized image; the original crop remains the fallback.
+            focused.append((enlarged, f"{source}_face_focus_{label}", None))
+    return focused
 
 
 def _encode_person_crops(
@@ -240,9 +263,10 @@ def _best_face_from_crops(
                     int(face_box[3] + origin[1]),
                 ]
             face_crop = None
-            if isinstance(face_box, (list, tuple)) and len(face_box) == 4:
+            crop_box = measurements.get("bbox_input", face_box)
+            if isinstance(crop_box, (list, tuple)) and len(crop_box) == 4:
                 height, width = image.shape[:2]
-                x1, y1, x2, y2 = [int(value) for value in face_box]
+                x1, y1, x2, y2 = [int(value) for value in crop_box]
                 pad_x = max(4, int((x2 - x1) * 0.15))
                 pad_y = max(4, int((y2 - y1) * 0.15))
                 x1, x2 = max(0, x1 - pad_x), min(width, x2 + pad_x)
@@ -294,6 +318,8 @@ class FaceRecognitionWorker:
     def __init__(self, analyzer_factory=create_face_analyzer):
         self._analyzer_factory = analyzer_factory
         self._analyzer: FaceAnalyzer | None = None
+        self._gallery: dict[int, dict[str, Any]] = {}
+        self._gallery_loaded = False
         self._capture_queue: asyncio.Queue = asyncio.Queue(
             maxsize=_CAPTURE_QUEUE_SIZE,
         )
@@ -346,6 +372,9 @@ class FaceRecognitionWorker:
         self._recognition_task = None
         self._pending_crops.clear()
         self._frame_buffers.clear()
+        self._gallery.clear()
+        self._gallery_loaded = False
+        self._analyzer = None
         if self._blocking_executor is not None:
             self._blocking_executor.shutdown(wait=False, cancel_futures=True)
             self._blocking_executor = None
@@ -550,9 +579,17 @@ class FaceRecognitionWorker:
 
             if not crops:
                 raise FileNotFoundError("incident evidence image unavailable")
-            crops = _include_helmet_head_regions(
-                crops, job["violation_type"],
+            base_crops = crops
+            focus_crops = _include_face_focus_regions(base_crops)
+            head_crops = (
+                _include_helmet_head_regions(base_crops, job["violation_type"])
+                if job["violation_type"] == "no_helmet"
+                else []
             )
+            # Keep inference bounded while retaining original, enlarged, and
+            # helmet/head candidates from the best buffered frames.
+            # Search focused head crops first; body crops remain a fallback.
+            crops = (focus_crops + head_crops + base_crops)[:16]
             observations, rejected_reasons = await self._run_blocking(
                 collect_face_observations, analyzer, crops,
                 thresholds_used["quality_min_by_violation"].get(
@@ -560,12 +597,12 @@ class FaceRecognitionWorker:
                 ),
                 config.FACE_IDENTIFY_BEST_N,
             )
-            best_face = best_observation(observations)
+            best_observation_result = best_observation(observations)
             aggregated_embedding = aggregate_embeddings(
                 observations, config.FACE_IDENTIFY_AGGREGATION,
             )
             elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
-            if best_face is None or aggregated_embedding is None:
+            if best_observation_result is None or aggregated_embedding is None:
                 status = (
                     "FACE_NOT_VISIBLE"
                 )
@@ -580,12 +617,29 @@ class FaceRecognitionWorker:
                     thresholds=thresholds_used,
                 )
                 await self._audit_result(incident_id, status)
+                await hub.broadcast_event({
+                    "type": "face_match_processed",
+                    "incident_id": incident_id,
+                    "status": status,
+                    "source": job.get("source", "live"),
+                })
                 return
 
+            best_face = {
+                "embedding": best_observation_result.embedding,
+                "quality_score": best_observation_result.quality,
+                "measurements": best_observation_result.measurements or {},
+                "source": best_observation_result.source,
+                "absolute_bbox": best_observation_result.absolute_bbox,
+                "face_crop": best_observation_result.face_crop,
+            }
             key = _encryption_key()
-            gallery = await self._load_gallery(
-                key, analyzer.model_name, analyzer.model_version,
-            )
+            if not self._gallery_loaded:
+                self._gallery = await self._load_gallery(
+                    key, analyzer.model_name, analyzer.model_version,
+                )
+                self._gallery_loaded = True
+            gallery = self._gallery
             ranked = rank_person_scores(
                 aggregated_embedding, gallery,
                 config.FACE_MATCH_STRATEGY, config.FACE_MATCH_TOP_K,
@@ -617,9 +671,17 @@ class FaceRecognitionWorker:
                 thresholds=thresholds_used,
             )
             await self._audit_result(incident_id, status)
+            await hub.broadcast_event({
+                "type": "face_match_processed",
+                "incident_id": incident_id,
+                "status": status,
+                "source": job.get("source", "live"),
+            })
         except Exception as exc:
             error_code = type(exc).__name__
-            logger.warning("Face-recognition job failed (%s)", error_code)
+            logger.warning(
+                "Face-recognition job failed (%s)", error_code, exc_info=True,
+            )
             try:
                 await db.fail_face_recognition_job(incident_id, error_code)
             except Exception as store_exc:
@@ -627,6 +689,12 @@ class FaceRecognitionWorker:
                     "Could not record face-recognition failure (%s)",
                     type(store_exc).__name__,
                 )
+            await hub.broadcast_event({
+                "type": "face_match_processed",
+                "incident_id": incident_id,
+                "status": "Error",
+                "source": job.get("source", "live"),
+            })
         finally:
             self._pending_crops.pop(incident_id, None)
 

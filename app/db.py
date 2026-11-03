@@ -151,6 +151,19 @@ CREATE TABLE IF NOT EXISTS alert_dispatch_log (
     success BOOLEAN NOT NULL,
     dispatched_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS power_automate_shift_digest_log (
+    id BIGSERIAL PRIMARY KEY,
+    shift_key TEXT NOT NULL UNIQUE,
+    shift_name TEXT NOT NULL,
+    starts_at TIMESTAMPTZ NOT NULL,
+    ends_at TIMESTAMPTZ NOT NULL,
+    status TEXT NOT NULL DEFAULT 'sending'
+        CHECK (status IN ('sending', 'sent', 'failed')),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    sent_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS violation_review_log (
     id BIGSERIAL PRIMARY KEY,
@@ -972,7 +985,8 @@ async def get_face_employee_photo(
 async def get_face_embedding_by_hash(image_hash: str) -> dict[str, Any] | None:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
-            """SELECT embedding_id, person_id, image_hash, active
+            """SELECT embedding_id, person_id, image_hash, active,
+                      model_name, model_version
                FROM face_embeddings WHERE image_hash = $1""",
             image_hash,
         )
@@ -1005,7 +1019,7 @@ async def insert_face_embedding(
                        photo_path, model_name, model_version
                    )
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-                   ON CONFLICT (image_hash) DO NOTHING
+                   ON CONFLICT (model_name, model_version, image_hash) DO NOTHING
                    RETURNING embedding_id""",
             person_id, embedding, source, quality_score, image_hash,
             photo_path, model_name, model_version,
@@ -2200,10 +2214,140 @@ async def log_alert_dispatch(violation_id: int, rule_id: int | None, channel: st
         )
 
 
+async def claim_shift_digest(
+    shift_key: str, shift_name: str, starts_at: datetime, ends_at: datetime,
+) -> dict[str, Any] | None:
+    async with get_pool().acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            """INSERT INTO power_automate_shift_digest_log
+                   (shift_key, shift_name, starts_at, ends_at)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (shift_key) DO UPDATE
+                   SET status = CASE
+                           WHEN power_automate_shift_digest_log.status = 'failed'
+                           THEN 'sending'
+                           ELSE power_automate_shift_digest_log.status
+                       END,
+                       attempt_count = power_automate_shift_digest_log.attempt_count + 1,
+                       updated_at = now()
+               WHERE power_automate_shift_digest_log.status <> 'sent'
+               RETURNING id, attempt_count""",
+            shift_key, shift_name, starts_at, ends_at,
+        )
+        return dict(row) if row else None
+
+
+async def finish_shift_digest(
+    digest_id: int, success: bool, error: str | None,
+) -> None:
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            """UPDATE power_automate_shift_digest_log
+               SET status = $2, last_error = $3,
+                   sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END,
+                   updated_at = now()
+               WHERE id = $1""",
+            digest_id, "sent" if success else "failed", error,
+        )
+
+
+async def get_shift_digest_items(
+    starts_at: datetime, ends_at: datetime,
+) -> list[dict[str, Any]]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT DISTINCT ON (v.id)
+                      v.id, v.camera_name, v.zone, v.violation_type,
+                      v.snapshot_path, v.detected_at,
+                      ARRAY(
+                          SELECT DISTINCT jsonb_array_elements_text(
+                              COALESCE(o.payload->'email_recipients', '[]'::jsonb)
+                          )
+                      ) AS recipients
+               FROM violations AS v
+               JOIN alert_outbox AS o ON o.violation_id = v.id
+               WHERE v.detected_at >= $1 AND v.detected_at < $2
+                 AND v.violation_type IN ('no_helmet', 'phone_detected')
+                 AND v.snapshot_path IS NOT NULL
+                 AND o.channel = 'power_automate'
+                 AND o.status <> 'dead'
+               ORDER BY v.id, o.id DESC""",
+            starts_at, ends_at,
+        )
+        return [dict(row) for row in rows]
+
+
 async def get_violation_by_id(violation_id: int) -> dict[str, Any] | None:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM violations WHERE id = $1", violation_id)
         return dict(row) if row else None
+
+
+async def get_latest_power_automate_violation() -> dict[str, Any] | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT *
+               FROM violations
+               WHERE violation_type IN ('no_helmet', 'phone_detected')
+                 AND snapshot_path IS NOT NULL
+               ORDER BY epoch_time DESC, id DESC
+               LIMIT 1"""
+        )
+        return dict(row) if row else None
+
+
+async def get_power_automate_violations(limit: int = 24) -> list[dict[str, Any]]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, camera_id, camera_name, zone, violation_type,
+                      snapshot_path, detected_at
+               FROM violations
+               WHERE violation_type IN ('no_helmet', 'phone_detected')
+                 AND snapshot_path IS NOT NULL
+               ORDER BY epoch_time DESC, id DESC
+               LIMIT $1""",
+            limit,
+        )
+        return [dict(row) for row in rows]
+
+
+async def get_power_automate_delivery_status() -> dict[str, Any]:
+    async with get_pool().acquire() as conn:
+        summary = await conn.fetchrow(
+            """SELECT
+                 count(*) FILTER (WHERE success) AS sent_count,
+                 count(*) FILTER (WHERE NOT success) AS failed_count,
+                 max(dispatched_at) AS last_attempt_at,
+                 max(dispatched_at) FILTER (WHERE success) AS last_success_at
+               FROM alert_dispatch_log
+               WHERE channel = 'power_automate'
+                 AND dispatched_at >= now() - interval '24 hours'"""
+        )
+        recent = await conn.fetch(
+            """SELECT l.dispatched_at, l.success, l.violation_id,
+                      v.camera_name, v.violation_type
+               FROM alert_dispatch_log AS l
+               LEFT JOIN violations AS v ON v.id = l.violation_id
+               WHERE l.channel = 'power_automate'
+               ORDER BY l.dispatched_at DESC
+               LIMIT 10"""
+        )
+        pending = await conn.fetchrow(
+            """SELECT count(*) AS pending_count,
+                      count(*) FILTER (WHERE status = 'dead') AS dead_count
+               FROM alert_outbox
+               WHERE channel = 'power_automate'
+                 AND status IN ('pending', 'processing', 'dead')"""
+        )
+        return {
+            "sent_count_24h": int(summary["sent_count"] or 0),
+            "failed_count_24h": int(summary["failed_count"] or 0),
+            "last_attempt_at": summary["last_attempt_at"],
+            "last_success_at": summary["last_success_at"],
+            "pending_count": int(pending["pending_count"] or 0),
+            "dead_count": int(pending["dead_count"] or 0),
+            "recent": [dict(row) for row in recent],
+        }
 
 
 async def get_recent_violations(limit: int = 50, camera_id: str | None = None,
@@ -2293,6 +2437,50 @@ async def delete_violations_before(cutoff_epoch: float) -> dict[str, int]:
 
     return {
         "violations_deleted": len(rows),
+        "evidence_deleted": evidence_deleted,
+        "evidence_errors": evidence_errors,
+    }
+
+
+async def delete_violation(violation_id: int) -> dict[str, Any] | None:
+    async with get_pool().acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            """SELECT id, snapshot_path, clean_snapshot_path, video_path
+                 FROM violations WHERE id = $1 FOR UPDATE""",
+            violation_id,
+        )
+        if row is None:
+            return None
+        await conn.execute("DELETE FROM violations WHERE id = $1", violation_id)
+
+    paths = [
+        row["snapshot_path"], row["clean_snapshot_path"], row["video_path"],
+    ]
+    roots = tuple(
+        Path(path).resolve()
+        for path in (
+            config.SNAPSHOT_DIR,
+            config.EVIDENCE_CLIP_DIR,
+            config.FEEDBACK_DATASET_DIR,
+        )
+    )
+    evidence_deleted = 0
+    evidence_errors = 0
+    for raw_path in {path for path in paths if path}:
+        path = Path(raw_path).resolve()
+        if not any(path.is_relative_to(root) for root in roots):
+            logger.error("Refusing to remove incident file outside configured directories: %s", path)
+            evidence_errors += 1
+            continue
+        try:
+            if path.is_file():
+                path.unlink()
+                evidence_deleted += 1
+        except OSError:
+            logger.exception("Failed to remove incident file: %s", path)
+            evidence_errors += 1
+    return {
+        "violation_id": violation_id,
         "evidence_deleted": evidence_deleted,
         "evidence_errors": evidence_errors,
     }

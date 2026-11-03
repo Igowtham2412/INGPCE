@@ -46,7 +46,7 @@ def get_face_readiness(active_enrolled_people: int | None) -> dict[str, Any]:
     missing = []
     if not packages["ultralytics"]:
         missing.append("Install Ultralytics for YOLO face detection")
-    if not packages["insightface"]:
+    if config.FACE_MODEL_NAME == "insightface_buffalo_l" and not packages["insightface"]:
         missing.append("Install InsightFace for buffalo_l ArcFace embeddings")
     if not packages["onnxruntime"]:
         missing.append("Install ONNX Runtime for local face embedding inference")

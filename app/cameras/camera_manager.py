@@ -159,7 +159,9 @@ class CameraManager:
         )
         self._latest_statuses = {}
         self._detection_metrics = {}
-        self._inference_semaphore = asyncio.Semaphore(1)
+        self._inference_semaphore = asyncio.Semaphore(
+            config.INFERENCE_CONCURRENCY,
+        )
 
     async def start_camera(self, camera: dict):
         camera_id = camera["camera_id"]

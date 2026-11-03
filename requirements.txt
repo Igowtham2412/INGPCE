@@ -22,9 +22,13 @@ coverage>=7.6,<8
 pip-audit>=2.7,<3
 ruff>=0.4,<1
 playwright>=1.48,<2
-# Face recognition uses InsightFace buffalo_l models provisioned separately.
-insightface==0.7.3
+# Optional: install InsightFace separately only when using
+# PPE_FACE_MODEL_NAME=insightface_buffalo_l. It requires native build tools.
 onnxruntime>=1.18
+# Required when PPE_FACE_MODEL_NAME=deepface_arcface uses the bundled adapter.
+deepface>=0.0.93
+pillow>=10.0.0
+werkzeug>=3.0.0
 --extra-index-url https://download.pytorch.org/whl/cu130
 torch==2.14.1+cu130; sys_platform == "win32"
 torchvision==0.29.1+cu130; sys_platform == "win32"

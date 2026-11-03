@@ -3,10 +3,16 @@ import time
 import logging
 import asyncio
 import json
+import os
 import requests
 import base64
+import cv2
+import numpy as np
+import tempfile
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from .. import config, db
 from .rules_engine import RulesEngine, ViolationEvent, MatchedAlert
@@ -21,7 +27,7 @@ _VIOLATION_LABELS = {
     "phone_detected": "Phone Detected Near Person",
 }
 _POWER_AUTOMATE_VIOLATIONS = {
-    "no_helmet", "no_arc_flash_suit", "phone_detected",
+    "no_helmet", "phone_detected",
 }
 
 
@@ -29,6 +35,7 @@ class AlertManager:
     def __init__(self):
         self.rules_engine = RulesEngine()
         self._worker_task: Optional[asyncio.Task] = None
+        self._shift_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
 
     async def start(self) -> None:
@@ -38,6 +45,9 @@ class AlertManager:
         self._worker_task = asyncio.create_task(
             self._run_outbox(), name="alert-outbox-worker",
         )
+        self._shift_task = asyncio.create_task(
+            self._run_shift_digests(), name="power-automate-shift-digests",
+        )
 
     async def stop(self) -> None:
         if not self._worker_task:
@@ -45,6 +55,196 @@ class AlertManager:
         self._stop_event.set()
         await self._worker_task
         self._worker_task = None
+        if self._shift_task:
+            await self._shift_task
+            self._shift_task = None
+
+    def _shift_timezone(self):
+        if config.SHIFT_REPORT_TIMEZONE:
+            return ZoneInfo(config.SHIFT_REPORT_TIMEZONE)
+        return datetime.now().astimezone().tzinfo or timezone.utc
+
+    @staticmethod
+    def _encode_image(
+        snapshot_path: Optional[str], compact: bool = False,
+    ) -> Optional[str]:
+        if not snapshot_path:
+            return None
+        try:
+            with open(snapshot_path, "rb") as image_file:
+                image_bytes = image_file.read()
+        except OSError as exc:
+            logger.warning("Could not read shift digest evidence (%s)", type(exc).__name__)
+            return None
+        if not image_bytes:
+            return None
+        if compact:
+            try:
+                image = cv2.imdecode(
+                    np.frombuffer(image_bytes, dtype=np.uint8),
+                    cv2.IMREAD_COLOR,
+                )
+                if image is None:
+                    logger.warning("Evidence image could not be decoded")
+                    return None
+                height, width = image.shape[:2]
+                scale = min(1.0, 1280 / max(height, width))
+                if scale < 1:
+                    image = cv2.resize(
+                        image, (round(width * scale), round(height * scale)),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                encoded = None
+                for quality in (82, 72, 62):
+                    ok, candidate = cv2.imencode(
+                        ".jpg", image,
+                        [cv2.IMWRITE_JPEG_QUALITY, quality],
+                    )
+                    if ok:
+                        encoded = candidate.tobytes()
+                        if len(encoded) <= 900_000:
+                            break
+                if encoded:
+                    image_bytes = encoded
+            except (cv2.error, ValueError):
+                logger.exception("Could not compact evidence image")
+                return None
+        return base64.b64encode(image_bytes).decode("ascii")
+
+    @staticmethod
+    def _create_shift_collage(items: list[dict]) -> Optional[str]:
+        tiles = []
+        for item in items:
+            image = cv2.imread(item["snapshot_path"])
+            if image is None:
+                logger.warning(
+                    "Could not decode shift evidence image for violation %s",
+                    item.get("violation_id", "unknown"),
+                )
+                continue
+            image = cv2.resize(image, (640, 420), interpolation=cv2.INTER_AREA)
+            label = _VIOLATION_LABELS.get(
+                item["violation_type"], item["violation_type"],
+            ).upper()
+            cv2.rectangle(image, (0, 0), (640, 34), (8, 8, 8), -1)
+            cv2.putText(
+                image, label, (12, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.62,
+                (255, 255, 255), 1, cv2.LINE_AA,
+            )
+            tiles.append(image)
+        if not tiles:
+            return None
+        columns = min(3, max(1, int(np.ceil(np.sqrt(len(tiles))))))
+        rows = int(np.ceil(len(tiles) / columns))
+        collage = np.zeros((rows * 420, columns * 640, 3), dtype=np.uint8)
+        for index, tile in enumerate(tiles):
+            row, column = divmod(index, columns)
+            collage[
+                row * 420:(row + 1) * 420,
+                column * 640:(column + 1) * 640,
+            ] = tile
+        encoded, jpeg = cv2.imencode(
+            ".jpg", collage, [cv2.IMWRITE_JPEG_QUALITY, 78],
+        )
+        if not encoded:
+            logger.error("Could not encode shift evidence collage")
+            return None
+        temporary_file = tempfile.NamedTemporaryFile(
+            suffix=".jpg", prefix="shift-evidence-", delete=False,
+        )
+        temporary_file.write(jpeg.tobytes())
+        temporary_file.close()
+        return temporary_file.name
+
+    def _completed_shifts(self, now: datetime):
+        local_now = now.astimezone(self._shift_timezone())
+        first_day = local_now.date() - timedelta(
+            hours=config.SHIFT_REPORT_CATCHUP_HOURS // 24 + 2,
+        )
+        day = first_day
+        while day <= local_now.date():
+            for name, start_hour, end_hour in config.SHIFT_REPORTS:
+                end_day = day + timedelta(days=1 if end_hour <= start_hour else 0)
+                end_local = datetime.combine(
+                    end_day, datetime.min.time(), self._shift_timezone(),
+                ).replace(hour=end_hour)
+                start_local = datetime.combine(
+                    day, datetime.min.time(), self._shift_timezone(),
+                ).replace(hour=start_hour)
+                if end_local <= local_now and end_local >= local_now - timedelta(
+                    hours=config.SHIFT_REPORT_CATCHUP_HOURS,
+                ):
+                    yield name, start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+            day += timedelta(days=1)
+
+    async def _run_shift_digests(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                now = datetime.now(timezone.utc)
+                for name, starts_at, ends_at in self._completed_shifts(now):
+                    await self._send_shift_digest(name, starts_at, ends_at)
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=config.SHIFT_REPORT_POLL_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Power Automate shift digest worker failed; retrying")
+                await asyncio.sleep(config.SHIFT_REPORT_POLL_SECONDS)
+
+    async def _send_shift_digest(
+        self, shift_name: str, starts_at: datetime, ends_at: datetime,
+    ) -> None:
+        shift_key = f"{shift_name}:{ends_at.isoformat()}"
+        digest = await db.claim_shift_digest(
+            shift_key, f"Shift {shift_name}", starts_at, ends_at,
+        )
+        if digest is None:
+            return
+        items = await db.get_shift_digest_items(starts_at, ends_at)
+        recipients = sorted({
+            recipient
+            for item in items
+            for recipient in (item.get("recipients") or [])
+            if recipient
+        })
+        if not items or not recipients:
+            await db.finish_shift_digest(digest["id"], True, None)
+            return
+        collage_path = await asyncio.to_thread(self._create_shift_collage, items)
+        if not collage_path:
+            await db.finish_shift_digest(digest["id"], True, None)
+            return
+        body = (
+            f"Shift {shift_name} safety digest\n"
+            f"Window: {starts_at.isoformat()} to {ends_at.isoformat()}\n"
+            f"Images in collage: {len(items)} (missing helmet and phone detections only)"
+        )
+        try:
+            delivered = await asyncio.to_thread(
+                self._send_power_automate,
+                recipients,
+                f"PPE Shift {shift_name} Violation Digest",
+                body,
+                "Multiple cameras",
+                "Multiple zones",
+                "Helmet and phone violations",
+                ends_at.isoformat(),
+                "ppe_violation",
+                collage_path,
+                "no_helmet",
+            )
+        finally:
+            try:
+                await asyncio.to_thread(os.unlink, collage_path)
+            except OSError:
+                logger.warning("Could not remove temporary shift evidence collage")
+        await db.finish_shift_digest(
+            digest["id"], delivered,
+            None if delivered else "Power Automate returned an unsuccessful delivery result",
+        )
 
     async def _run_outbox(self) -> None:
         while not self._stop_event.is_set():
@@ -276,6 +476,16 @@ class AlertManager:
             "occurred_at": occurred_at,
             "recipients": recipients,
         }
+        if event_type in {"ppe_shift_digest", "selected_alerts"}:
+            digest = face_match or {}
+            images = digest.get("images") or []
+            if not images:
+                logger.error("Power Automate shift digest has no evidence images")
+                return False
+            payload.update({
+                "images": images,
+                "image_count": len(images),
+            })
         if event_type == "ppe_violation":
             if violation_type not in _POWER_AUTOMATE_VIOLATIONS:
                 logger.warning("Power Automate only delivers helmet and phone alerts")

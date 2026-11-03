@@ -288,7 +288,7 @@ class PowerAutomateAlertTests(unittest.IsolatedAsyncioTestCase):
             b"phone-evidence",
         )
 
-    async def test_arc_flash_suit_violation_is_sent_with_image_attachment(self):
+    async def test_arc_flash_suit_violation_is_not_sent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             image_path = Path(temp_dir) / "arc-suit.jpg"
             image_path.write_bytes(b"arc-suit-evidence")
@@ -298,10 +298,6 @@ class PowerAutomateAlertTests(unittest.IsolatedAsyncioTestCase):
                     "POWER_AUTOMATE_WEBHOOK_URL",
                     "https://flow.example.test/trigger?sig=private",
                 ),
-                patch(
-                    "app.alerts.alert_manager.requests.post",
-                    return_value=FakeResponse(200),
-                ) as post,
             ):
                 delivered = await self.manager._dispatch(
                     "power_automate",
@@ -313,14 +309,7 @@ class PowerAutomateAlertTests(unittest.IsolatedAsyncioTestCase):
                     "no_arc_flash_suit",
                 )
 
-        self.assertTrue(delivered)
-        payload = post.call_args.kwargs["json"]
-        self.assertEqual(payload["violation"], "Missing Arc Flash Suit")
-        self.assertEqual(payload["image_name"], "arc_flash_suit_violation.jpg")
-        self.assertEqual(
-            base64.b64decode(payload["image_content_bytes"]),
-            b"arc-suit-evidence",
-        )
+        self.assertFalse(delivered)
 
     async def test_dispatch_requires_helmet_image(self):
         with patch.object(self.manager, "_send_power_automate") as send:

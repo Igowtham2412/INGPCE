@@ -881,6 +881,8 @@ class PowerAutomateTestIn(BaseModel):
         max_length=254,
         pattern=r"^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$",
     )
+    violation_id: int | None = Field(default=None, ge=1)
+    violation_ids: list[int] = Field(default_factory=list, min_length=0, max_length=50)
 
 
 @app.post("/api/alerts/power-automate/test")
@@ -890,24 +892,115 @@ async def send_power_automate_test(payload: PowerAutomateTestIn, request: Reques
             status_code=503,
             detail="Configure PPE_POWER_AUTOMATE_WEBHOOK_URL in the server .env first",
         )
-    occurred_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    body = (
-        "INGPCE Power Automate test message\n"
-        f"Recipient: {payload.recipient}\n"
-        f"Sent at: {occurred_at}"
-    )
-    delivered = await asyncio.to_thread(
-        _alert_manager._send_power_automate,
-        [payload.recipient],
-        "INGPCE Power Automate Test",
-        body,
-        "TEST",
-        "Power Automate setup",
-        "Test message",
-        occurred_at,
-        "test",
-    )
-    if not delivered:
+    selected_ids = list(dict.fromkeys(payload.violation_ids))
+    if payload.violation_id is not None and payload.violation_id not in selected_ids:
+        selected_ids.insert(0, payload.violation_id)
+    violations = [
+        await db.get_violation_by_id(violation_id)
+        for violation_id in selected_ids
+    ] if selected_ids else [await db.get_latest_power_automate_violation()]
+    violations = [
+        violation for violation in violations
+        if violation is not None
+        and violation["violation_type"] in {"no_helmet", "phone_detected"}
+        and violation.get("snapshot_path")
+    ]
+    if not violations:
+        raise HTTPException(
+            status_code=404,
+            detail="No helmet or phone violation with an evidence image is available",
+        )
+    delivered_ids = []
+    temporary_collage_path = None
+    violation = violations[0]
+    snapshot_path = violation["snapshot_path"]
+    if len(violations) > 1:
+        tiles = []
+        for selected_violation in violations:
+            image = cv2.imread(selected_violation["snapshot_path"])
+            if image is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="One or more selected evidence images could not be decoded",
+                )
+            image = cv2.resize(image, (640, 420), interpolation=cv2.INTER_AREA)
+            label = (
+                "MISSING HELMET"
+                if selected_violation["violation_type"] == "no_helmet"
+                else "PHONE DETECTED"
+            )
+            cv2.rectangle(image, (0, 0), (640, 34), (8, 8, 8), -1)
+            cv2.putText(
+                image, f"{label}  #{selected_violation['id']}",
+                (12, 23), cv2.FONT_HERSHEY_SIMPLEX, 0.62,
+                (255, 255, 255), 1, cv2.LINE_AA,
+            )
+            tiles.append(image)
+        columns = min(3, max(1, int(np.ceil(np.sqrt(len(tiles))))))
+        rows = int(np.ceil(len(tiles) / columns))
+        collage = np.zeros((rows * 420, columns * 640, 3), dtype=np.uint8)
+        for index, tile in enumerate(tiles):
+            row, column = divmod(index, columns)
+            collage[row * 420:(row + 1) * 420, column * 640:(column + 1) * 640] = tile
+        encoded, jpeg = cv2.imencode(
+            ".jpg", collage, [cv2.IMWRITE_JPEG_QUALITY, 78],
+        )
+        if not encoded:
+            raise HTTPException(status_code=500, detail="Could not create selected evidence collage")
+        temporary_file = tempfile.NamedTemporaryFile(
+            suffix=".jpg", prefix="selected-evidence-", delete=False,
+        )
+        temporary_file.write(jpeg.tobytes())
+        temporary_file.close()
+        temporary_collage_path = temporary_file.name
+        snapshot_path = temporary_collage_path
+    try:
+        violation_type = violation["violation_type"]
+        label = (
+            "Missing Helmet"
+            if violation_type == "no_helmet"
+            else "Phone Detected Near Person"
+        )
+        occurred_at = violation["detected_at"].astimezone(UTC).strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+        )
+        body = (
+            f"INGPCE selected violation collage ({len(violations)} image"
+            f"{'s' if len(violations) != 1 else ''})\n"
+            f"Camera: {violation['camera_name']}\n"
+            f"Zone: {violation['zone']}\n"
+            f"Violation: {label}\n"
+            f"Detected at: {occurred_at}"
+        )
+        delivered = await asyncio.to_thread(
+            _alert_manager._send_power_automate,
+            [payload.recipient],
+            f"PPE Selected Evidence: {len(violations)} image"
+            f"{'s' if len(violations) != 1 else ''}",
+            body,
+            violation["camera_name"] or "Unknown camera",
+            violation["zone"] or "Unknown zone",
+            label,
+            occurred_at,
+            "ppe_violation",
+            snapshot_path,
+            violation_type,
+        )
+        if not delivered:
+            raise HTTPException(
+                status_code=502,
+                detail="Power Automate test failed. Check the flow URL, run history, and server log.",
+            )
+        delivered_ids.append(violation["id"])
+        if len(violations) > 1:
+            delivered_ids = [item["id"] for item in violations]
+    finally:
+        if temporary_collage_path:
+            try:
+                Path(temporary_collage_path).unlink()
+            except OSError:
+                logger.warning("Could not remove temporary selected evidence collage")
+    if len(delivered_ids) != len(violations):
         raise HTTPException(
             status_code=502,
             detail="Power Automate test failed. Check the flow URL, run history, and server log.",
@@ -915,10 +1008,61 @@ async def send_power_automate_test(payload: PowerAutomateTestIn, request: Reques
     actor = getattr(request.state, "user", None)
     if actor:
         await db.write_audit_log(
-            "power_automate_test_sent", int(actor["user_id"]), actor["email"],
-            target_type="power_automate_test", target_id=payload.recipient,
+            "power_automate_latest_violation_sent", int(actor["user_id"]),
+            actor["email"], target_type="violation",
+            target_id=str(violation["id"]),
         )
-    return {"sent": True, "recipient": payload.recipient}
+    if len(violations) == 1 and not selected_ids:
+        return {
+            "sent": True,
+            "recipient": payload.recipient,
+            "violation_id": violations[0]["id"],
+            "violation_type": violations[0]["violation_type"],
+        }
+    return {
+        "sent": True,
+        "recipient": payload.recipient,
+        "violation_ids": delivered_ids,
+        "count": len(delivered_ids),
+    }
+
+
+@app.get("/api/alerts/power-automate/violations")
+async def get_power_automate_violations(
+        violation_type: str | None = None,
+        since_epoch: float | None = None):
+    if violation_type not in {None, "no_helmet", "phone_detected"}:
+        raise HTTPException(status_code=400, detail="Only helmet and phone violations are eligible")
+    try:
+        rows = await db.get_power_automate_violations()
+        if violation_type:
+            rows = [row for row in rows if row["violation_type"] == violation_type]
+        if since_epoch is not None:
+            rows = [row for row in rows if row["detected_at"].timestamp() >= since_epoch]
+    except Exception as exc:
+        logger.exception("Could not load Power Automate violation gallery")
+        raise HTTPException(
+            status_code=503, detail="Could not load eligible violation images",
+        ) from exc
+    for row in rows:
+        row["snapshot_url"] = f"/api/snapshot/{row['id']}"
+    return rows
+
+
+@app.get("/api/alerts/power-automate/status")
+async def get_power_automate_status():
+    try:
+        status = await db.get_power_automate_delivery_status()
+    except Exception as exc:
+        logger.exception("Could not load Power Automate delivery status")
+        raise HTTPException(
+            status_code=503, detail="Could not load alert delivery status",
+        ) from exc
+    return {
+        "configured": bool(config.POWER_AUTOMATE_WEBHOOK_URL),
+        "supported_violations": ["no_helmet", "phone_detected"],
+        **status,
+    }
 
 
 class CameraIn(BaseModel):
@@ -2321,6 +2465,28 @@ async def cleanup_old_violations(request: Request):
         details=result,
     )
     return result
+
+
+@app.delete("/api/violations/{violation_id}")
+async def delete_single_violation(violation_id: int, request: Request):
+    actor = getattr(request.state, "user", None)
+    result = await db.delete_violation(violation_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    await db.write_audit_log(
+        "violation_deleted",
+        int(actor["user_id"]) if actor else None,
+        actor["email"] if actor else None,
+        target_type="violation",
+        target_id=str(violation_id),
+        details=result,
+    )
+    if result["evidence_errors"]:
+        raise HTTPException(
+            status_code=503,
+            detail="Incident deleted, but one or more evidence files require administrator cleanup",
+        )
+    return {"deleted": True, **result}
 
 
 @app.get("/api/stats")

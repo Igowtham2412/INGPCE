@@ -2,10 +2,12 @@
 import asyncio
 import csv
 import hashlib
+import importlib.util
 import logging
 import math
 import secrets
 import threading
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -718,6 +720,189 @@ class InsightFaceAnalyzer:
         raise rejected or ImageRejected("no_usable_face")
 
 
+def _enhance_face_image(image: np.ndarray) -> np.ndarray:
+    """Improve difficult local camera frames without changing the source frame."""
+    enhanced = image
+    if config.FACE_UPSCALE > 1:
+        enhanced = cv2.resize(
+            enhanced, None, fx=config.FACE_UPSCALE, fy=config.FACE_UPSCALE,
+            interpolation=cv2.INTER_CUBIC,
+        )
+    lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB)
+    lightness, chroma_a, chroma_b = cv2.split(lab)
+    lightness = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(
+        lightness,
+    )
+    enhanced = cv2.cvtColor(
+        cv2.merge((lightness, chroma_a, chroma_b)), cv2.COLOR_LAB2BGR,
+    )
+    return cv2.detailEnhance(enhanced, sigma_s=10, sigma_r=0.15)
+
+
+def _face_roll_degrees(facial_area: dict[str, Any]) -> float | None:
+    left_eye = facial_area.get("left_eye")
+    right_eye = facial_area.get("right_eye")
+    if (
+        not isinstance(left_eye, (list, tuple))
+        or not isinstance(right_eye, (list, tuple))
+        or len(left_eye) < 2
+        or len(right_eye) < 2
+    ):
+        return None
+    angle = float(np.degrees(np.arctan2(
+        float(right_eye[1]) - float(left_eye[1]),
+        float(right_eye[0]) - float(left_eye[0]),
+    )))
+    if angle > 90:
+        angle -= 180
+    elif angle < -90:
+        angle += 180
+    return angle
+
+
+class ExternalDeepFaceAnalyzer:
+    """Adapter for the DeepFace model used by the external face service."""
+
+    def __init__(self) -> None:
+        if not config.FACE_LICENSE_ACCEPTED:
+            raise FaceModelUnavailable(
+                "Set PPE_FACE_LICENSE_ACCEPTED=true only after reviewing "
+                "the configured DeepFace model terms and authorization"
+            )
+        module_path = Path(config.FACE_MODULE_PATH).expanduser().resolve()
+        if module_path.is_dir():
+            module_path /= "face_service.py"
+        if not module_path.is_file():
+            raise FaceModelUnavailable(
+                f"DeepFace service module is unavailable at {module_path}"
+            )
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "_ingpce_external_face_service", module_path,
+            )
+            if spec is None or spec.loader is None:
+                raise ImportError("could not load module specification")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except (ImportError, OSError, ValueError) as exc:
+            raise FaceModelUnavailable(
+                f"Could not load DeepFace service module at {module_path}"
+            ) from exc
+        self._module = module
+        self._lock = threading.Lock()
+        self._detector_backend = module.DETECTOR_BACKENDS[-1]
+        self.model_name = f"deepface_{module.MODEL_NAME.lower()}"
+        self.model_version = hashlib.sha256(
+            f"{module_path}:{module_path.stat().st_mtime_ns}:{module.MODEL_NAME}".encode(),
+        ).hexdigest()
+        self.runtime_provider = f"DeepFace {module.MODEL_NAME}"
+
+    def analyze(self, image: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+            if image is None or image.ndim != 3 or image.size == 0:
+                raise ImageRejected("unreadable")
+            source_image = image
+            if config.FACE_IMAGE_ENHANCEMENT:
+                source_image = _enhance_face_image(image)
+            faces = []
+            with self._lock:
+                for backend in self._module.DETECTOR_BACKENDS:
+                    try:
+                        faces = self._module.DeepFace.extract_faces(
+                            img_path=source_image,
+                            detector_backend=backend,
+                            enforce_detection=True,
+                            align=True,
+                        )
+                        if faces:
+                            self._detector_backend = backend
+                            break
+                    except Exception:
+                        continue
+            if not faces:
+                raise ImageRejected("no_face")
+            if len(faces) != 1:
+                raise ImageRejected("multiple_faces")
+
+            face = faces[0]
+            facial_area = face.get("facial_area") or {}
+            scale = config.FACE_UPSCALE if config.FACE_IMAGE_ENHANCEMENT else 1.0
+            x = int(float(facial_area.get("x", 0)) / scale)
+            y = int(float(facial_area.get("y", 0)) / scale)
+            width = int(float(facial_area.get("w", 0)) / scale)
+            height = int(float(facial_area.get("h", 0)) / scale)
+            if width < 1 or height < 1:
+                raise ImageRejected("invalid_face_box")
+            roll = _face_roll_degrees(facial_area)
+            if roll is not None and abs(roll) > config.FACE_MAX_ROLL:
+                raise ImageRejected("excessive_roll")
+            detected = np.asarray(face.get("face"))
+            if detected.size == 0:
+                raise ImageRejected("unreadable")
+            if detected.max() <= 1:
+                detected = detected * 255
+            detected = np.asarray(detected, dtype=np.uint8)
+            temporary = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+            temporary_path = Path(temporary.name)
+            temporary.close()
+            try:
+                self._module.Image.fromarray(detected).save(
+                    temporary_path, format="JPEG", quality=95,
+                )
+                result = self._module.DeepFace.represent(
+                    img_path=str(temporary_path),
+                    model_name=self._module.MODEL_NAME,
+                    detector_backend=self._detector_backend,
+                    # The crop was already validated by extract_faces above.
+                    # Requiring a second detector pass rejects small but valid
+                    # face crops from surveillance frames.
+                    enforce_detection=False,
+                    align=True,
+                )
+            except Exception as exc:
+                raise FaceModelUnavailable("DeepFace embedding generation failed") from exc
+            finally:
+                temporary_path.unlink(missing_ok=True)
+            if not result or "embedding" not in result[0]:
+                raise ImageRejected("no_face")
+
+            face_width, face_height = width, height
+            gray = cv2.cvtColor(source_image, cv2.COLOR_BGR2GRAY)
+            x1, y1 = max(0, int(x * scale)), max(0, int(y * scale))
+            x2, y2 = min(source_image.shape[1], int((x + width) * scale)), min(
+                source_image.shape[0], int((y + height) * scale),
+            )
+            region = gray[y1:y2, x1:x2]
+            sharpness = float(cv2.Laplacian(region, cv2.CV_64F).var()) if region.size else 0
+            brightness = float(region.mean()) if region.size else 0
+            detection_score = float(face.get("confidence", 1.0))
+            quality = float(np.clip(
+                0.45 * detection_score
+                + 0.25 * min(1.0, sharpness / max(config.FACE_MIN_SHARPNESS * 4, 1))
+                + 0.20 * min(1.0, min(face_width, face_height) / (config.FACE_MIN_SIZE * 2))
+                + 0.10 * (0.0 if brightness < config.FACE_MIN_BRIGHTNESS
+                          or brightness > config.FACE_MAX_BRIGHTNESS else 1.0),
+                0.0, 1.0,
+            ))
+            return np.asarray(result[0]["embedding"], dtype=np.float32), {
+                "width": face_width,
+                "height": face_height,
+                "sharpness": round(sharpness, 2),
+                "brightness": round(brightness, 2),
+                "detection_score": round(detection_score, 4),
+                "bbox": [x, y, x + width, y + height],
+                "bbox_input": [
+                    int(round(x * scale)), int(round(y * scale)),
+                    int(round((x + width) * scale)),
+                    int(round((y + height) * scale)),
+                ],
+                "face_detector": self._detector_backend,
+                "face_detector_confidence": round(detection_score, 4),
+                "quality_score": quality,
+                "alignment": "DeepFace aligned enhanced face crop",
+                "roll": round(roll, 2) if roll is not None else None,
+            }
+
+
 class YoloFaceAnalyzer:
     """Detect face boxes with YOLO, then align/embed each crop with the gallery model."""
 
@@ -843,17 +1028,17 @@ class YoloFaceAnalyzer:
 
 
 def create_face_analyzer(provider_preference: str | None = None) -> FaceAnalyzer:
+    if config.FACE_MODEL_NAME == "deepface_arcface":
+        return ExternalDeepFaceAnalyzer()
     if config.FACE_MODEL_NAME == "opencv_zoo_yunet_sface":
-        embedder: FaceAnalyzer = OpenCVZooFaceAnalyzer(
-            provider_preference or "auto",
+        return YoloFaceAnalyzer(
+            OpenCVZooFaceAnalyzer(provider_preference or "auto"),
         )
-    elif config.FACE_MODEL_NAME == "insightface_buffalo_l":
-        embedder = InsightFaceAnalyzer(provider_preference)
-    else:
-        raise FaceModelUnavailable(
-            f"Unsupported configured face model {config.FACE_MODEL_NAME!r}"
-        )
-    return YoloFaceAnalyzer(embedder)
+    if config.FACE_MODEL_NAME == "insightface_buffalo_l":
+        return InsightFaceAnalyzer(provider_preference)
+    raise FaceModelUnavailable(
+        f"Unsupported configured face model {config.FACE_MODEL_NAME!r}"
+    )
 
 
 def _cosine_similarity(left: np.ndarray, right: np.ndarray) -> float:
@@ -1152,6 +1337,20 @@ async def import_face_dataset(
             image_hash = hashlib.sha256(image_bytes).hexdigest()
             local_duplicate = seen_hashes.get(image_hash)
             stored_duplicate = await db.get_face_embedding_by_hash(image_hash)
+            if (
+                stored_duplicate is not None
+                and (
+                    (
+                        "model_name" in stored_duplicate
+                        and stored_duplicate["model_name"] != face_analyzer.model_name
+                    )
+                    or (
+                        "model_version" in stored_duplicate
+                        and stored_duplicate["model_version"] != face_analyzer.model_version
+                    )
+                )
+            ):
+                stored_duplicate = None
             duplicate_person = (
                 local_duplicate[1] if local_duplicate else
                 int(stored_duplicate["person_id"]) if stored_duplicate else None

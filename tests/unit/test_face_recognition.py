@@ -13,6 +13,7 @@ from app.faces.face_recognition import (
     FaceRecognitionWorker,
     _best_face_from_crops,
     _include_helmet_head_regions,
+    _include_face_focus_regions,
     decide_face_match,
     rank_person_scores,
     violation_requires_face_recognition,
@@ -116,14 +117,30 @@ class FaceMatchTests(unittest.TestCase):
         self.assertEqual(best["absolute_bbox"], [110, 220, 150, 260])
         self.assertEqual(best["face_crop"].shape, (52, 52, 3))
 
+    def test_best_face_crop_uses_input_scale_bbox(self):
+        class _Analyzer:
+            def analyze(self, _image):
+                return np.asarray([1.0, 0.0]), {
+                    "quality_score": 0.95,
+                    "bbox": [10, 20, 50, 60],
+                    "bbox_input": [20, 40, 100, 120],
+                }
+
+        image = np.zeros((150, 140, 3), dtype=np.uint8)
+        best, _rejected = _best_face_from_crops(
+            _Analyzer(), [(image, "face_focus", None)],
+        )
+
+        self.assertEqual(best["face_crop"].shape, (104, 104, 3))
+
     def test_helmet_violation_analyzes_upper_person_roi_with_frame_coordinates(self):
         image = np.zeros((100, 80, 3), dtype=np.uint8)
         crops = _include_helmet_head_regions(
             [(image, "incident_evidence", [20, 40, 100, 140])],
             "no_helmet",
         )
-        self.assertEqual(len(crops), 2)
-        head_image, source, origin = crops[1]
+        self.assertEqual(len(crops), 1)
+        head_image, source, origin = crops[0]
         self.assertEqual(source, "incident_evidence_head_roi")
         self.assertEqual(head_image.shape, (45, 80, 3))
         self.assertEqual(origin, [20, 40, 100, 85])
@@ -142,7 +159,7 @@ class FaceMatchTests(unittest.TestCase):
         self.assertEqual(best["source"], "incident_evidence_head_roi")
         self.assertEqual(best["absolute_bbox"], [40, 50, 70, 80])
         self.assertEqual(best["face_crop"].shape, (38, 38, 3))
-        self.assertEqual(rejected, {"no_face": 1})
+        self.assertEqual(rejected, {})
 
     def test_non_helmet_violations_do_not_add_head_roi(self):
         image = np.zeros((100, 80, 3), dtype=np.uint8)
@@ -153,6 +170,17 @@ class FaceMatchTests(unittest.TestCase):
         )
 
         self.assertEqual(len(crops), 1)
+
+    def test_face_focus_region_enlarges_tall_person_crop(self):
+        image = np.zeros((200, 100, 3), dtype=np.uint8)
+        crops = _include_face_focus_regions(
+            [(image, "tracked_person_buffer", [20, 40, 120, 240])],
+        )
+        self.assertEqual(len(crops), 2)
+        focused, source, origin = crops[0]
+        self.assertEqual(source, "tracked_person_buffer_face_focus_head")
+        self.assertIsNone(origin)
+        self.assertGreater(focused.shape[0], image.shape[0])
 
     def test_per_violation_quality_floor_rejects_without_lowering_global_gates(self):
         class _Analyzer:

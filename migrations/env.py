@@ -3,19 +3,30 @@ from logging.config import fileConfig
 from pathlib import Path
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
+from sqlalchemy.engine import URL
 
 config = context.config
 if config.config_file_name:
     fileConfig(config.config_file_name, disable_existing_loggers=False)
 project_root = Path(config.config_file_name).resolve().parent
 sys.path.insert(0, str(project_root))
+from app import config as app_config  # noqa: E402
+
+database_url = URL.create(
+    "postgresql+psycopg2",
+    username=app_config.PG_USER,
+    password=app_config.PG_PASSWORD,
+    host=app_config.PG_HOST,
+    port=app_config.PG_PORT,
+    database=app_config.PG_DB,
+)
 target_metadata = None
 
 
 def run_migrations_offline():
     context.configure(
-        url=config.get_main_option("sqlalchemy.url"),
+        url=database_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -26,9 +37,8 @@ def run_migrations_offline():
 
 
 def run_migrations_online():
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    connectable = create_engine(
+        database_url,
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:

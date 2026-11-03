@@ -91,12 +91,23 @@ def collect_face_observations(
                 int(face_box[0] + origin[0]), int(face_box[1] + origin[1]),
                 int(face_box[2] + origin[0]), int(face_box[3] + origin[1]),
             ]
+        face_crop = None
+        if isinstance(face_box, (list, tuple)) and len(face_box) == 4:
+            height, width = image.shape[:2]
+            x1, y1, x2, y2 = [int(value) for value in face_box]
+            pad_x = max(4, int((x2 - x1) * 0.15))
+            pad_y = max(4, int((y2 - y1) * 0.15))
+            x1, x2 = max(0, x1 - pad_x), min(width, x2 + pad_x)
+            y1, y2 = max(0, y1 - pad_y), min(height, y2 + pad_y)
+            if x2 > x1 and y2 > y1:
+                face_crop = image[y1:y2, x1:x2].copy()
         observations.append(FaceObservation(
             embedding=normalize_embedding(embedding),
             quality=quality,
             source=str(source),
             measurements=dict(measurements),
             absolute_bbox=absolute_bbox,
+            face_crop=face_crop,
         ))
     observations.sort(key=lambda item: item.quality, reverse=True)
     if best_n > 0:

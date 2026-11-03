@@ -139,13 +139,16 @@
           <button class="face-subtab-btn active" type="button" data-face-subtab="matches">MATCHES</button>
           <button class="face-subtab-btn" type="button" data-face-subtab="analytics">ANALYTICS</button>
           <button class="face-subtab-btn" type="button" data-face-subtab="enroll">ENROLL EMPLOYEE</button>
-          <button class="face-subtab-btn" type="button" data-face-subtab="historian">HISTORIAN</button>
           <button class="face-subtab-btn" type="button" data-face-subtab="employees">EMPLOYEES</button>
           <button class="face-subtab-btn" type="button" data-face-subtab="settings">SETTINGS</button>
           <button class="face-subtab-btn" type="button" data-face-subtab="status">STATUS</button>
         </div>
         <section class="face-subtab-pane active" id="face-panel-matches">
-          <div class="filter-bar">
+          <div class="face-command-bar">
+            <div><span class="face-eyebrow">FACIAL IDENTIFICATION / SECURE REVIEW</span><strong>FACE MATCHES</strong><span id="faceLiveStatus" class="face-live-status">EVENT STREAM STANDBY</span></div>
+            <div><button class="ops-btn-sec" id="btnRefreshFaceMatches" type="button">SYNC INDEX</button><a class="ops-btn-sec" href="/api/face/matches/export.csv">EXPORT</a><button class="ops-btn-sec" id="btnPrintFaceMatches" type="button">PRINT</button></div>
+          </div>
+          <div class="face-filter-deck">
             <label for="faceViolationTypeFilter">VIOLATION TYPE</label>
             <select id="faceViolationTypeFilter">
               <option value="">ALL ELIGIBLE TYPES</option>
@@ -169,21 +172,17 @@
             <label for="faceSearchFilter">SEARCH</label><input id="faceSearchFilter" type="search" placeholder="Name or employee ID" />
             <label for="faceSourceFilter">SOURCE</label>
             <select id="faceSourceFilter"><option value="">ALL</option><option value="live">LIVE</option><option value="historian">HISTORIAN</option></select>
-            <button class="ops-btn-sec" id="btnRefreshFaceMatches" type="button">↻ REFRESH</button>
-            <a class="ops-btn-sec" href="/api/face/matches/export.csv">EXPORT CSV</a>
-            <button class="ops-btn-sec" id="btnPrintFaceMatches" type="button">PRINT / PDF</button>
           </div>
-          <div class="status-log-scroll">
-            <table class="ops-table">
-              <thead><tr><th>TIME</th><th>INCIDENT</th><th>EVIDENCE</th><th>CAMERA / LOCATION</th><th>VIOLATION</th><th>EMPLOYEE / SCORE</th><th>MATCH</th><th>INCIDENT</th><th>REVIEW</th><th>SOURCE</th></tr></thead>
-              <tbody id="faceMatchesBody"><tr><td colspan="10" class="empty-state">Face matches will appear here after eligible incidents are processed.</td></tr></tbody>
-            </table>
+          <div class="face-workbench">
+            <section class="face-result-list" aria-label="Face match results">
+              <div class="face-list-heading"><span>RESULT QUEUE</span><span id="faceResultCount">0 RECORDS</span></div>
+              <div id="faceMatchesBody"><div class="empty-state">Face matches will appear here after eligible incidents are processed.</div></div>
+            </section>
+            <section class="face-detail-pane" id="faceMatchDrawer" aria-labelledby="faceMatchDrawerTitle">
+              <div class="face-detail-header"><div><span class="face-eyebrow">CASE FILE</span><h3 id="faceMatchDrawerTitle">SELECT A RESULT</h3></div><button class="ops-btn-sec" id="btnFaceRerun" type="button" hidden>RE-RUN</button></div>
+              <div id="faceMatchDrawerContent"><div class="face-detail-empty">Select a historical or live result to inspect the evidence.</div></div>
+            </section>
           </div>
-          <aside id="faceMatchDrawer" class="face-match-drawer" role="dialog" aria-modal="true" aria-labelledby="faceMatchDrawerTitle" hidden>
-            <button class="icon-btn face-drawer-close" id="btnCloseFaceMatchDrawer" type="button" aria-label="Close details">×</button>
-            <h3 id="faceMatchDrawerTitle">FACE MATCH DETAILS</h3>
-            <div id="faceMatchDrawerContent"></div>
-          </aside>
         </section>
         <section class="face-subtab-pane" id="face-panel-analytics" hidden>
           <div class="filter-bar">
@@ -259,29 +258,6 @@
               <button class="ops-btn" type="submit">IMPORT CONSENTED ZIP DATASET</button>
             </form>
             <p id="faceBulkEnrollmentStatus" role="status" aria-live="polite"></p>
-          </div>
-        </section>
-        <section class="face-subtab-pane" id="face-panel-historian" hidden>
-          <div class="status-report-panel">
-            <div class="status-report-heading"><div><h3>RUN ON HISTORIAN IMAGES</h3><p>Backfill stored violation images; already-processed images are skipped.</p></div></div>
-            <form id="faceHistorianForm" class="face-enrollment-form">
-              <label for="faceHistorianFrom">FROM<input id="faceHistorianFrom" type="datetime-local" required /></label>
-              <label for="faceHistorianTo">TO<input id="faceHistorianTo" type="datetime-local" required /></label>
-              <label for="faceHistorianCameras">CAMERAS (EMPTY = ALL)<select id="faceHistorianCameras" multiple size="5"></select></label>
-              <fieldset><legend>VIOLATION TYPES</legend>
-                <label><input type="checkbox" name="historian_type" value="no_helmet" checked /> No helmet</label>
-                <label><input type="checkbox" name="historian_type" value="no_arc_flash_suit" checked /> No arc-flash suit</label>
-                <label><input type="checkbox" name="historian_type" value="phone_detected" checked /> Phone detected</label>
-              </fieldset>
-              <button class="ops-btn" type="submit">START BACKFILL</button>
-            </form>
-            <p id="faceHistorianStatus" role="status" aria-live="polite"></p>
-            <div class="status-log-scroll"><table class="ops-table"><thead><tr><th>JOB</th><th>STATUS</th><th>PROGRESS</th><th>MATCHED</th><th>REVIEW</th><th>UNKNOWN</th><th>NOT VISIBLE</th><th>FAILED</th><th>ACTIONS</th></tr></thead><tbody id="faceHistorianJobsBody"></tbody></table></div>
-          </div>
-          <div class="status-report-panel">
-            <h3>AD-HOC SEARCH</h3><p>Upload an image to search the consented gallery. This is not a violation result.</p>
-            <form id="faceAdHocSearchForm"><input id="faceAdHocImage" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" required /><button class="ops-btn-sec" type="submit">SEARCH TOP MATCHES</button></form>
-            <div id="faceAdHocResults" role="status" aria-live="polite"></div>
           </div>
         </section>
         <section class="face-subtab-pane" id="face-panel-employees" hidden>
@@ -443,18 +419,58 @@
         <section class="alert-delivery-panel">
           <div class="status-report-heading">
             <div><h3>POWER AUTOMATE EMAIL DELIVERY</h3>
-              <p>Power Automate sends email alerts only for missing-helmet incidents and attaches the annotated evidence image. Configure the flow URL in the server .env and restart the app before testing. Shift report emails are not part of this build.</p>
+              <p>Immediate alerts and shift digests send only missing-helmet and phone evidence images. Test sends the latest eligible image.</p>
             </div>
+            <button class="ops-btn-sec" id="btnRefreshAlertDelivery" type="button">↻ REFRESH</button>
+          </div>
+          <div class="alert-delivery-health" id="alertDeliveryHealth">
+            <div class="delivery-health-card"><span>FLOW CONFIGURATION</span><strong>—</strong><small>Checking server configuration</small></div>
+            <div class="delivery-health-card"><span>SENT LAST 24H</span><strong>—</strong><small>Power Automate deliveries</small></div>
+            <div class="delivery-health-card"><span>QUEUED / FAILED</span><strong>—</strong><small>Pending and dead jobs</small></div>
           </div>
           <div class="email-report-base-settings">
-            <label for="powerAutomateTestRecipient">TEST RECIPIENT EMAIL
-              <input id="powerAutomateTestRecipient" type="email" required maxlength="254" placeholder="safety.team@example.com" autocomplete="email" />
+            <label>RECIPIENTS
+              <input value="nikita.gosavi@adityabirla.com; gowtham.isakapatla@adityabirla.com" readonly />
             </label>
           </div>
+          <section class="delivery-history">
+            <div class="alert-command-heading">
+              <div><span class="alert-eyebrow">EVIDENCE CONTROL / MANUAL DISPATCH</span><h3>SELECT EVIDENCE IMAGES</h3><p>Select one or more verified helmet or phone incidents. Each selected image is sent as a separate email attachment.</p></div>
+              <button class="ops-btn-sec" id="btnRefreshAlertGallery" type="button">↻ SYNC GALLERY</button>
+            </div>
+            <div class="alert-gallery-toolbar">
+              <label>TYPE
+                <select id="alertGalleryType">
+                  <option value="">ALL ELIGIBLE</option>
+                  <option value="no_helmet">MISSING HELMET</option>
+                  <option value="phone_detected">PHONE DETECTED</option>
+                </select>
+              </label>
+              <label>WINDOW
+                <select id="alertGalleryAge">
+                  <option value="2">LAST 2 DAYS</option>
+                  <option value="7">LAST 7 DAYS</option>
+                  <option value="all">ALL AVAILABLE</option>
+                </select>
+              </label>
+              <span id="alertGalleryCount">0 evidence items</span>
+            </div>
+            <div id="alertViolationGallery" class="incidents-grid alert-incidents-gallery"><div class="empty-state">Loading eligible evidence…</div></div>
+          </section>
           <div class="alert-delivery-actions">
             <div id="powerAutomateTestStatus" role="status" aria-live="polite"></div>
-            <button class="ops-btn-sec" id="btnTestPowerAutomate" type="button">SEND TEST EMAIL</button>
+            <button class="ops-btn-sec" id="btnTestPowerAutomate" type="button" disabled>SEND SELECTED</button>
           </div>
+          <section class="delivery-history">
+            <div class="status-report-heading"><h3>RECENT DELIVERY ACTIVITY</h3><span id="alertDeliveryUpdated">Not loaded</span></div>
+            <div id="alertDeliveryMessage" class="camera-status-message" role="status" aria-live="polite"></div>
+            <div class="status-log-scroll">
+              <table class="ops-table">
+                <thead><tr><th>TIME</th><th>VIOLATION</th><th>CAMERA</th><th>RESULT</th></tr></thead>
+                <tbody id="alertDeliveryHistory"><tr><td colspan="4" class="empty-state">No delivery activity.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
         </section>
       </div>
 
@@ -569,12 +585,21 @@
 
 <div class="modal-overlay" id="lightboxBackdrop">
   <div class="lightbox-inner">
-    <button class="lightbox-close" id="lightboxClose">✕</button>
-    <button class="lightbox-nav lightbox-prev" id="lightboxPrev" aria-label="Previous incident">‹</button>
-    <img id="lightboxImage" alt="Evidence" />
+    <div class="lightbox-toolbar">
+      <div class="lightbox-heading"><span class="lightbox-kicker">INCIDENT EVIDENCE</span><strong id="lightboxTitle">Evidence image</strong></div>
+      <div class="lightbox-actions">
+        <a class="lightbox-action" id="lightboxOpen" target="_blank" rel="noopener" title="Open image in new tab" aria-label="Open image in new tab">↗</a>
+        <a class="lightbox-action" id="lightboxDownload" download title="Download image" aria-label="Download image">↓</a>
+        <button class="lightbox-action danger" id="lightboxDelete" type="button" title="Permanently delete incident" aria-label="Permanently delete incident">⌫</button>
+        <button class="lightbox-action" id="lightboxClose" type="button" title="Close gallery" aria-label="Close gallery">✕</button>
+      </div>
+    </div>
+    <button class="lightbox-nav lightbox-prev" id="lightboxPrev" aria-label="Previous incident">‹<span>PREV</span></button>
+    <div class="lightbox-stage"><img id="lightboxImage" alt="Evidence" /></div>
     <div class="lightbox-image-error" id="lightboxImageError" hidden>Image could not be loaded.</div>
-    <button class="lightbox-nav lightbox-next" id="lightboxNext" aria-label="Next incident">›</button>
-    <div class="lightbox-caption" id="lightboxCaption"></div>
+    <button class="lightbox-nav lightbox-next" id="lightboxNext" aria-label="Next incident">›<span>NEXT</span></button>
+    <div class="lightbox-footer"><div><span id="lightboxCounter">01 / 01</span><span class="lightbox-caption" id="lightboxCaption"></span></div><div class="lightbox-hint">← → navigate &nbsp; · &nbsp; ESC close</div></div>
+    <div class="lightbox-thumbs" id="lightboxThumbs" aria-label="Incident thumbnails"></div>
   </div>
 </div>
 

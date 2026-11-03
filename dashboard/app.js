@@ -16,6 +16,8 @@ const state = {
   cameraStatusReport: null,
   cameraStatusAbortController: null, cameraStatusDebounceTimer: null,
   analyticsStats: null, analyticsWindowHours: 24, analyticsResizeTimer: null,
+  faceSelectedIncident: null, faceAnimationTimer: null, faceViewed: new Set(),
+  faceLiveQueue: [], faceLiveBusy: false,
   canManageAlertDelivery: false,
   canReviewFaceMatches: false,
   canManageFaceSettings: false,
@@ -49,6 +51,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupCameraStatusReport();
   setupAnalyticsDashboard();
   setupPowerAutomateTest();
+  setupAlertDeliveryDashboard();
   setInterval(refreshStats, 15000);
   setInterval(refreshCameraStatuses, 8000);
   setInterval(() => {
@@ -57,6 +60,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }, 60000);
 });
+
+async function deleteIncident(incidentId) {
+  if (!window.confirm(`Permanently delete incident #${incidentId}, its images, clips, and face-match data? This cannot be undone.`)) return;
+  try {
+    const response = await fetch(`/api/violations/${incidentId}`, { method: "DELETE" });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+    await Promise.all([loadViolationsGallery(), loadFaceMatches()]);
+  } catch (error) {
+    window.alert(`Could not delete incident: ${error.message}`);
+  }
+}
 
 async function initializeAuthentication() {
   const overlay = document.getElementById("authOverlay");
@@ -540,7 +555,9 @@ function cameraConnectionLabel(camera) {
 function updateCameraTileStatus(camera) {
   const status = document.getElementById(`status-${camera.camera_id}`);
   if (!status) return;
+  const tile = document.getElementById(`tile-${camera.camera_id}`);
   const label = cameraConnectionLabel(camera);
+  tile?.classList.toggle("reconnecting", label === "CONNECTING" || label === "RETRYING");
   status.className = `tile-status ${label === "LIVE" ? "online" : "offline"}`;
   status.querySelector("span:last-child").textContent = label;
   status.title = camera.connection_error
@@ -601,7 +618,9 @@ function buildCameraTile(cam) {
 
 async function reconnectSingleCamera(cameraId) {
   const btn = document.querySelector(`[data-reconnect-tile="${cameraId}"]`);
+  const tile = document.getElementById(`tile-${cameraId}`);
   if (btn) { btn.disabled = true; btn.classList.add("spinning"); }
+  tile?.classList.add("reconnecting");
   const placeholder = document.getElementById(`placeholder-${cameraId}`);
   if (placeholder) { placeholder.style.display = "block"; placeholder.textContent = "Reconnecting…"; }
   try {
@@ -613,6 +632,7 @@ async function reconnectSingleCamera(cameraId) {
     console.error(`Reconnect failed for ${cameraId}:`, e);
   } finally {
     if (btn) { btn.disabled = false; btn.classList.remove("spinning"); }
+    tile?.classList.remove("reconnecting");
   }
 }
 
@@ -1033,7 +1053,29 @@ function connectEventStream() {
   ws.onmessage = (msg) => {
     const event = JSON.parse(msg.data);
     if (event.type === "violation") { renderViolationEvent(event); flashCameraTile(event.camera_id); bumpViolationCounter(); }
+    if (event.type === "face_match_processed") {
+      const status = document.getElementById("faceLiveStatus");
+      if (status) status.textContent = `LIVE RESULT · ${event.status}`;
+      if (event.incident_id) {
+        state.faceLiveQueue.push(Number(event.incident_id));
+        processFaceLiveQueue();
+      }
+    }
   };
+}
+
+async function processFaceLiveQueue() {
+  if (state.faceLiveBusy || !state.faceLiveQueue.length) return;
+  state.faceLiveBusy = true;
+  const incidentId = state.faceLiveQueue.shift();
+  try {
+    await loadFaceMatches();
+    await showFaceMatchDetail(incidentId, false, true);
+    await new Promise((resolve) => window.setTimeout(resolve, 2500));
+  } finally {
+    state.faceLiveBusy = false;
+    processFaceLiveQueue();
+  }
 }
 
 function renderViolationEvent(event) {
@@ -1070,6 +1112,12 @@ function setupViolationsGallery() {
   document.getElementById("violationAgeFilter").addEventListener("change", () => loadViolationsGallery());
   document.getElementById("btnCleanOldViolations").addEventListener("click", cleanOldViolations);
   document.getElementById("violationsGallery").addEventListener("click", async (event) => {
+    const deleteButton = event.target.closest("[data-incident-delete]");
+    if (deleteButton) {
+      event.stopPropagation();
+      await deleteIncident(Number(deleteButton.dataset.incidentDelete));
+      return;
+    }
     const faceButton = event.target.closest("[data-face-match-open]");
     if (faceButton) {
       event.stopPropagation();
@@ -1141,7 +1189,10 @@ function setupViolationsGallery() {
         const error = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
         throw new Error(error.detail || `HTTP ${response.status}`);
       }
-      await loadViolationsGallery();
+      const card = button.closest(".violation-card");
+      const status = card.querySelector(".review-status");
+      status.textContent = button.dataset.reviewStatus.replace("_", " ");
+      controls.querySelectorAll("button").forEach((item) => { item.disabled = true; });
     } catch (error) {
       alert(`Could not save review: ${error.message}`);
       controls.querySelectorAll("button").forEach((item) => { item.disabled = false; });
@@ -1209,7 +1260,9 @@ async function loadViolationsGallery(append = false) {
       const label = formatViolationLabel(row.violation_type);
       const detectedAt = row.detected_at ? new Date(row.detected_at).toLocaleString() : "";
       return {
+        id: row.id,
         url: row.snapshot_url,
+        title: `${label} · ${row.camera_name || row.camera_id}`,
         caption: `${row.camera_name || row.camera_id} · ${row.area_group || row.zone || ""} · ${label} · ${detectedAt}`,
       };
     }));
@@ -1237,7 +1290,7 @@ async function loadViolationsGallery(append = false) {
       const faceMatchAction = state.canReviewFaceMatches && faceEligible
         ? `<button type="button" class="icon-btn" data-face-match-open="${row.id}">Open Face Match</button>`
         : "";
-      card.innerHTML = `<div class="thumb-wrap">${snapshotUrl ? `<img src="${snapshotUrl}" alt="${escapeHtml(label)}" loading="lazy" />` : `<div class="thumb-placeholder">No image</div>`}<span class="thumb-badge">${label.toUpperCase()}</span></div><div class="card-meta"><div class="card-cam">${escapeHtml(row.camera_name || row.camera_id)}</div><div class="card-time">${escapeHtml(row.area_group || row.zone || "")} · ${detectedAt}</div><div class="review-status">${escapeHtml(reviewStatus.replace("_", " "))}</div>${faceMatchStatus ? `<div class="face-match-availability">${faceMatchStatus}${state.canReviewFaceMatches ? ` <button type="button" class="icon-btn" data-face-match-open="${row.id}">View face match</button>` : ""}</div>` : ""}<div class="face-match-panel" data-face-match-panel hidden></div><div class="review-actions">${faceMatchAction}<button type="button" class="icon-btn" data-review="${row.id}" data-review-status="confirmed">Confirm</button><button type="button" class="icon-btn danger" data-review="${row.id}" data-review-status="false_positive">False positive</button>${row.clean_snapshot_url ? `<a class="icon-btn" href="${row.clean_snapshot_url}" target="_blank" rel="noopener">Clean</a>` : ""}${row.video_url ? `<a class="icon-btn" href="${row.video_url}" target="_blank" rel="noopener">Clip</a>` : ""}</div></div>`;
+      card.innerHTML = `<div class="thumb-wrap">${snapshotUrl ? `<img src="${snapshotUrl}" alt="${escapeHtml(label)}" loading="lazy" />` : `<div class="thumb-placeholder">No image</div>`}<span class="thumb-badge">${label.toUpperCase()}</span><button type="button" class="gallery-delete" data-incident-delete="${row.id}" title="Permanently delete incident and evidence" aria-label="Delete incident">×</button></div><div class="card-meta"><div class="card-cam">${escapeHtml(row.camera_name || row.camera_id)}</div><div class="card-time">${escapeHtml(row.area_group || row.zone || "")} · ${detectedAt}</div><div class="review-status">${escapeHtml(reviewStatus.replace("_", " "))}</div>${faceMatchStatus ? `<div class="face-match-availability">${faceMatchStatus}${state.canReviewFaceMatches ? ` <button type="button" class="icon-btn" data-face-match-open="${row.id}">View face match</button>` : ""}</div>` : ""}<div class="face-match-panel" data-face-match-panel hidden></div><div class="review-actions">${faceMatchAction}<button type="button" class="icon-btn" data-review="${row.id}" data-review-status="confirmed">Confirm</button><button type="button" class="icon-btn danger" data-review="${row.id}" data-review-status="false_positive">False positive</button>${row.clean_snapshot_url ? `<a class="icon-btn" href="${row.clean_snapshot_url}" target="_blank" rel="noopener">Clean</a>` : ""}${row.video_url ? `<a class="icon-btn" href="${row.video_url}" target="_blank" rel="noopener">Clip</a>` : ""}</div></div>`;
       if (snapshotUrl) {
         card.setAttribute("role", "button");
         card.tabIndex = 0;
@@ -1250,7 +1303,7 @@ async function loadViolationsGallery(append = false) {
           if (event.target.closest("button, a, select")) return;
           if (event.key === "Enter" || event.key === " ") {
             event.preventDefault();
-            openIncident();
+            openViolationLightbox(snapshotUrl);
           }
         });
       }
@@ -1342,6 +1395,12 @@ function setupFaceMatches() {
     "click", () => window.print(),
   );
   document.getElementById("faceMatchesBody").addEventListener("click", (event) => {
+    const deleteButton = event.target.closest("[data-face-delete]");
+    if (deleteButton) {
+      event.stopPropagation();
+      deleteIncident(Number(deleteButton.dataset.faceDelete));
+      return;
+    }
     const row = event.target.closest("[data-face-match-id]");
     if (row) showFaceMatchDetail(Number(row.dataset.faceMatchId));
   });
@@ -1352,8 +1411,10 @@ function setupFaceMatches() {
       showFaceMatchDetail(Number(row.dataset.faceMatchId));
     }
   });
-  document.getElementById("btnCloseFaceMatchDrawer").addEventListener(
-    "click", () => { document.getElementById("faceMatchDrawer").hidden = true; },
+  document.getElementById("btnFaceRerun").addEventListener(
+    "click", () => {
+      if (state.faceSelectedIncident) showFaceMatchDetail(state.faceSelectedIncident, false, true);
+    },
   );
   document.getElementById("faceMatchDrawer").addEventListener("click", async (event) => {
     const button = event.target.closest("[data-face-drawer-action]");
@@ -1415,9 +1476,7 @@ function setupFaceMatches() {
   document.getElementById("btnRefreshFaceEmployees").addEventListener(
     "click", loadFaceEmployees,
   );
-  setupFaceHistorian();
   setupFaceMatchSettings();
-  loadFaceHistorianCameras();
   document.getElementById("faceEmployeesBody").addEventListener(
     "click", async (event) => {
       const historyButton = event.target.closest("[data-employee-history]");
@@ -1468,10 +1527,6 @@ function setupFaceMatches() {
       if (button.dataset.faceSubtab === "matches") loadFaceMatches();
       if (button.dataset.faceSubtab === "analytics") loadFaceAnalytics();
       if (button.dataset.faceSubtab === "status") loadFaceRecognitionStatus();
-      if (button.dataset.faceSubtab === "historian") {
-        loadFaceHistorianJobs();
-        loadFaceEmployees();
-      }
       if (button.dataset.faceSubtab === "employees") loadFaceEmployees();
       if (button.dataset.faceSubtab === "settings") loadFaceMatchSettings();
     });
@@ -1560,7 +1615,7 @@ function installFaceImageFallbacks(container) {
 
 async function loadFaceMatches() {
   const body = document.getElementById("faceMatchesBody");
-  body.innerHTML = `<tr><td colspan="10" class="empty-state">Loading face matches…</td></tr>`;
+  body.innerHTML = `<div class="empty-state">Synchronizing recognition index…</div>`;
   const params = new URLSearchParams({ limit: "100" });
   const values = {
     violation_type: document.getElementById("faceViolationTypeFilter").value,
@@ -1592,52 +1647,37 @@ async function loadFaceMatches() {
     }
     const matches = await response.json();
     body.replaceChildren();
+    document.getElementById("faceResultCount").textContent = `${matches.length} RECORDS`;
     if (!matches.length) {
-      body.innerHTML = `<tr><td colspan="10" class="empty-state">No face matches for this filter.</td></tr>`;
+      body.innerHTML = `<div class="empty-state">No face matches for this filter.</div>`;
       return;
     }
     matches.forEach((match) => {
-      const row = document.createElement("tr");
-      row.dataset.faceMatchId = match.incident_id;
-      row.tabIndex = 0;
-      row.setAttribute("role", "button");
-      const fields = [
-        match.epoch_time ? new Date(Number(match.epoch_time) * 1000).toLocaleString() : "—",
-        `#${match.incident_id}`,
-        `<div class="face-list-evidence">${match.snapshot_url
-          ? `<img class="face-list-thumbnail" src="${escapeHtml(match.snapshot_url)}" alt="Violation image" loading="lazy" />`
-          : `<span class="face-list-placeholder">No image</span>`}<div class="face-list-comparison"><figure><figcaption>INCIDENT</figcaption>${match.face_crop_url
-          ? `<img class="face-list-thumbnail face-list-face" src="${escapeHtml(match.face_crop_url)}" alt="Incident face crop" loading="lazy" />`
-          : `<span class="face-list-placeholder">No face</span>`}</figure><figure><figcaption>${match.person_id ? "GALLERY" : "TOP CANDIDATE"}</figcaption>${match.gallery_photo_url
-          ? `<img class="face-list-thumbnail face-list-gallery" src="${escapeHtml(match.gallery_photo_url)}" alt="Enrolled employee reference photo" loading="lazy" />`
-          : `<span class="face-list-placeholder">No reference</span>`}</figure></div></div>`,
-        [match.camera_name || match.camera_id || "—", match.area_group_name]
-          .filter(Boolean).join(" · "),
-        formatViolationLabel(match.violation_type),
-        `${match.full_name || "—"}${match.employee_code ? ` (${match.employee_code})` : ""}${match.similarity == null ? "" : ` · ${(Number(match.similarity) * 100).toFixed(1)}%`}`,
-        faceMatchDisplayStatus(match),
-        match.violation_status || "—",
-        match.review_decision || "Pending review",
-        match.source || "live",
-      ];
-      fields.forEach((value, index) => {
-        const cell = document.createElement("td");
-        if (index === 2) {
-          cell.innerHTML = value;
-        } else {
-          cell.textContent = value;
-        }
-        if (index === 4) cell.className = "face-violation-badge";
-        if (index === 5 && match.similarity != null) {
-          cell.title = `Similarity ${(Number(match.similarity) * 100).toFixed(1)}%`;
-        }
-        row.appendChild(cell);
-      });
-      body.appendChild(row);
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "face-result-card";
+      card.dataset.faceMatchId = match.incident_id;
+      const score = match.similarity == null ? null : Math.max(0, Math.min(100, Number(match.similarity) * 100));
+      const statusClass = match.status === "MATCHED" ? "matched"
+        : ["UNKNOWN", "FACE_NOT_VISIBLE", "Error"].includes(match.status) ? "unknown" : "review";
+      const statusLabel = match.status === "FACE_NOT_VISIBLE" ? "NO FACE"
+        : match.status === "NEEDS_REVIEW" ? "REVIEW" : match.status || "QUEUED";
+      card.innerHTML = `${match.snapshot_url
+        ? `<img class="face-result-thumb" src="${escapeHtml(match.snapshot_url)}" alt="Incident ${match.incident_id}" loading="lazy" />`
+        : `<span class="face-result-thumb face-list-placeholder">NO IMAGE</span>`}
+        <span class="face-result-main"><span class="face-result-name">${escapeHtml(match.full_name || statusLabel)}</span>
+        <span class="face-result-meta">#${match.incident_id} · ${escapeHtml(formatViolationLabel(match.violation_type))}<br />${escapeHtml(match.camera_name || match.camera_id || "CAMERA UNKNOWN")} · ${match.epoch_time ? new Date(Number(match.epoch_time) * 1000).toLocaleString() : "TIME UNKNOWN"}</span>
+        <span class="face-result-status"><span class="face-status-badge ${statusClass}">${statusLabel}</span><span class="face-result-score">${score == null ? "—" : `${score.toFixed(1)}%`}</span></span>
+        <span class="face-confidence" aria-label="${score == null ? "No score available" : `${score.toFixed(1)} percent confidence`}"><i style="width:${score || 0}%"></i></span>
+        <span class="gallery-delete" role="button" tabindex="0" data-face-delete="${match.incident_id}" title="Permanently delete incident image and record" aria-label="Delete incident">⌫</span></span>`;
+      body.appendChild(card);
     });
     installFaceImageFallbacks(body);
+    if (!state.faceSelectedIncident || !matches.some((item) => Number(item.incident_id) === state.faceSelectedIncident)) {
+      showFaceMatchDetail(Number(matches[0].incident_id), true);
+    }
   } catch (error) {
-    body.innerHTML = `<tr><td colspan="10" class="face-match-error">Could not load face matches: ${escapeHtml(error.message)}</td></tr>`;
+    body.innerHTML = `<div class="face-match-error">Could not load face matches: ${escapeHtml(error.message)}</div>`;
   }
 }
 
@@ -1656,17 +1696,56 @@ function faceMatchDisplayStatus(match) {
 }
 
 function faceBoxOverlay(box, frameWidth, frameHeight, className) {
+  const style = faceBoxStyle(box, frameWidth, frameHeight);
+  return style ? `<span class="face-box-overlay ${className}" style="${style}"></span>` : "";
+}
+
+function faceBoxStyle(box, frameWidth, frameHeight) {
   if (!Array.isArray(box) || box.length !== 4 || !frameWidth || !frameHeight) return "";
   const [x1, y1, x2, y2] = box.map(Number);
   if (![x1, y1, x2, y2].every(Number.isFinite) || x2 <= x1 || y2 <= y1) return "";
-  return `<span class="face-box-overlay ${className}" style="left:${Math.max(0, x1 / frameWidth * 100)}%;top:${Math.max(0, y1 / frameHeight * 100)}%;width:${Math.min(100, (x2 - x1) / frameWidth * 100)}%;height:${Math.min(100, (y2 - y1) / frameHeight * 100)}%"></span>`;
+  return `left:${Math.max(0, x1 / frameWidth * 100)}%;top:${Math.max(0, y1 / frameHeight * 100)}%;width:${Math.min(100, (x2 - x1) / frameWidth * 100)}%;height:${Math.min(100, (y2 - y1) / frameHeight * 100)}%`;
 }
 
-async function showFaceMatchDetail(incidentId) {
-  const drawer = document.getElementById("faceMatchDrawer");
+function playFaceScan(match) {
+  const stage = document.querySelector("[data-face-scan]");
+  if (!stage) return;
+  window.clearTimeout(state.faceAnimationTimer);
+  stage.hidden = false;
+  const data = stage.querySelector(".face-scan-data");
+  const candidates = Array.isArray(match.top5_candidates) ? match.top5_candidates : [];
+  const candidateText = document.createElement("span");
+  candidateText.className = "face-scan-candidates";
+  stage.querySelector(".face-scan-copy").appendChild(candidateText);
+  const started = performance.now();
+  const ticker = window.setInterval(() => {
+    const elapsed = Math.floor(performance.now() - started);
+    data.textContent = `0x${Math.abs(elapsed * 7919).toString(16).padStart(6, "0")}  VECTOR ${Math.floor(elapsed / 17).toString(16).padStart(4, "0")}  GALLERY_SCAN`;
+    candidateText.textContent = candidates.length
+      ? `CANDIDATE ${Math.floor(elapsed / 180) % candidates.length + 1}/${candidates.length} · ${candidates[Math.floor(elapsed / 180) % candidates.length].full_name || "UNKNOWN"}`
+      : "CANDIDATE INDEX · NO USABLE FACE";
+  }, 90);
+  state.faceAnimationTimer = window.setTimeout(() => {
+    window.clearInterval(ticker);
+    const matched = ["MATCHED", "NEEDS_REVIEW"].includes(match.status) && match.matched_full_name;
+    stage.innerHTML = `<div class="face-scan-result ${matched ? "" : "unknown"}"><div><strong>${matched ? "MATCH FOUND" : match.status === "FACE_NOT_VISIBLE" ? "NO FACE" : "NO MATCH"}</strong><p>${escapeHtml(matched ? `${match.matched_full_name} · ${(Number(match.similarity || 0) * 100).toFixed(1)}%` : "Identity not resolved")}</p></div></div>`;
+    stage.onclick = () => { stage.hidden = true; };
+  }, 2400);
+  stage.onclick = () => {
+    window.clearTimeout(state.faceAnimationTimer);
+    window.clearInterval(ticker);
+    stage.hidden = true;
+  };
+}
+
+async function showFaceMatchDetail(incidentId, autoRun = false, forceRun = false) {
+  state.faceSelectedIncident = incidentId;
+  document.querySelectorAll(".face-result-card").forEach((card) => {
+    card.classList.toggle("active", Number(card.dataset.faceMatchId) === incidentId);
+  });
   const content = document.getElementById("faceMatchDrawerContent");
-  drawer.hidden = false;
   document.getElementById("faceMatchDrawerTitle").textContent = `FACE MATCH · INCIDENT #${incidentId}`;
+  document.getElementById("btnFaceRerun").hidden = false;
   content.innerHTML = `<p class="face-match-status">Loading face-match details…</p>`;
   try {
     const response = await fetch(`/api/face-matches/${incidentId}`);
@@ -1740,11 +1819,11 @@ async function showFaceMatchDetail(incidentId) {
       ["04", "GALLERY SEARCH", candidates.length ? `${candidates.length} ranked candidate(s)` : "No gallery candidates"],
     ];
     content.innerHTML = `<p class="face-recognition-notice">Automated result only; a human reviewer must make the final identity decision. This result is not a disciplinary action.</p>
-      <div class="face-detail-grid"><div><h4>ORIGINAL INCIDENT · ${escapeHtml(formatViolationLabel(match.violation_type))}</h4>
-        <div class="face-original-wrap">${original}${overlays}</div>
+      <div class="face-case-grid"><div><h4>CAPTURED FRAME · ${escapeHtml(formatViolationLabel(match.violation_type))}</h4>
+        <div class="face-evidence-frame">${original}${overlays}${faceBoxStyle(match.face_bbox, frameWidth, frameHeight) ? `<div class="face-scan-stage" data-face-scan style="${faceBoxStyle(match.face_bbox, frameWidth, frameHeight)}" hidden><div class="face-scan-line"></div><div class="face-scan-grid"></div><div class="face-scan-brackets"></div><div class="face-scan-copy">ANALYZING / EMBEDDING COMPARISON<div class="face-scan-progress"><i></i></div><span class="face-scan-data"></span></div></div>` : ""}</div>
         <p>${escapeHtml(match.camera_name || match.camera_id || "Camera unavailable")} · ${escapeHtml(match.area_group_name || "Location unavailable")} · ${match.epoch_time ? new Date(Number(match.epoch_time) * 1000).toLocaleString() : "Time unavailable"}</p>
         <p>Incident status: ${escapeHtml(match.violation_status || "—")} · Source: ${escapeHtml(match.source || "live")}</p></div>
-        <div><h4>INCIDENT FACE ↔ ${match.matched_person_id ? "ENROLLED GALLERY" : "TOP GALLERY CANDIDATE"}</h4>${comparison}${employee}</div></div>
+        <div><h4>FACE COMPARISON</h4><div class="face-face-pair">${comparison}</div>${employee}</div></div>
       <section class="face-process"><h4>RECOGNITION PIPELINE</h4><ol>${processSteps.map(([step, title, detail]) =>
         `<li><span>${step}</span><strong>${title}</strong><small>${escapeHtml(detail)}</small></li>`,
       ).join("")}</ol></section>
@@ -1759,6 +1838,11 @@ async function showFaceMatchDetail(incidentId) {
         ${match.review_decision ? `<p>Reviewer decision: ${escapeHtml(match.review_decision)} · ${match.reviewed_at ? new Date(match.reviewed_at).toLocaleString() : ""}</p>` : ""}
       </div><div id="faceEmployeeHistory"></div>`;
     installFaceImageFallbacks(content);
+    const shouldAnimate = forceRun || autoRun || !state.faceViewed.has(incidentId);
+    if (shouldAnimate) {
+      state.faceViewed.add(incidentId);
+      playFaceScan(match);
+    }
   } catch (error) {
     content.innerHTML = `<p class="face-match-error">Could not load face-match details: ${escapeHtml(error.message)}</p>`;
   }
@@ -1785,139 +1869,6 @@ async function showEmployeeHistory(personId) {
     });
   } catch (error) {
     target.innerHTML = `<p class="face-match-error">${escapeHtml(error.message)}</p>`;
-  }
-}
-
-async function loadFaceHistorianCameras() {
-  const select = document.getElementById("faceHistorianCameras");
-  select.replaceChildren();
-  state.cameras.forEach((camera) => {
-    const id = camera.camera_id || camera.id;
-    if (!id) return;
-    const option = document.createElement("option");
-    option.value = id;
-    option.textContent = camera.name || id;
-    select.appendChild(option);
-  });
-}
-
-function setupFaceHistorian() {
-  const form = document.getElementById("faceHistorianForm");
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const status = document.getElementById("faceHistorianStatus");
-    const button = form.querySelector("button[type=submit]");
-    button.disabled = true;
-    status.textContent = "Creating a resumable historian job…";
-    try {
-      const from = document.getElementById("faceHistorianFrom").value;
-      const to = document.getElementById("faceHistorianTo").value;
-      const violation_types = [...form.querySelectorAll(
-        'input[name="historian_type"]:checked',
-      )].map((input) => input.value);
-      const payload = {
-        date_from: new Date(from).toISOString(),
-        date_to: new Date(to).toISOString(),
-        camera_ids: [...document.getElementById("faceHistorianCameras").selectedOptions]
-          .map((option) => option.value),
-        violation_types,
-      };
-      const response = await fetch("/api/face/historian-jobs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
-      status.textContent = `Job #${result.id} created with ${result.total_count} unprocessed images.`;
-      await loadFaceHistorianJobs();
-    } catch (error) {
-      status.textContent = `Could not start historian job: ${error.message}`;
-    } finally {
-      button.disabled = false;
-    }
-  });
-  document.getElementById("faceHistorianJobsBody").addEventListener(
-    "click", async (event) => {
-      const button = event.target.closest("[data-historian-action]");
-      if (!button) return;
-      button.disabled = true;
-      try {
-        const response = await fetch(
-          `/api/face/historian-jobs/${button.dataset.jobId}/${button.dataset.historianAction}`,
-          { method: "POST" },
-        );
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
-        await loadFaceHistorianJobs();
-      } catch (error) {
-        document.getElementById("faceHistorianStatus").textContent = error.message;
-      } finally {
-        button.disabled = false;
-      }
-    },
-  );
-  document.getElementById("faceAdHocSearchForm").addEventListener(
-    "submit", async (event) => {
-      event.preventDefault();
-      const output = document.getElementById("faceAdHocResults");
-      output.textContent = "Searching the consented gallery…";
-      try {
-        const formData = new FormData();
-        formData.append("image", document.getElementById("faceAdHocImage").files[0]);
-        const response = await fetch("/api/face/search", {
-          method: "POST", body: formData,
-        });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
-        const candidates = result.top5_candidates || [];
-        const faceQuality = result.face_quality || {};
-        const detectorLabel = faceQuality.face_detector
-          ? `${escapeHtml(faceQuality.face_detector)}${faceQuality.face_detector_confidence == null ? "" : ` · ${(Number(faceQuality.face_detector_confidence) * 100).toFixed(1)}% confidence`}`
-          : "";
-        output.innerHTML = `<p>${escapeHtml(result.status)}${result.similarity == null ? "" : ` · ${(Number(result.similarity) * 100).toFixed(1)}%`}</p>
-          ${detectorLabel ? `<p>Face detected by ${detectorLabel}</p>` : ""}
-          <ol>${candidates.map((candidate) => `<li>${escapeHtml(candidate.full_name)} (${escapeHtml(candidate.employee_code)}) · ${(Number(candidate.similarity) * 100).toFixed(1)}%</li>`).join("")}</ol>`;
-      } catch (error) {
-        output.textContent = `Search failed: ${error.message}`;
-      }
-    },
-  );
-  window.setInterval(() => {
-    if (!document.getElementById("face-panel-historian").hidden) loadFaceHistorianJobs();
-  }, 4000);
-}
-
-async function loadFaceHistorianJobs() {
-  const body = document.getElementById("faceHistorianJobsBody");
-  try {
-    const response = await fetch("/api/face/historian-jobs");
-    const jobs = await response.json();
-    if (!response.ok) throw new Error(jobs.detail || `HTTP ${response.status}`);
-    body.replaceChildren();
-    if (!jobs.length) {
-      body.innerHTML = `<tr><td colspan="9" class="empty-state">No historian jobs yet.</td></tr>`;
-      return;
-    }
-    jobs.forEach((job) => {
-      const row = document.createElement("tr");
-      const percentage = job.total_count
-        ? Math.round(Number(job.processed_count) * 100 / Number(job.total_count))
-        : 100;
-      const actions = job.status === "running"
-        ? `<button type="button" data-historian-action="pause" data-job-id="${job.id}">Pause</button><button type="button" data-historian-action="cancel" data-job-id="${job.id}">Cancel</button>`
-        : (job.status === "paused"
-          ? `<button type="button" data-historian-action="resume" data-job-id="${job.id}">Resume</button><button type="button" data-historian-action="cancel" data-job-id="${job.id}">Cancel</button>`
-          : "—");
-      row.innerHTML = `<td>#${job.id}</td><td>${escapeHtml(job.status)}</td>
-        <td><progress max="100" value="${percentage}"></progress> ${job.processed_count}/${job.total_count}</td>
-        <td>${job.matched_count}</td><td>${job.needs_review_count}</td>
-        <td>${job.unknown_count}</td><td>${job.not_visible_count}</td>
-        <td>${job.failed_count}</td><td>${actions}</td>`;
-      body.appendChild(row);
-    });
-  } catch (error) {
-    body.innerHTML = `<tr><td colspan="9" class="face-match-error">${escapeHtml(error.message)}</td></tr>`;
   }
 }
 
@@ -2068,6 +2019,10 @@ function setupLightbox() {
   document.getElementById("lightboxClose").addEventListener("click", closeLightbox);
   document.getElementById("lightboxPrev").addEventListener("click", () => moveViolationLightbox(-1));
   document.getElementById("lightboxNext").addEventListener("click", () => moveViolationLightbox(1));
+  document.getElementById("lightboxDelete").addEventListener("click", async () => {
+    const item = state.violationGallery[state.violationGalleryIndex];
+    if (item?.id) { await deleteIncident(item.id); closeLightbox(); }
+  });
   document.getElementById("lightboxBackdrop").addEventListener("click", (e) => { if (e.target.id === "lightboxBackdrop") closeLightbox(); });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { closeLightbox(); closeCameraViewer(); }
@@ -2083,16 +2038,34 @@ function setupLightbox() {
 }
 function openLightbox(imageUrl, caption, index = 0, navigable = false) {
   state.violationGalleryIndex = index;
+  const item = state.violationGallery[index];
   const image = document.getElementById("lightboxImage");
   const error = document.getElementById("lightboxImageError");
   image.hidden = false;
   error.hidden = true;
   image.onerror = () => { image.hidden = true; error.hidden = false; };
   image.src = imageUrl;
+  document.getElementById("lightboxTitle").textContent = item?.title || "Evidence image";
   document.getElementById("lightboxCaption").textContent = caption || "";
   const hasNavigation = navigable && state.violationGallery.length > 1;
   document.getElementById("lightboxPrev").hidden = !hasNavigation;
   document.getElementById("lightboxNext").hidden = !hasNavigation;
+  document.getElementById("lightboxCounter").textContent =
+    `${String(index + 1).padStart(2, "0")} / ${String(Math.max(state.violationGallery.length, 1)).padStart(2, "0")}`;
+  document.getElementById("lightboxOpen").href = imageUrl;
+  document.getElementById("lightboxDownload").href = imageUrl;
+  document.getElementById("lightboxDelete").hidden = !item?.id;
+  const thumbs = document.getElementById("lightboxThumbs");
+  thumbs.replaceChildren();
+  state.violationGallery.forEach((galleryItem, thumbIndex) => {
+    const thumb = document.createElement("button");
+    thumb.type = "button";
+    thumb.className = `lightbox-thumb${thumbIndex === index ? " active" : ""}`;
+    thumb.title = galleryItem.title || `Incident ${thumbIndex + 1}`;
+    thumb.innerHTML = `<img src="${galleryItem.url}" alt="" loading="lazy" /><span>${String(thumbIndex + 1).padStart(2, "0")}</span>`;
+    thumb.addEventListener("click", () => openLightbox(galleryItem.url, galleryItem.caption, thumbIndex, true));
+    thumbs.appendChild(thumb);
+  });
   document.getElementById("lightboxBackdrop").classList.add("open");
 }
 function openViolationLightbox(imageUrl) {
@@ -2106,7 +2079,7 @@ function moveViolationLightbox(direction) {
   const length = state.violationGallery.length;
   const index = (state.violationGalleryIndex + direction + length) % length;
   const item = state.violationGallery[index];
-  openLightbox(item.url, item.caption, index);
+  openLightbox(item.url, item.caption, index, true);
 }
 function closeLightbox() {
   document.getElementById("lightboxBackdrop").classList.remove("open");
@@ -2650,31 +2623,150 @@ function exportCameraStatusReport() {
 function setupPowerAutomateTest() {
   document.getElementById("btnTestPowerAutomate")
     .addEventListener("click", sendPowerAutomateTest);
+  document.getElementById("btnRefreshAlertGallery")
+    .addEventListener("click", loadAlertViolationGallery);
+  document.getElementById("alertGalleryType")
+    .addEventListener("change", loadAlertViolationGallery);
+  document.getElementById("alertGalleryAge")
+    .addEventListener("change", loadAlertViolationGallery);
+  loadAlertViolationGallery();
+}
+
+async function loadAlertViolationGallery() {
+  const gallery = document.getElementById("alertViolationGallery");
+  try {
+    const type = document.getElementById("alertGalleryType").value;
+    const age = document.getElementById("alertGalleryAge").value;
+    const params = new URLSearchParams();
+    if (type) params.set("violation_type", type);
+    if (age !== "all") params.set("since_epoch", String(Date.now() / 1000 - Number(age) * 86400));
+    const response = await fetch(`/api/alerts/power-automate/violations?${params}`);
+    const rows = await response.json();
+    if (!response.ok) throw new Error(rows.detail || `HTTP ${response.status}`);
+    document.getElementById("alertGalleryCount").textContent = `${rows.length} evidence item${rows.length === 1 ? "" : "s"}`;
+    state.violationGallery = rows.filter((row) => row.snapshot_url).map((row) => ({
+      id: row.id,
+      url: row.snapshot_url,
+      title: `${formatViolationLabel(row.violation_type)} · ${row.camera_name || row.camera_id}`,
+      caption: `${row.camera_name || row.camera_id} · ${row.zone || ""} · ${new Date(row.detected_at).toLocaleString()}`,
+    }));
+    gallery.innerHTML = rows.length ? rows.map((row) => {
+      const label = formatViolationLabel(row.violation_type);
+      return `<article class="violation-card alert-select-card" data-alert-image="${row.id}">
+        <div class="thumb-wrap">
+          <img src="${row.snapshot_url}" alt="${escapeHtml(label)}" loading="lazy">
+          <span class="thumb-badge">${escapeHtml(label.toUpperCase())}</span>
+          <label class="alert-select-control" title="Select this image">
+            <input type="checkbox" name="alertViolation" value="${row.id}">
+            <span>SELECT</span>
+          </label>
+        </div>
+        <div class="card-meta">
+          <div class="card-cam">${escapeHtml(row.camera_name || row.camera_id)}</div>
+          <div class="card-time">${escapeHtml(row.zone || "Unassigned")} · ${escapeHtml(new Date(row.detected_at).toLocaleString())}</div>
+          <div class="review-status alert-ready-status">READY FOR DISPATCH</div>
+        </div>
+      </article>`;
+    }).join("") : '<div class="empty-state">No helmet or phone evidence images are available for this filter.</div>';
+    gallery.querySelectorAll(".alert-select-card").forEach((card) => {
+      const image = card.querySelector("img");
+      card.addEventListener("click", (event) => {
+        if (event.target.closest(".alert-select-control")) return;
+        openViolationLightbox(image.src);
+      });
+      card.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openViolationLightbox(image.src);
+        }
+      });
+      card.tabIndex = 0;
+    });
+    document.getElementById("btnTestPowerAutomate").disabled = !rows.length;
+    document.querySelectorAll('input[name="alertViolation"]').forEach((input) => {
+      input.addEventListener("change", updateAlertSelectionSummary);
+    });
+    updateAlertSelectionSummary();
+  } catch (error) {
+    gallery.innerHTML = `<div class="error-state">${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function setupAlertDeliveryDashboard() {
+  document.getElementById("btnRefreshAlertDelivery")
+    .addEventListener("click", loadAlertDeliveryStatus);
+  loadAlertDeliveryStatus();
+}
+
+async function loadAlertDeliveryStatus() {
+  const message = document.getElementById("alertDeliveryMessage");
+  try {
+    const response = await fetch("/api/alerts/power-automate/status");
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+    const health = document.getElementById("alertDeliveryHealth");
+    const flowState = result.configured ? "READY" : "NOT CONFIGURED";
+    const flowNote = result.configured
+      ? "Webhook URL is present"
+      : "Set PPE_POWER_AUTOMATE_WEBHOOK_URL and restart";
+    health.innerHTML = `
+      <div class="delivery-health-card ${result.configured ? "healthy" : "warning"}"><span>FLOW CONFIGURATION</span><strong>${flowState}</strong><small>${flowNote}</small></div>
+      <div class="delivery-health-card"><span>SENT LAST 24H</span><strong>${result.sent_count_24h}</strong><small>${result.failed_count_24h} failed attempt(s)</small></div>
+      <div class="delivery-health-card ${result.pending_count || result.dead_count ? "warning" : "healthy"}"><span>QUEUED / FAILED</span><strong>${result.pending_count} / ${result.dead_count}</strong><small>Outbox jobs requiring attention</small></div>`;
+    const rows = result.recent || [];
+    document.getElementById("alertDeliveryHistory").innerHTML = rows.length
+      ? rows.map((row) => `<tr><td>${escapeHtml(new Date(row.dispatched_at).toLocaleString())}</td><td>${escapeHtml(row.violation_type || "—")}</td><td>${escapeHtml(row.camera_name || "—")}</td><td><span class="delivery-result ${row.success ? "sent" : "failed"}">${row.success ? "SENT" : "FAILED"}</span></td></tr>`).join("")
+      : '<tr><td colspan="4" class="empty-state">No delivery activity.</td></tr>';
+    document.getElementById("alertDeliveryUpdated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+    message.textContent = "";
+  } catch (error) {
+    message.textContent = `Could not load delivery status: ${error.message}`;
+    message.className = "camera-status-message error";
+  }
 }
 
 async function sendPowerAutomateTest() {
   const button = document.getElementById("btnTestPowerAutomate");
-  const recipient = document.getElementById("powerAutomateTestRecipient");
   const status = document.getElementById("powerAutomateTestStatus");
-  if (!recipient.reportValidity()) return;
+  const selected = [...document.querySelectorAll('input[name="alertViolation"]:checked')];
+  if (!selected.length) {
+    status.textContent = "Select one or more evidence images first.";
+    status.className = "error";
+    return;
+  }
   button.disabled = true;
-  status.textContent = "Sending Power Automate test email…";
+  status.textContent = `Sending ${selected.length} selected helmet/phone image${selected.length === 1 ? "" : "s"}…`;
   status.className = "loading";
   try {
     const response = await fetch("/api/alerts/power-automate/test", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ recipient: recipient.value.trim() }),
+      body: JSON.stringify({
+        recipient: "nikita.gosavi@adityabirla.com",
+        violation_ids: selected.map((input) => Number(input.value)),
+      }),
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
-    status.textContent = `Test request accepted for ${body.recipient}. Check the mailbox and flow run history.`;
+    status.textContent = `${body.count} selected violation${body.count === 1 ? "" : "s"} sent. Check the mailbox and flow run history.`;
     status.className = "success";
   } catch (error) {
     status.textContent = `Power Automate test failed: ${error.message}`;
     status.className = "error";
   } finally {
     button.disabled = false;
+  }
+}
+
+function updateAlertSelectionSummary() {
+  const selectedCount = document.querySelectorAll('input[name="alertViolation"]:checked').length;
+  const button = document.getElementById("btnTestPowerAutomate");
+  if (button) button.textContent = selectedCount ? `SEND ${selectedCount} SELECTED` : "SEND SELECTED";
+  const count = document.getElementById("alertGalleryCount");
+  if (count) {
+    count.textContent = selectedCount
+      ? `${selectedCount} selected`
+      : `${document.querySelectorAll('input[name="alertViolation"]').length} evidence items`;
   }
 }
 

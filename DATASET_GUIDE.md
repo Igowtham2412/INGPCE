@@ -96,10 +96,11 @@ existing roster.
   `consent_reference`. Folder imports require the confirming administrator's
   name, date, and internal consent reference on the command line. Maintain
   the underlying consent documentation and employee notice.
-- A model license is separate from employee consent. The configured analyzer
-  uses InsightFace `buffalo_l` (SCRFD face detection and 512-D ArcFace
-  embeddings). Review the applicable InsightFace and model-pack terms and
-  obtain organizational authorization before provisioning any weights.
+- A model license is separate from employee consent. The default analyzer uses
+  OpenCV Zoo YuNet/SFace models and does not require the InsightFace native
+  build. InsightFace `buffalo_l` (SCRFD face detection and 512-D ArcFace
+  embeddings) remains an optional backend; review its terms and obtain
+  organizational authorization before provisioning those weights.
 
 ## When the dataset arrives
 
@@ -132,18 +133,34 @@ history or source control.
    authorization have been approved by the responsible owner, manually set
    `PPE_FACE_LICENSE_ACCEPTED=true` in the local `.env`. Do not commit `.env`.
 
-3. **Provision InsightFace buffalo_l.** After model-license review, set
+3. **Optional: provision InsightFace buffalo_l.** Only if
+   `PPE_FACE_MODEL_NAME=insightface_buffalo_l` is configured, after model-license review, set
    `PPE_FACE_LICENSE_ACCEPTED=true` in the local `.env`, then run:
 
    ```powershell
    .\.venv\Scripts\python.exe scripts\download_insightface_model.py
    ```
 
-   Install the optional InsightFace and ONNX Runtime packages from
-   `requirements.txt` first if they are not installed. The provisioning
+   Install `insightface==0.7.3` separately first if it is not installed. On
+   Windows this package needs Microsoft C++ Build Tools 14.0 or later.
+   The provisioning
    script checks the explicit acceptance flag and stores the buffalo_l model
    pack under `<PPE_FACE_MODEL_DIR>\models\buffalo_l` (default:
    `models\face\models\buffalo_l`).
+
+   The bundled DeepFace/ArcFace adapter is included in this application. Set
+   these local `.env` values after reviewing the model terms:
+
+   ```text
+   PPE_FACE_ENABLED=true
+   PPE_FACE_MODEL_NAME=deepface_arcface
+   PPE_FACE_MODULE_PATH=app\faces\external_face_service.py
+   PPE_FACE_LICENSE_ACCEPTED=true
+   ```
+
+   The dashboard and INGPCE enrollment/gallery remain the source of the
+   application interface and employee records; only face detection and
+   embedding inference are loaded from the bundled adapter.
 
 4. **Run a no-write model dry run.** This processes images, checks face
    quality, and writes a private CSV summary but does not update the database:

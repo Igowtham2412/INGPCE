@@ -1,4 +1,5 @@
 import unittest
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -19,6 +20,17 @@ class PowerAutomateApiTests(unittest.TestCase):
         with (
             patch.object(config, "POWER_AUTOMATE_WEBHOOK_URL", "https://flow.example.test/trigger"),
             patch(
+                "app.main.db.get_latest_power_automate_violation",
+                AsyncMock(return_value={
+                    "id": 42,
+                    "camera_name": "CAM01",
+                    "zone": "Loading Bay",
+                    "violation_type": "no_helmet",
+                    "snapshot_path": "C:\\evidence\\helmet.jpg",
+                    "detected_at": datetime.now(UTC),
+                }),
+            ),
+            patch(
                 "app.main._alert_manager._send_power_automate",
                 return_value=True,
             ) as send,
@@ -32,10 +44,15 @@ class PowerAutomateApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             response.json(),
-            {"sent": True, "recipient": "safety@example.test"},
+            {
+                "sent": True,
+                "recipient": "safety@example.test",
+                "violation_id": 42,
+                "violation_type": "no_helmet",
+            },
         )
         self.assertEqual(send.call_args.args[0], ["safety@example.test"])
-        self.assertEqual(send.call_args.args[-1], "test")
+        self.assertEqual(send.call_args.args[-1], "no_helmet")
         audit.assert_not_awaited()
 
     def test_test_alert_requires_configuration(self):
@@ -68,6 +85,17 @@ class PowerAutomateApiTests(unittest.TestCase):
                 config,
                 "POWER_AUTOMATE_WEBHOOK_URL",
                 "https://flow.example.test/trigger?sig=private",
+            ),
+            patch(
+                "app.main.db.get_latest_power_automate_violation",
+                AsyncMock(return_value={
+                    "id": 42,
+                    "camera_name": "CAM01",
+                    "zone": "Loading Bay",
+                    "violation_type": "no_helmet",
+                    "snapshot_path": "C:\\evidence\\helmet.jpg",
+                    "detected_at": datetime.now(UTC),
+                }),
             ),
             patch(
                 "app.main._alert_manager._send_power_automate",

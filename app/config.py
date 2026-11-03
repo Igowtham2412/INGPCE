@@ -206,6 +206,9 @@ MODEL_PATH: str = _env("PPE_MODEL_PATH", "models/best.pt")
 PHONE_MODEL_PATH: str = _env("PPE_PHONE_MODEL_PATH", "models/yolo26m.pt")
 DEVICE: str = _env("PPE_DEVICE", "auto")
 CPU_INFERENCE_THREADS: int = int(_env("PPE_CPU_THREADS", "4"))
+INFERENCE_CONCURRENCY: int = int(
+    _env("PPE_INFERENCE_CONCURRENCY", "2")
+)
 FACE_ENABLED: bool = _env_bool("PPE_FACE_ENABLED", False)
 FACE_VIOLATION_TYPES: frozenset[str] = _face_violation_types()
 FACE_QUALITY_MIN_BY_VIOLATION: dict[str, float] = (
@@ -213,7 +216,10 @@ FACE_QUALITY_MIN_BY_VIOLATION: dict[str, float] = (
 )
 FACE_DATASET_PATH: str = _env("PPE_FACE_DATASET_PATH", "dataset")
 FACE_MODEL_NAME: str = _env(
-    "PPE_FACE_MODEL_NAME", "insightface_buffalo_l",
+    "PPE_FACE_MODEL_NAME", "opencv_zoo_yunet_sface",
+)
+FACE_MODULE_PATH: str = _env(
+    "PPE_FACE_MODULE_PATH", r"app\faces\external_face_service.py",
 )
 FACE_MODEL_DIR: str = _env("PPE_FACE_MODEL_DIR", "models/face")
 FACE_PROVIDER: str = _env("PPE_FACE_PROVIDER", "auto").lower()
@@ -245,6 +251,9 @@ FACE_MIN_BRIGHTNESS: float = float(_env("PPE_FACE_MIN_BRIGHTNESS", "25"))
 FACE_MAX_BRIGHTNESS: float = float(_env("PPE_FACE_MAX_BRIGHTNESS", "235"))
 FACE_MAX_YAW: float = float(_env("PPE_FACE_MAX_YAW", "35"))
 FACE_MAX_PITCH: float = float(_env("PPE_FACE_MAX_PITCH", "30"))
+FACE_MAX_ROLL: float = float(_env("PPE_FACE_MAX_ROLL", "25"))
+FACE_IMAGE_ENHANCEMENT: bool = _env_bool("PPE_FACE_IMAGE_ENHANCEMENT", True)
+FACE_UPSCALE: float = float(_env("PPE_FACE_UPSCALE", "1.5"))
 FACE_OUTLIER_THRESHOLD: float = float(_env("PPE_FACE_OUTLIER_THRESHOLD", "0.35"))
 FACE_CROSS_ID_DUPLICATE_THRESHOLD: float = float(
     _env("PPE_FACE_CROSS_ID_DUPLICATE_THRESHOLD", "0.85")
@@ -280,7 +289,8 @@ if (FACE_MIN_SIZE < 1 or FACE_MIN_SHARPNESS < 0
         or not 0 <= FACE_DETECTOR_CROP_PADDING <= 1
         or not 0 <= FACE_MIN_BRIGHTNESS < FACE_MAX_BRIGHTNESS <= 255
         or FACE_PROVIDER not in {"auto", "cpu", "cuda"}
-        or FACE_MAX_YAW <= 0 or FACE_MAX_PITCH <= 0
+        or FACE_MAX_YAW <= 0 or FACE_MAX_PITCH <= 0 or FACE_MAX_ROLL <= 0
+        or not 1 <= FACE_UPSCALE <= 3
         or not -1 <= FACE_OUTLIER_THRESHOLD <= 1
         or not -1 <= FACE_CROSS_ID_DUPLICATE_THRESHOLD <= 1
         or not isfinite(FACE_MATCH_THRESHOLD)
@@ -321,7 +331,7 @@ if any(not 0 <= value <= 1 for value in CLASS_CONFIDENCE_THRESHOLDS.values()):
     raise ValueError("PPE_CLASS_CONFIDENCE values must be between 0 and 1")
 if not 0 <= PHONE_CONFIDENCE_THRESHOLD <= 1:
     raise ValueError("PPE_PHONE_CONFIDENCE must be between 0 and 1")
-if CPU_INFERENCE_THREADS < 1:
+if CPU_INFERENCE_THREADS < 1 or INFERENCE_CONCURRENCY < 1:
     raise ValueError("PPE_CPU_THREADS must be at least 1")
 CLASS_BOX_FILTERS: dict[str, dict[str, float]] = {}
 for _name, _filter in _json_env("PPE_CLASS_BOX_FILTERS").items():
@@ -439,6 +449,16 @@ ALERT_OUTBOX_POLL_SECONDS: float = float(_env("PPE_ALERT_OUTBOX_POLL_SECONDS", "
 ALERT_OUTBOX_MAX_ATTEMPTS: int = int(_env("PPE_ALERT_OUTBOX_MAX_ATTEMPTS", "5"))
 if ALERT_OUTBOX_POLL_SECONDS <= 0 or ALERT_OUTBOX_MAX_ATTEMPTS < 1:
     raise ValueError("Alert outbox polling must be positive and max attempts must be at least 1")
+SHIFT_REPORT_POLL_SECONDS: float = float(_env("PPE_SHIFT_REPORT_POLL_SECONDS", "30"))
+SHIFT_REPORT_CATCHUP_HOURS: int = int(_env("PPE_SHIFT_REPORT_CATCHUP_HOURS", "72"))
+SHIFT_REPORT_TIMEZONE: str = _env("PPE_SHIFT_REPORT_TIMEZONE", "")
+if SHIFT_REPORT_POLL_SECONDS <= 0 or SHIFT_REPORT_CATCHUP_HOURS < 1:
+    raise ValueError("Shift report polling must be positive and catch-up hours must be at least 1")
+SHIFT_REPORTS = (
+    ("A", 6, 14),
+    ("B", 14, 22),
+    ("C", 22, 6),
+)
 
 # ---------------------------------------------------------------------------
 # 6. POSTGRESQL

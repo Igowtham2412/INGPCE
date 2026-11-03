@@ -128,6 +128,12 @@ The application does not send incident email itself. It sends the flow
 recipient list, subject, text body, and annotated JPEG for missing-helmet and
 phone-detected incidents. It does not upload video clips to the flow.
 
+Incident alerts are sent immediately and are also collected into automatic
+Power Automate shift digests. Digests use Shift A 06:00–14:00, Shift B
+14:00–22:00, and Shift C 22:00–06:00 in the configured server timezone.
+Each digest contains only the missing-helmet and phone evidence images. The
+flow must handle `event_type` `ppe_shift_digest` and its `images` array.
+
 ### Main components
 
 | Path | Responsibility |
@@ -302,17 +308,18 @@ also use the existing CSRF protection.
 - Ad-hoc search: `POST /api/face/search` accepts a multipart `image` and
   returns top candidates without creating a violation or match record.
 
-Face recognition is disabled by default. A shared analyzer first uses the
-local Ultralytics YOLO face detector to find face boxes, crops each candidate,
-and then uses InsightFace `buffalo_l` for landmark alignment and
-512-dimensional ArcFace embeddings with ONNX Runtime. Live violations,
+Face recognition is disabled by default. The configured
+InsightFace `buffalo_l` backend uses its local SCRFD detector, landmark
+alignment, and 512-dimensional ArcFace embeddings with ONNX Runtime. The
+legacy OpenCV YuNet/SFace backend uses the local Ultralytics YOLO face
+detector. Live violations,
 historian backfills, manual image searches, and employee-photo enrollment all
 use this analyzer. Review the detector, InsightFace, and model-pack terms and
 confirm organizational authorization before enabling model provisioning.
 Images and embeddings are processed locally; do not send real employee images
 to external services.
 
-Place the authorized `yolov8n-face.pt` weights at
+When using the legacy OpenCV backend, place the authorized `yolov8n-face.pt` weights at
 `PPE_FACE_DETECTOR_MODEL_PATH` (default
 `models\face\yolov8n-face.pt`). The detector uses `imgsz=1280` and `conf=0.15`
 by default; configure `PPE_FACE_DETECTOR_IMAGE_SIZE`,
@@ -714,7 +721,23 @@ by the flow's Outlook connector, not in the app.
        "recipients": {"type": "array", "items": {"type": "string"}},
        "image_name": {"type": "string"},
        "image_content_type": {"type": "string"},
-       "image_content_bytes": {"type": "string"}
+       "image_content_bytes": {"type": "string"},
+       "image_count": {"type": "integer"},
+       "images": {
+         "type": "array",
+         "items": {
+           "type": "object",
+           "properties": {
+             "image_name": {"type": "string"},
+             "image_content_type": {"type": "string"},
+             "image_content_bytes": {"type": "string"},
+             "camera_name": {"type": "string"},
+             "zone": {"type": "string"},
+             "violation": {"type": "string"},
+             "occurred_at": {"type": "string"}
+           }
+         }
+       }
      },
      "required": [
        "event_type", "subject", "body", "camera_name", "zone",
@@ -728,6 +751,10 @@ by the flow's Outlook connector, not in the app.
    Both include the annotated JPEG as base64 in `image_content_bytes`;
    `image_name` distinguishes the image type. Dashboard test messages use
    `event_type: "test"` and do not include an image.
+   Shift digests use `event_type: "ppe_shift_digest"` and provide all
+   missing-helmet and phone images in the `images` array.
+   The dashboard's manual Power Automate action sends only the latest available
+   helmet or phone evidence image as a single `ppe_violation` event.
 5. Add **Office 365 Outlook → Send an email (V2)** and create its connection
    using the approved sender mailbox:
    - **To**: expression `join(triggerBody()?['recipients'], ';')`
@@ -735,6 +762,9 @@ by the flow's Outlook connector, not in the app.
    - **Body**: `body` from the trigger
    - **Attachments**: add one attachment with **Name** set to
      `image_name` and **ContentBytes** set to `image_content_bytes`.
+     In the `ppe_shift_digest` branch, add an **Apply to each** over
+     `images` and add each item's `image_name` and `image_content_bytes` as
+     an attachment to the single digest email.
      Put this incident email action in the `event_type` equals
      `ppe_violation` branch of a Condition. In the other branch, add a
      separate **Send an email (V2)** action for the test message without an
@@ -1030,8 +1060,8 @@ location. Do not record secrets or the signed URL here.
 ## 12. Scope notes
 
 - This build routes incident email only through Power Automate.
-- Shift summary emails and other notification providers are not active
-  features.
+- Power Automate sends immediate helmet/phone incident emails and one
+  image-only helmet/phone digest at the end of each completed shift.
 - The flow endpoint uses a secret signed URL and does not use app-managed
   Microsoft Entra OAuth.
 - Power Automate owns actual mailbox delivery. App success is based on the
@@ -1056,4 +1086,3 @@ Docker setup, and the full configuration reference live in
 [demo/README.md](demo/README.md). Tests:
 `python -m unittest tests.unit.test_track_identity tests.unit.test_debounce
 tests.unit.test_association tests.integration.test_demo_simulation`
-
