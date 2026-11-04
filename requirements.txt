@@ -19,6 +19,7 @@ bcrypt>=4.0.1
 alembic>=1.13
 SQLAlchemy>=2.0
 coverage>=7.6,<8
+pytest>=8.0,<10
 pip-audit>=2.7,<3
 ruff>=0.4,<1
 playwright>=1.48,<2
