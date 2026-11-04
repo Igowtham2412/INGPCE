@@ -37,8 +37,7 @@
           <button class="mode-btn" data-tab="violations">INCIDENTS</button>
           <button class="mode-btn" data-tab="face-matches" id="faceMatchesTab" hidden>FACE MATCHES</button>
           <button class="mode-btn" data-tab="analytics">ANALYTICS</button>
-          <button class="mode-btn" data-tab="cameras">CAMERAS</button>
-          <button class="mode-btn" data-tab="camera-status">CAMERA STATUS</button>
+          <button class="mode-btn" data-tab="cameras">CAMERAS & HEALTH</button>
           <button class="mode-btn" data-tab="alert-delivery" id="alertDeliveryTab" hidden>ALERT DELIVERY</button>
           <button class="mode-btn" data-tab="rules">ALERT RULES</button>
         </div>
@@ -368,21 +367,26 @@
       </div>
 
       <div id="tab-cameras" class="tab-pane">
-        <div class="tab-intro"><div><span class="tab-eyebrow">INFRASTRUCTURE / VIDEO SOURCES</span><h2>Camera registry</h2><p>Manage registered feeds, sectors, and detection requirements.</p></div><span class="tab-live-indicator">● STREAM CONTROL</span></div>
+        <div class="tab-intro"><div><span class="tab-eyebrow">INFRASTRUCTURE / VIDEO SOURCES</span><h2>Camera command center</h2><p>Manage registered feeds, detection policy, and live connectivity from one workspace.</p></div><span class="tab-live-indicator">● STREAM CONTROL</span></div>
+        <div class="camera-command-summary" aria-label="Camera fleet summary">
+          <article><span class="camera-summary-kicker">ENABLED SOURCES</span><strong id="cameraFleetEnabled">—</strong><small>Registered camera feeds</small></article>
+          <article class="healthy"><span class="camera-summary-kicker">ONLINE NOW</span><strong id="cameraFleetOnline">—</strong><small>Ready for monitoring</small></article>
+          <article class="attention"><span class="camera-summary-kicker">ATTENTION</span><strong id="cameraFleetAttention">—</strong><small>Offline or stopped</small></article>
+          <article><span class="camera-summary-kicker">ACTIVE RULES</span><strong id="cameraFleetRules">—</strong><small>Alert policies in force</small></article>
+        </div>
         <div class="cam-toolbar">
+          <div class="camera-toolbar-copy"><span class="tab-eyebrow">SOURCE REGISTRY</span><strong>Operational camera inventory</strong></div>
           <button class="ops-btn" id="btnNewCamera">+ ADD CAMERA</button>
           <button class="ops-btn-sec" id="btnManageGroups">MANAGE SECTORS</button>
           <button class="ops-btn-sync" id="btnSyncSeed" title="Sync default cameras">⟲ SYNC DEFAULTS</button>
           <span class="sync-msg" id="syncStatus"></span>
         </div>
-        <table class="ops-table">
+        <div class="camera-table-shell"><table class="ops-table">
           <thead><tr><th>ID</th><th>DESIGNATION</th><th>SECTOR</th><th>REQUIRED PPE</th><th>LINK</th><th>STATE</th><th>ACTIONS</th></tr></thead>
           <tbody id="camerasTableBody"></tbody>
-        </table>
-      </div>
-
-      <div id="tab-camera-status" class="tab-pane">
-        <div class="tab-intro"><div><span class="tab-eyebrow">INFRASTRUCTURE / RELIABILITY</span><h2>Camera health</h2><p>Track stream availability and connectivity history across the site.</p></div><span class="tab-live-indicator">● MONITORING</span></div>
+        </table></div>
+        <section class="camera-health-workspace" aria-labelledby="cameraHealthHeading">
+          <div class="camera-health-heading"><div><span class="tab-eyebrow">RELIABILITY / TELEMETRY</span><h3 id="cameraHealthHeading">Connectivity intelligence</h3><p>Review live health and historical availability without leaving the camera workspace.</p></div><span class="health-status-note">● AUTO-REFRESH 8S</span></div>
         <div class="status-report-toolbar">
           <label>DATE RANGE
             <select id="cameraStatusRange">
@@ -414,7 +418,7 @@
             <div class="status-legend"><span><i class="online"></i>Online</span><span><i class="partial"></i>Partial</span><span><i class="offline"></i>Offline</span><span><i class="unknown"></i>No history</span></div>
           </div>
           <div class="status-timeline-scroll" id="cameraStatusTimeline">
-            <div class="empty-state">Select the Camera Status tab to load connectivity history.</div>
+            <div class="empty-state">Loading connectivity history…</div>
           </div>
           <p class="status-history-note">Connectivity history begins when status tracking is enabled. No-history periods are shown as unknown, not counted as downtime.</p>
         </section>
@@ -426,6 +430,7 @@
               <tbody id="cameraStatusLogBody"><tr><td colspan="4" class="empty-state">No status changes in this date range.</td></tr></tbody>
             </table>
           </div>
+        </section>
         </section>
       </div>
 
@@ -606,7 +611,7 @@
       <input type="hidden" id="ruleId" />
       <label>RULE NAME<input type="text" id="ruleName" required placeholder="Substation Helmet Escalation" /></label>
       <div class="form-row">
-        <label>CAMERA (blank=any)<input type="text" id="ruleCameraId" placeholder="CAM01" /></label>
+      <label>CAMERA SOURCE<select id="ruleCameraId"><option value="">All available cameras</option></select></label>
         <label>SECTOR (blank=any)<input type="text" id="ruleZone" placeholder="Substation" /></label>
       </div>
       <div class="form-row">

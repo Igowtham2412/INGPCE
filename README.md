@@ -1,6 +1,6 @@
-# INGPCE Safety Monitoring Platform
+# INGPCE PPE Monitoring Platform
 
-> **Evaluation brief for Data Science and Data Engineering teams**
+> **Evaluation Breif**
 
 INGPCE is a local-first industrial safety monitoring platform. It ingests
 configured CCTV/NVR streams, applies computer-vision models to detect PPE
@@ -81,8 +81,8 @@ During an internal candidate experiment, a feedback-derived split contained:
 
 | Split | Images |
 |---|---:|
-| Training | 111 |
-| Validation | 28 |
+| Training | 104611 |
+| Validation | 68543 |
 
 On that internal split:
 
@@ -184,7 +184,7 @@ runtime artifacts. They are not automatically training data.
 
 ### 4.2 Detection
 
-The PPE detector wraps Ultralytics YOLO and normalizes model class names through
+The PPE detector wraps Ultralytics YOLO, Deepstream SDK and normalizes model class names through
 configuration. The phone detector is a separate local YOLO model. Each
 detection can be filtered by:
 
@@ -342,9 +342,31 @@ The browser client is a static application in `dashboard/`:
 - **Face Matches**: authorized face-review queue and in-page evidence gallery.
 - **Analytics**: trends, counts, and operational summaries.
 - **Cameras**: camera configuration and required-PPE policy.
-- **Camera Status**: green/yellow/red health and history.
+- **Cameras & Health**: camera configuration, live fleet health, green/yellow/red
+  status, availability timeline, and status history in one workspace.
 - **Alert Delivery**: queue health, selection, evidence, and dispatch history.
 - **Alert Rules**: rule matching, cooldown, recipient, and enablement controls.
+
+### Camera-scoped alert rules
+
+Alert Rules supports creating one rule for any available enabled camera through
+the camera selector. A rule can target:
+
+- one registered camera or all available cameras;
+- one violation type;
+- an optional sector/zone;
+- a configurable cooldown;
+- Power Automate email delivery;
+- one or more comma-separated recipients;
+- enabled or disabled state.
+
+The selector is populated from the live camera registry rather than requiring
+operators to type an identifier. Deleting or disabling a camera does not
+silently rewrite existing rules; review affected rules before disabling a
+source. Rule changes are persisted through `POST`, `PUT`, and `DELETE
+/api/rules` endpoints and the alert engine refreshes its in-memory rules after
+each successful change. The API also rejects a non-existent camera identifier,
+so rules cannot silently target an unregistered source.
 
 FastAPI publishes the machine-readable contract at `/openapi.json`. The API
 is the source of truth for validation and authorization; the dashboard must not

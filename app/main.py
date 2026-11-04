@@ -2653,6 +2653,8 @@ async def get_rules():
 
 @app.post("/api/rules")
 async def add_rule(rule: RuleIn):
+    if rule.camera_id and not await db.get_camera(rule.camera_id):
+        raise HTTPException(status_code=400, detail="Selected camera does not exist")
     created = await db.create_rule(
         rule.name, rule.camera_id, rule.zone, rule.violation_type, rule.min_severity,
         rule.channels, rule.cooldown_seconds, rule.email_recipients, rule.enabled,
@@ -2663,6 +2665,8 @@ async def add_rule(rule: RuleIn):
 
 @app.put("/api/rules/{rule_id}")
 async def edit_rule(rule_id: int, rule: RuleUpdate):
+    if rule.camera_id and not await db.get_camera(rule.camera_id):
+        raise HTTPException(status_code=400, detail="Selected camera does not exist")
     fields = {k: v for k, v in rule.model_dump().items() if v is not None}
     updated = await db.update_rule(rule_id, **fields)
     if not updated:

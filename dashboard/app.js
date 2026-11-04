@@ -57,7 +57,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setInterval(refreshStats, 15000);
   setInterval(refreshCameraStatuses, 8000);
   setInterval(() => {
-    if (document.getElementById("tab-camera-status").classList.contains("active")) {
+    if (document.getElementById("tab-cameras").classList.contains("active")) {
       loadCameraStatusReport();
     }
   }, 60000);
@@ -312,6 +312,41 @@ async function loadCameras() {
   document.getElementById("statCamerasOnline").textContent =
     `${activeCameras.filter((camera) => camera.connected).length}/${activeCameras.length}`;
   populateCameraStatusCameraFilter();
+  populateRuleCameraSelect();
+  updateCameraFleetSummary();
+}
+
+function populateRuleCameraSelect() {
+  const select = document.getElementById("ruleCameraId");
+  if (!select) return;
+  const currentValue = select.value;
+  select.innerHTML = '<option value="">All available cameras</option>';
+  state.cameras
+    .slice()
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+    .forEach((camera) => {
+      const option = document.createElement("option");
+      option.value = camera.camera_id;
+      option.textContent = `${camera.name} · ${camera.camera_id}${camera.enabled ? "" : " · disabled"}`;
+      option.disabled = !camera.enabled;
+      select.appendChild(option);
+    });
+  select.value = state.cameras.some((camera) => camera.camera_id === currentValue)
+    ? currentValue : "";
+}
+
+function updateCameraFleetSummary() {
+  const enabled = state.cameras.filter((camera) => camera.enabled);
+  const online = enabled.filter((camera) => camera.connected && camera.worker_running);
+  const attention = enabled.filter((camera) => !camera.connected || !camera.worker_running);
+  const set = (id, value) => {
+    const element = document.getElementById(id);
+    if (element) element.textContent = value;
+  };
+  set("cameraFleetEnabled", enabled.length);
+  set("cameraFleetOnline", online.length);
+  set("cameraFleetAttention", attention.length);
+  set("cameraFleetRules", state.rules.filter((rule) => rule.enabled).length);
 }
 
 function populateWallCameraFilter() {
@@ -827,6 +862,8 @@ async function refreshCameraStatuses() {
       `${cams.filter(c => c.enabled && c.connected).length}/${cams.filter(c => c.enabled).length}`;
     renderCamerasTable();
     applyLiveWallFilters();
+    populateRuleCameraSelect();
+    updateCameraFleetSummary();
   } catch (e) { /* transient network blip - next poll will retry */ }
 }
 
@@ -2883,8 +2920,10 @@ function setupTabs() {
       if (btn.dataset.tab === "analytics") refreshStats();
       if (btn.dataset.tab === "rules") refreshRules();
       if (btn.dataset.tab === "violations") loadViolationsGallery();
-      if (btn.dataset.tab === "cameras") renderCamerasTable();
-      if (btn.dataset.tab === "camera-status") loadCameraStatusReport();
+      if (btn.dataset.tab === "cameras") {
+        renderCamerasTable();
+        loadCameraStatusReport();
+      }
       if (btn.dataset.tab === "face-matches") loadFaceMatches();
       if (btn.dataset.tab === "playback") populatePlaybackCameraSelect();
     });
@@ -2902,6 +2941,7 @@ async function refreshRules() {
   } catch (e) { state.rules = []; }
 
   document.getElementById("statActiveRules").textContent = state.rules.filter(r => r.enabled).length;
+  updateCameraFleetSummary();
   const tbody = document.getElementById("rulesTableBody"); tbody.innerHTML = "";
   state.rules.forEach((rule) => {
     const tr = document.createElement("tr");
@@ -2919,7 +2959,14 @@ function setupRuleModal() {
   document.getElementById("btnCancelRule").addEventListener("click", () => backdrop.classList.remove("open"));
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) backdrop.classList.remove("open"); });
   document.getElementById("ruleForm").addEventListener("submit", async (e) => {
-    e.preventDefault(); await saveRule(); backdrop.classList.remove("open"); refreshRules();
+    e.preventDefault();
+    try {
+      await saveRule();
+      backdrop.classList.remove("open");
+      await refreshRules();
+    } catch (error) {
+      window.alert(`Could not save alert rule: ${error.message}`);
+    }
   });
 }
 
@@ -2931,7 +2978,7 @@ function openRuleModal(ruleId) {
   document.getElementById("ruleName").value = rule ? rule.name : "";
   document.getElementById("ruleCameraId").value = rule ? (rule.camera_id || "") : "";
   document.getElementById("ruleZone").value = rule ? (rule.zone || "") : "";
-  document.getElementById("ruleViolationType").value = "no_helmet";
+  document.getElementById("ruleViolationType").value = rule?.violation_type || "no_helmet";
   document.getElementById("ruleCooldown").value = rule ? rule.cooldown_seconds : 300;
   document.getElementById("chanPowerAutomate").checked =
     rule ? rule.channels.includes("power_automate") : true;
@@ -2957,7 +3004,11 @@ async function saveRule() {
   };
   const url = id ? `${API.rules}/${id}` : API.rules;
   const method = id ? "PUT" : "POST";
-  await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const response = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.detail || `HTTP ${response.status}`);
+  }
 }
 
 async function deleteRule(id) {
