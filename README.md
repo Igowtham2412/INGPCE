@@ -372,6 +372,9 @@ filters in the database before selecting up to 500 records, so older matching
 incidents are not hidden by a fixed latest-24 query. Gallery text search and
 sorting operate on the fetched result set. Evidence selection is delegated at
 the gallery level so it continues to work after search or sort re-renders;
+each card has a visible native checkbox, selected cards remain highlighted,
+and the send button is enabled only when the selection contains at least one
+incident. **Select Visible** adds all cards in the current rendered results;
 selection remains visible in the dispatch count across filters, and **Clear**
 removes the entire selection.
 

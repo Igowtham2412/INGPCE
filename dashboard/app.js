@@ -2743,6 +2743,7 @@ function setupPowerAutomateTest() {
       document.querySelectorAll('input[name="alertViolation"]').forEach((input) => {
         input.checked = true;
         state.alertSelectedIds.add(Number(input.value));
+        input.closest(".alert-select-card")?.setAttribute("aria-pressed", "true");
       });
       updateAlertSelectionSummary();
     });
@@ -2805,6 +2806,7 @@ async function loadAlertViolationGallery() {
         if (image) openViolationLightbox(image.src);
         return;
       }
+      if (event.target.closest("input, label, button, a")) return;
       const input = card.querySelector('input[name="alertViolation"]');
       if (input) {
         input.checked = !input.checked;
@@ -2813,7 +2815,8 @@ async function loadAlertViolationGallery() {
     };
     gallery.onkeydown = (event) => {
       const card = event.target.closest(".alert-select-card");
-      if (card && (event.key === "Enter" || event.key === " ")) {
+      if (card && !event.target.closest("input, button, a")
+          && (event.key === "Enter" || event.key === " ")) {
         event.preventDefault();
         const input = card.querySelector('input[name="alertViolation"]');
         if (input) {
@@ -2845,11 +2848,11 @@ function renderAlertViolationGallery() {
     `${rows.length} evidence item${rows.length === 1 ? "" : "s"} · ${state.alertSelectedIds.size} selected`;
   gallery.innerHTML = rows.length ? rows.map((row) => {
       const label = formatViolationLabel(row.violation_type);
-      return `<article class="violation-card alert-select-card" data-alert-image="${row.id}" role="button" aria-pressed="${state.alertSelectedIds.has(Number(row.id))}" aria-label="Select evidence image ${row.id}">
+      return `<article class="violation-card alert-select-card" data-alert-image="${row.id}" role="group" aria-pressed="${state.alertSelectedIds.has(Number(row.id))}" aria-label="Evidence image ${row.id}">
         <div class="thumb-wrap">
           <img src="${row.snapshot_url}" alt="${escapeHtml(label)}" loading="lazy">
           <span class="thumb-badge">${escapeHtml(label.toUpperCase())}</span>
-          <label class="alert-select-control" title="Select this image" aria-hidden="true">
+          <label class="alert-select-control" title="Select this image">
             <input type="checkbox" name="alertViolation" value="${row.id}" ${state.alertSelectedIds.has(Number(row.id)) ? "checked" : ""}>
             <span>SELECT</span>
           </label>
@@ -2860,8 +2863,7 @@ function renderAlertViolationGallery() {
         </div>
       </article>`;
     }).join("") : '<div class="empty-state">No evidence matches the current filters.</div>';
-  gallery.querySelectorAll(".alert-select-card").forEach((card) => { card.tabIndex = 0; });
-  document.getElementById("btnTestPowerAutomate").disabled = !document.querySelectorAll('input[name="alertViolation"]').length;
+  updateAlertSelectionSummary();
 }
 
 function setupAlertDeliveryDashboard() {
@@ -2934,7 +2936,10 @@ function updateAlertSelectionSummary() {
   const selectedCount = state.alertSelectedIds.size;
   const totalCount = document.querySelectorAll('input[name="alertViolation"]').length;
   const button = document.getElementById("btnTestPowerAutomate");
-  if (button) button.textContent = selectedCount ? `SEND ${selectedCount} SELECTED` : "SEND SELECTED";
+  if (button) {
+    button.textContent = selectedCount ? `SEND ${selectedCount} SELECTED` : "SEND SELECTED";
+    button.disabled = selectedCount === 0;
+  }
   const count = document.getElementById("alertGalleryCount");
   if (count) {
     count.textContent = `${totalCount} evidence item${totalCount === 1 ? "" : "s"} · ${selectedCount} selected`;
