@@ -367,6 +367,14 @@ source. Rule changes are persisted through `POST`, `PUT`, and `DELETE
 each successful change. The API also rejects a non-existent camera identifier,
 so rules cannot silently target an unregistered source.
 
+The Alert Delivery evidence gallery applies violation-type and date-window
+filters in the database before selecting up to 500 records, so older matching
+incidents are not hidden by a fixed latest-24 query. Gallery text search and
+sorting operate on the fetched result set. Evidence selection is delegated at
+the gallery level so it continues to work after search or sort re-renders;
+selection remains visible in the dispatch count across filters, and **Clear**
+removes the entire selection.
+
 ### Face Match workbench
 
 The Face Matches tab is a secured review workspace, not an automatic identity

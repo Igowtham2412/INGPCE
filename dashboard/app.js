@@ -2748,9 +2748,10 @@ function setupPowerAutomateTest() {
     });
   document.getElementById("btnClearAlertEvidence")
     .addEventListener("click", () => {
+      state.alertSelectedIds.clear();
       document.querySelectorAll('input[name="alertViolation"]').forEach((input) => {
         input.checked = false;
-        state.alertSelectedIds.delete(Number(input.value));
+        input.closest(".alert-select-card")?.setAttribute("aria-pressed", "false");
       });
       updateAlertSelectionSummary();
     });
@@ -2762,6 +2763,15 @@ function setupPowerAutomateTest() {
     .addEventListener("input", renderAlertViolationGallery);
   document.getElementById("alertGallerySort")
     .addEventListener("change", renderAlertViolationGallery);
+  const gallery = document.getElementById("alertViolationGallery");
+  gallery.addEventListener("change", (event) => {
+    const input = event.target.closest('input[name="alertViolation"]');
+    if (!input) return;
+    if (input.checked) state.alertSelectedIds.add(Number(input.value));
+    else state.alertSelectedIds.delete(Number(input.value));
+    input.closest(".alert-select-card")?.setAttribute("aria-pressed", String(input.checked));
+    updateAlertSelectionSummary();
+  });
   loadAlertViolationGallery();
 }
 
@@ -2772,6 +2782,7 @@ async function loadAlertViolationGallery() {
     const type = document.getElementById("alertGalleryType").value;
     const age = document.getElementById("alertGalleryAge").value;
     const params = new URLSearchParams();
+    params.set("limit", "500");
     if (type) params.set("violation_type", type);
     if (age !== "all") params.set("since_epoch", String(Date.now() / 1000 - Number(age) * 86400));
     const response = await fetch(`/api/alerts/power-automate/violations?${params}`);
@@ -2812,16 +2823,6 @@ async function loadAlertViolationGallery() {
         }
       }
     };
-    /* Keep selection handling explicit so the dispatch summary always updates. */
-    document.querySelectorAll('input[name="alertViolation"]').forEach((input) => {
-      input.addEventListener("change", () => {
-        if (input.checked) state.alertSelectedIds.add(Number(input.value));
-        else state.alertSelectedIds.delete(Number(input.value));
-        const card = input.closest(".alert-select-card");
-        if (card) card.setAttribute("aria-pressed", String(input.checked));
-        updateAlertSelectionSummary();
-      });
-    });
     updateAlertSelectionSummary();
   } catch (error) {
     gallery.innerHTML = `<div class="error-state">${escapeHtml(error.message)}</div>`;
@@ -2841,7 +2842,7 @@ function renderAlertViolationGallery() {
       return sort === "oldest" ? delta : -delta;
     });
   document.getElementById("alertGalleryCount").textContent =
-    `${rows.length} evidence item${rows.length === 1 ? "" : "s"} · ${document.querySelectorAll('input[name="alertViolation"]:checked').length} selected`;
+    `${rows.length} evidence item${rows.length === 1 ? "" : "s"} · ${state.alertSelectedIds.size} selected`;
   gallery.innerHTML = rows.length ? rows.map((row) => {
       const label = formatViolationLabel(row.violation_type);
       return `<article class="violation-card alert-select-card" data-alert-image="${row.id}" role="button" aria-pressed="${state.alertSelectedIds.has(Number(row.id))}" aria-label="Select evidence image ${row.id}">

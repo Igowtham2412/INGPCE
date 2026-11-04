@@ -2296,17 +2296,32 @@ async def get_latest_power_automate_violation() -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
-async def get_power_automate_violations(limit: int = 24) -> list[dict[str, Any]]:
+async def get_power_automate_violations(
+    limit: int = 500,
+    violation_type: str | None = None,
+    since_epoch: float | None = None,
+) -> list[dict[str, Any]]:
+    conditions = [
+        "violation_type IN ('no_helmet', 'phone_detected')",
+        "snapshot_path IS NOT NULL",
+    ]
+    params: list[Any] = []
+    if violation_type:
+        params.append(violation_type)
+        conditions.append(f"violation_type = ${len(params)}")
+    if since_epoch is not None:
+        params.append(since_epoch)
+        conditions.append(f"epoch_time >= ${len(params)}")
+    params.append(limit)
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
-            """SELECT id, camera_id, camera_name, zone, violation_type,
+            f"""SELECT id, camera_id, camera_name, zone, violation_type,
                       snapshot_path, detected_at
                FROM violations
-               WHERE violation_type IN ('no_helmet', 'phone_detected')
-                 AND snapshot_path IS NOT NULL
+               WHERE {' AND '.join(conditions)}
                ORDER BY epoch_time DESC, id DESC
-               LIMIT $1""",
-            limit,
+               LIMIT ${len(params)}""",
+            *params,
         )
         return [dict(row) for row in rows]
 

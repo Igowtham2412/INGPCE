@@ -1029,16 +1029,17 @@ async def send_power_automate_test(payload: PowerAutomateTestIn, request: Reques
 
 @app.get("/api/alerts/power-automate/violations")
 async def get_power_automate_violations(
-        violation_type: str | None = None,
-        since_epoch: float | None = None):
+        violation_type: str | None = Query(default=None),
+        since_epoch: float | None = Query(default=None, ge=0),
+        limit: int = Query(default=500, ge=1, le=500)):
     if violation_type not in {None, "no_helmet", "phone_detected"}:
         raise HTTPException(status_code=400, detail="Only helmet and phone violations are eligible")
     try:
-        rows = await db.get_power_automate_violations()
-        if violation_type:
-            rows = [row for row in rows if row["violation_type"] == violation_type]
-        if since_epoch is not None:
-            rows = [row for row in rows if row["detected_at"].timestamp() >= since_epoch]
+        rows = await db.get_power_automate_violations(
+            limit=limit,
+            violation_type=violation_type,
+            since_epoch=since_epoch,
+        )
     except Exception as exc:
         logger.exception("Could not load Power Automate violation gallery")
         raise HTTPException(

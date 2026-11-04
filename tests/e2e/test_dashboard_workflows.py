@@ -60,7 +60,8 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
         cls.server_thread.join(timeout=5)
 
     async def test_camera_stats_and_power_automate_alert_workflows(self):
-        self.power_automate_recipient = None
+        self.power_automate_ids = []
+        gallery_requests = []
         status_requests = []
         return_invalid_status_shape = False
         page_errors = []
@@ -147,9 +148,37 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                         "bucket_count": 2, "cameras": cameras,
                         "logs": [],
                     }
+                elif path == "/api/alerts/power-automate/status":
+                    body = {
+                        "configured": True, "sent_count_24h": 2,
+                        "failed_count_24h": 0, "pending_count": 0,
+                        "dead_count": 0, "recent": [],
+                    }
+                elif path == "/api/alerts/power-automate/violations":
+                    gallery_requests.append(query)
+                    rows = [
+                        {
+                            "id": 101, "camera_id": "CAM01", "camera_name": "CAM01",
+                            "zone": "North Area", "violation_type": "no_helmet",
+                            "detected_at": datetime.now(timezone.utc).isoformat(),
+                            "snapshot_url": "/api/snapshot/101",
+                        },
+                        {
+                            "id": 102, "camera_id": "CAM02", "camera_name": "CAM02",
+                            "zone": "South Area", "violation_type": "phone_detected",
+                            "detected_at": datetime.now(timezone.utc).isoformat(),
+                            "snapshot_url": "/api/snapshot/102",
+                        },
+                    ]
+                    if query.get("violation_type"):
+                        rows = [
+                            row for row in rows
+                            if row["violation_type"] == query["violation_type"][0]
+                        ]
+                    body = rows
                 elif path == "/api/alerts/power-automate/test" and request.method == "POST":
-                    self.power_automate_recipient = request.post_data_json["recipient"]
-                    body = {"sent": True, "recipient": self.power_automate_recipient}
+                    self.power_automate_ids = request.post_data_json["violation_ids"]
+                    body = {"sent": True, "count": len(self.power_automate_ids)}
                 elif path == "/api/rules" and request.method == "POST":
                     self.rule_payload = request.post_data_json
                     body = {"id": 4, **self.rule_payload}
@@ -225,7 +254,7 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertFalse(mobile_overflow)
                 await page.set_viewport_size({"width": 1280, "height": 900})
-                await page.get_by_role("button", name="CAMERA STATUS").click()
+                await page.get_by_role("button", name="CAMERAS & HEALTH").click()
 
                 async with page.expect_response(
                     lambda response: "/api/camera-status/history?" in response.url
@@ -269,7 +298,7 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 async with page.expect_response(
                     lambda response: "/api/camera-status/history?" in response.url,
                 ):
-                    await page.get_by_role("button", name="CAMERA STATUS").click()
+                    await page.get_by_role("button", name="CAMERAS & HEALTH").click()
                 await page.get_by_text(
                     "Unexpected camera status response format.",
                     exact=True,
@@ -277,13 +306,19 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
 
                 return_invalid_status_shape = False
                 await page.get_by_role("button", name="ALERT DELIVERY").click()
-                await page.locator("#powerAutomateTestRecipient").fill("safety@example.test")
+                async with page.expect_response(
+                    lambda response: "/api/alerts/power-automate/violations?" in response.url,
+                ):
+                    await page.locator("#alertGalleryType").select_option("phone_detected")
+                self.assertEqual(gallery_requests[-1]["violation_type"], ["phone_detected"])
+                self.assertEqual(gallery_requests[-1]["limit"], ["500"])
+                await page.locator(".alert-select-card .card-meta").click()
+                await page.locator("#alertGallerySearch").fill("CAM02")
+                await page.locator("#alertGallerySort").select_option("oldest")
+                self.assertIn("1 selected", await page.locator("#alertGalleryCount").inner_text())
                 await page.locator("#btnTestPowerAutomate").click()
-                await page.get_by_text("Test request accepted", exact=False).wait_for()
-                self.assertEqual(
-                    self.power_automate_recipient,
-                    "safety@example.test",
-                )
+                await page.get_by_text("1 selected violation", exact=False).wait_for()
+                self.assertEqual(self.power_automate_ids, [102])
 
                 await page.get_by_role("button", name="ALERT RULES").click()
                 await page.get_by_role("button", name="+ NEW RULE").click()
