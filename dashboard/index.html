@@ -154,34 +154,39 @@
           </div>
           <div class="face-insight-strip">
             <div><span>REVIEW QUEUE</span><strong id="faceQueueInsight">—</strong><small>Face match records in view</small></div>
+            <div><span>NEEDS REVIEW</span><strong id="faceNeedsReviewInsight">—</strong><small>Human decision required</small></div>
+            <div><span>CONFIRMED</span><strong id="faceConfirmedInsight">—</strong><small>Reviewer-confirmed results</small></div>
             <div><span>ACTIVE FILTERS</span><strong id="faceFilterInsight">0</strong><small>Filters currently applied</small></div>
-            <div><span>WORKFLOW</span><strong>HUMAN REVIEW</strong><small>Suggestions never auto-decide</small></div>
+          </div>
+          <div class="face-quick-filters" aria-label="Face match quick filters">
+            <span class="face-quick-label">QUICK VIEW</span>
+            <button type="button" class="face-quick-filter active" data-face-preset="">ALL RESULTS</button>
+            <button type="button" class="face-quick-filter" data-face-preset="NEEDS_REVIEW">NEEDS REVIEW</button>
+            <button type="button" class="face-quick-filter" data-face-preset="MATCHED">CONFIRMED</button>
+            <button type="button" class="face-quick-filter" data-face-preset="UNKNOWN">UNKNOWN / NO FACE</button>
+            <button type="button" class="face-quick-filter" data-face-preset="live">LIVE SOURCE</button>
           </div>
           <div class="face-filter-deck">
             <div class="face-filter-heading"><span class="face-eyebrow">QUERY BUILDER</span><strong>Find a face result</strong><small>Use one or more filters to narrow the secure review queue.</small></div>
-            <label for="faceViolationTypeFilter">VIOLATION TYPE</label>
-            <select id="faceViolationTypeFilter">
+            <label class="face-filter-field" for="faceViolationTypeFilter"><span>VIOLATION TYPE</span><select id="faceViolationTypeFilter">
               <option value="">ALL ELIGIBLE TYPES</option>
               <option value="no_helmet">MISSING HELMET</option>
               <option value="no_arc_flash_suit">MISSING ARC FLASH SUIT</option>
               <option value="phone_detected">PHONE DETECTED NEAR PERSON</option>
-            </select>
-            <label for="faceFromFilter">FROM</label><input id="faceFromFilter" type="datetime-local" />
-            <label for="faceToFilter">TO</label><input id="faceToFilter" type="datetime-local" />
-            <label for="faceCameraFilter">CAMERA</label><input id="faceCameraFilter" type="search" placeholder="Camera ID" />
-            <label for="faceStatusFilter">MATCH STATUS</label>
-            <select id="faceStatusFilter">
+            </select></label>
+            <label class="face-filter-field" for="faceFromFilter"><span>FROM</span><input id="faceFromFilter" type="datetime-local" /></label>
+            <label class="face-filter-field" for="faceToFilter"><span>TO</span><input id="faceToFilter" type="datetime-local" /></label>
+            <label class="face-filter-field" for="faceCameraFilter"><span>CAMERA SOURCE</span><select id="faceCameraFilter"><option value="">ALL AVAILABLE CAMERAS</option></select></label>
+            <label class="face-filter-field" for="faceStatusFilter"><span>MATCH STATUS</span><select id="faceStatusFilter">
               <option value="">ALL</option><option value="MATCHED">MATCHED</option>
               <option value="NEEDS_REVIEW">NEEDS REVIEW</option><option value="UNKNOWN">UNKNOWN</option>
               <option value="FACE_NOT_VISIBLE">FACE NOT VISIBLE</option><option value="Error">ERROR</option>
-            </select>
-            <label for="faceEmployeeFilter">EMPLOYEE ID</label><input id="faceEmployeeFilter" type="search" />
-            <label for="faceDepartmentFilter">DEPARTMENT</label><input id="faceDepartmentFilter" type="search" />
-            <label for="faceScoreMin">SCORE</label><input id="faceScoreMin" type="number" min="-1" max="1" step="0.01" placeholder="Min" />
-            <input id="faceScoreMax" type="number" min="-1" max="1" step="0.01" placeholder="Max" />
-            <label for="faceSearchFilter">SEARCH</label><input id="faceSearchFilter" type="search" placeholder="Name or employee ID" />
-            <label for="faceSourceFilter">SOURCE</label>
-            <select id="faceSourceFilter"><option value="">ALL</option><option value="live">LIVE</option><option value="historian">HISTORIAN</option></select>
+            </select></label>
+            <label class="face-filter-field" for="faceEmployeeFilter"><span>EMPLOYEE ID</span><input id="faceEmployeeFilter" type="search" placeholder="EMP-001" /></label>
+            <label class="face-filter-field" for="faceDepartmentFilter"><span>DEPARTMENT</span><input id="faceDepartmentFilter" type="search" placeholder="Operations" /></label>
+            <div class="face-filter-field face-score-field"><span>SCORE RANGE</span><div><input id="faceScoreMin" type="number" min="-1" max="1" step="0.01" placeholder="Min" /><input id="faceScoreMax" type="number" min="-1" max="1" step="0.01" placeholder="Max" /></div></div>
+            <label class="face-filter-field" for="faceSearchFilter"><span>SEARCH</span><input id="faceSearchFilter" type="search" placeholder="Name or employee ID" /></label>
+            <label class="face-filter-field" for="faceSourceFilter"><span>SOURCE</span><select id="faceSourceFilter"><option value="">ALL SOURCES</option><option value="live">LIVE</option><option value="historian">HISTORIAN</option></select></label>
             <button class="ops-btn-sec face-clear-filters" id="btnClearFaceFilters" type="button">CLEAR FILTERS</button>
           </div>
           <div class="face-workbench">

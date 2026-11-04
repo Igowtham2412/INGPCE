@@ -312,6 +312,7 @@ async function loadCameras() {
   document.getElementById("statCamerasOnline").textContent =
     `${activeCameras.filter((camera) => camera.connected).length}/${activeCameras.length}`;
   populateCameraStatusCameraFilter();
+  populateFaceCameraFilter();
   populateRuleCameraSelect();
   updateCameraFleetSummary();
 }
@@ -361,6 +362,24 @@ function populateWallCameraFilter() {
     select.appendChild(option);
   });
   select.value = currentValue || "";
+}
+
+function populateFaceCameraFilter() {
+  const select = document.getElementById("faceCameraFilter");
+  if (!select) return;
+  const currentValue = select.value;
+  select.innerHTML = '<option value="">ALL AVAILABLE CAMERAS</option>';
+  state.cameras
+    .slice()
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+    .forEach((camera) => {
+      const option = document.createElement("option");
+      option.value = camera.camera_id;
+      option.textContent = `${camera.name} · ${camera.camera_id}`;
+      select.appendChild(option);
+    });
+  select.value = state.cameras.some((camera) => camera.camera_id === currentValue)
+    ? currentValue : "";
 }
 
 function populateCameraStatusCameraFilter() {
@@ -863,6 +882,7 @@ async function refreshCameraStatuses() {
     renderCamerasTable();
     applyLiveWallFilters();
     populateRuleCameraSelect();
+    populateFaceCameraFilter();
     updateCameraFleetSummary();
   } catch (e) { /* transient network blip - next poll will retry */ }
 }
@@ -1427,6 +1447,20 @@ function setupFaceMatches() {
       },
     );
   });
+  document.querySelectorAll("[data-face-preset]").forEach((button) => {
+    button.addEventListener("click", () => {
+      document.querySelectorAll("[data-face-preset]").forEach((item) => item.classList.remove("active"));
+      button.classList.add("active");
+      document.getElementById("faceStatusFilter").value = "";
+      document.getElementById("faceSourceFilter").value = "";
+      if (["MATCHED", "NEEDS_REVIEW", "UNKNOWN"].includes(button.dataset.facePreset)) {
+        document.getElementById("faceStatusFilter").value = button.dataset.facePreset;
+      } else if (button.dataset.facePreset === "live") {
+        document.getElementById("faceSourceFilter").value = "live";
+      }
+      loadFaceMatches();
+    });
+  });
   document.getElementById("btnRefreshFaceMatches").addEventListener(
     "click", loadFaceMatches,
   );
@@ -1438,6 +1472,8 @@ function setupFaceMatches() {
       const element = document.getElementById(id);
       element.value = "";
     });
+    document.querySelectorAll("[data-face-preset]").forEach((item) => item.classList.remove("active"));
+    document.querySelector("[data-face-preset='']").classList.add("active");
     loadFaceMatches();
   });
   document.getElementById("faceMatchesBody").addEventListener("click", (event) => {
@@ -1662,6 +1698,8 @@ function installFaceImageFallbacks(container) {
 async function loadFaceMatches() {
   const body = document.getElementById("faceMatchesBody");
   body.innerHTML = `<div class="empty-state">Synchronizing recognition index…</div>`;
+  document.getElementById("faceNeedsReviewInsight").textContent = "—";
+  document.getElementById("faceConfirmedInsight").textContent = "—";
   const params = new URLSearchParams({ limit: "100" });
   const values = {
     violation_type: document.getElementById("faceViolationTypeFilter").value,
@@ -1701,6 +1739,10 @@ async function loadFaceMatches() {
     }));
     document.getElementById("faceResultCount").textContent = `${matches.length} RECORDS`;
     document.getElementById("faceQueueInsight").textContent = matches.length;
+    document.getElementById("faceNeedsReviewInsight").textContent =
+      matches.filter((item) => item.status === "NEEDS_REVIEW").length;
+    document.getElementById("faceConfirmedInsight").textContent =
+      matches.filter((item) => item.status === "MATCHED" && ["Confirmed", "Reassigned"].includes(item.review_decision)).length;
     document.getElementById("faceFilterInsight").textContent = Object.values(values).filter(Boolean).length;
     if (!matches.length) {
       body.innerHTML = `<div class="empty-state">No face matches for this filter.</div>`;

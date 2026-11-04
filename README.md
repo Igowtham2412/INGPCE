@@ -341,7 +341,6 @@ The browser client is a static application in `dashboard/`:
 - **Incidents**: evidence review, filtering, and incident details.
 - **Face Matches**: authorized face-review queue and in-page evidence gallery.
 - **Analytics**: trends, counts, and operational summaries.
-- **Cameras**: camera configuration and required-PPE policy.
 - **Cameras & Health**: camera configuration, live fleet health, green/yellow/red
   status, availability timeline, and status history in one workspace.
 - **Alert Delivery**: queue health, selection, evidence, and dispatch history.
@@ -367,6 +366,30 @@ source. Rule changes are persisted through `POST`, `PUT`, and `DELETE
 /api/rules` endpoints and the alert engine refreshes its in-memory rules after
 each successful change. The API also rejects a non-existent camera identifier,
 so rules cannot silently target an unregistered source.
+
+### Face Match workbench
+
+The Face Matches tab is a secured review workspace, not an automatic identity
+decision surface. It provides:
+
+- camera selection from the registered camera inventory;
+- violation, date/time, match-status, employee, department, score, search, and
+  source filters;
+- quick views for all results, needs-review, confirmed, unknown/no-face, and
+  live-source records;
+- queue insight cards for total records, human-review workload, confirmed
+  outcomes, and active filters;
+- selectable result cards with incident evidence, confidence, source, and
+  timestamp context;
+- an in-page case file for candidate comparison, face crop, re-run,
+  confirm/reject/unknown/reassign actions, and review history;
+- separate analytics, consented enrollment, employee gallery, threshold
+  settings, and recognition-status views.
+
+The interface keeps candidate suggestions visually separate from
+reviewer-confirmed outcomes. Face data remains governed by the consent,
+encryption, retention, and authorization requirements described in this
+document.
 
 FastAPI publishes the machine-readable contract at `/openapi.json`. The API
 is the source of truth for validation and authorization; the dashboard must not
