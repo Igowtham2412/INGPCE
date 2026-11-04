@@ -18,6 +18,8 @@ const state = {
   analyticsStats: null, analyticsWindowHours: 24, analyticsResizeTimer: null,
   faceSelectedIncident: null, faceAnimationTimer: null, faceViewed: new Set(),
   faceLiveQueue: [], faceLiveBusy: false,
+  alertGalleryRows: [], alertSelectedIds: new Set(),
+  faceMatchGallery: [],
   canManageAlertDelivery: false,
   canReviewFaceMatches: false,
   canManageFaceSettings: false,
@@ -1394,6 +1396,13 @@ function setupFaceMatches() {
   document.getElementById("btnPrintFaceMatches").addEventListener(
     "click", () => window.print(),
   );
+  document.getElementById("btnClearFaceFilters").addEventListener("click", () => {
+    filterIds.forEach((id) => {
+      const element = document.getElementById(id);
+      element.value = "";
+    });
+    loadFaceMatches();
+  });
   document.getElementById("faceMatchesBody").addEventListener("click", (event) => {
     const deleteButton = event.target.closest("[data-face-delete]");
     if (deleteButton) {
@@ -1647,7 +1656,15 @@ async function loadFaceMatches() {
     }
     const matches = await response.json();
     body.replaceChildren();
+    state.faceMatchGallery = matches.filter((item) => item.snapshot_url).map((item) => ({
+      id: item.incident_id,
+      url: item.snapshot_url,
+      title: `Face match · Incident #${item.incident_id}`,
+      caption: `${item.camera_name || item.camera_id || "Camera unavailable"} · ${item.epoch_time ? new Date(Number(item.epoch_time) * 1000).toLocaleString() : "Time unavailable"}`,
+    }));
     document.getElementById("faceResultCount").textContent = `${matches.length} RECORDS`;
+    document.getElementById("faceQueueInsight").textContent = matches.length;
+    document.getElementById("faceFilterInsight").textContent = Object.values(values).filter(Boolean).length;
     if (!matches.length) {
       body.innerHTML = `<div class="empty-state">No face matches for this filter.</div>`;
       return;
@@ -1762,7 +1779,7 @@ async function showFaceMatchDetail(incidentId, autoRun = false, forceRun = false
     const frameHeight = Number(metadata.frame_height);
     const originalUrl = match.snapshot_url || match.clean_snapshot_url;
     const original = originalUrl
-      ? `<a href="${escapeHtml(originalUrl)}" target="_blank" rel="noopener"><img class="face-detail-original" src="${escapeHtml(originalUrl)}" alt="Original incident image" /></a>`
+      ? `<button type="button" class="face-evidence-open" data-face-evidence-open="${incidentId}" aria-label="Open incident evidence gallery"><img class="face-detail-original" src="${escapeHtml(originalUrl)}" alt="Original incident image" /></button>`
       : `<div class="thumb-placeholder">Original image unavailable</div>`;
     const overlays = faceBoxOverlay(
       metadata.person_box, frameWidth, frameHeight, "person",
@@ -1838,6 +1855,10 @@ async function showFaceMatchDetail(incidentId, autoRun = false, forceRun = false
         ${match.review_decision ? `<p>Reviewer decision: ${escapeHtml(match.review_decision)} · ${match.reviewed_at ? new Date(match.reviewed_at).toLocaleString() : ""}</p>` : ""}
       </div><div id="faceEmployeeHistory"></div>`;
     installFaceImageFallbacks(content);
+    const evidenceButton = content.querySelector("[data-face-evidence-open]");
+    if (evidenceButton) {
+      evidenceButton.addEventListener("click", () => openFaceMatchGallery(incidentId, originalUrl));
+    }
     const shouldAnimate = forceRun || autoRun || !state.faceViewed.has(incidentId);
     if (shouldAnimate) {
       state.faceViewed.add(incidentId);
@@ -2073,6 +2094,19 @@ function openViolationLightbox(imageUrl) {
   const currentIndex = index >= 0 ? index : 0;
   const item = state.violationGallery[currentIndex];
   openLightbox(imageUrl, item ? item.caption : "", currentIndex, true);
+}
+function openFaceMatchGallery(incidentId, imageUrl) {
+  const gallery = state.faceMatchGallery || [];
+  const index = gallery.findIndex((item) => Number(item.id) === Number(incidentId));
+  state.violationGallery = gallery.length ? gallery : [{
+    id: incidentId,
+    url: imageUrl,
+    title: `Face match · Incident #${incidentId}`,
+    caption: "Incident evidence",
+  }];
+  const currentIndex = index >= 0 ? index : 0;
+  const item = state.violationGallery[currentIndex];
+  openLightbox(item.url, item.caption, currentIndex, state.violationGallery.length > 1);
 }
 function moveViolationLightbox(direction) {
   if (state.violationGallery.length < 2) return;
@@ -2625,15 +2659,36 @@ function setupPowerAutomateTest() {
     .addEventListener("click", sendPowerAutomateTest);
   document.getElementById("btnRefreshAlertGallery")
     .addEventListener("click", loadAlertViolationGallery);
+  document.getElementById("btnSelectAllAlertEvidence")
+    .addEventListener("click", () => {
+      document.querySelectorAll('input[name="alertViolation"]').forEach((input) => {
+        input.checked = true;
+        state.alertSelectedIds.add(Number(input.value));
+      });
+      updateAlertSelectionSummary();
+    });
+  document.getElementById("btnClearAlertEvidence")
+    .addEventListener("click", () => {
+      document.querySelectorAll('input[name="alertViolation"]').forEach((input) => {
+        input.checked = false;
+        state.alertSelectedIds.delete(Number(input.value));
+      });
+      updateAlertSelectionSummary();
+    });
   document.getElementById("alertGalleryType")
     .addEventListener("change", loadAlertViolationGallery);
   document.getElementById("alertGalleryAge")
     .addEventListener("change", loadAlertViolationGallery);
+  document.getElementById("alertGallerySearch")
+    .addEventListener("input", renderAlertViolationGallery);
+  document.getElementById("alertGallerySort")
+    .addEventListener("change", renderAlertViolationGallery);
   loadAlertViolationGallery();
 }
 
 async function loadAlertViolationGallery() {
   const gallery = document.getElementById("alertViolationGallery");
+  gallery.setAttribute("aria-busy", "true");
   try {
     const type = document.getElementById("alertGalleryType").value;
     const age = document.getElementById("alertGalleryAge").value;
@@ -2643,53 +2698,90 @@ async function loadAlertViolationGallery() {
     const response = await fetch(`/api/alerts/power-automate/violations?${params}`);
     const rows = await response.json();
     if (!response.ok) throw new Error(rows.detail || `HTTP ${response.status}`);
-    document.getElementById("alertGalleryCount").textContent = `${rows.length} evidence item${rows.length === 1 ? "" : "s"}`;
-    state.violationGallery = rows.filter((row) => row.snapshot_url).map((row) => ({
+    state.alertGalleryRows = rows.filter((row) => row.snapshot_url);
+    state.violationGallery = state.alertGalleryRows.map((row) => ({
       id: row.id,
       url: row.snapshot_url,
       title: `${formatViolationLabel(row.violation_type)} · ${row.camera_name || row.camera_id}`,
       caption: `${row.camera_name || row.camera_id} · ${row.zone || ""} · ${new Date(row.detected_at).toLocaleString()}`,
     }));
-    gallery.innerHTML = rows.length ? rows.map((row) => {
+    renderAlertViolationGallery();
+    /* Card interactions are delegated after each render so search and sort stay lightweight. */
+    gallery.onclick = (event) => {
+      const card = event.target.closest(".alert-select-card");
+      if (!card) return;
+      const image = card.querySelector("img");
+      if (event.target.closest("img")) {
+        if (image) openViolationLightbox(image.src);
+        return;
+      }
+      const input = card.querySelector('input[name="alertViolation"]');
+      if (input) {
+        input.checked = !input.checked;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    };
+    gallery.onkeydown = (event) => {
+      const card = event.target.closest(".alert-select-card");
+      if (card && (event.key === "Enter" || event.key === " ")) {
+        event.preventDefault();
+        const input = card.querySelector('input[name="alertViolation"]');
+        if (input) {
+          input.checked = !input.checked;
+          card.setAttribute("aria-pressed", String(input.checked));
+          input.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      }
+    };
+    /* Keep selection handling explicit so the dispatch summary always updates. */
+    document.querySelectorAll('input[name="alertViolation"]').forEach((input) => {
+      input.addEventListener("change", () => {
+        if (input.checked) state.alertSelectedIds.add(Number(input.value));
+        else state.alertSelectedIds.delete(Number(input.value));
+        const card = input.closest(".alert-select-card");
+        if (card) card.setAttribute("aria-pressed", String(input.checked));
+        updateAlertSelectionSummary();
+      });
+    });
+    updateAlertSelectionSummary();
+  } catch (error) {
+    gallery.innerHTML = `<div class="error-state">${escapeHtml(error.message)}</div>`;
+  } finally {
+    gallery.removeAttribute("aria-busy");
+  }
+}
+
+function renderAlertViolationGallery() {
+  const gallery = document.getElementById("alertViolationGallery");
+  const search = (document.getElementById("alertGallerySearch")?.value || "").trim().toLowerCase();
+  const sort = document.getElementById("alertGallerySort")?.value || "newest";
+  const rows = [...(state.alertGalleryRows || [])]
+    .filter((row) => `${row.id} ${row.camera_name || ""} ${row.camera_id || ""} ${row.zone || ""}`.toLowerCase().includes(search))
+    .sort((a, b) => {
+      const delta = new Date(a.detected_at) - new Date(b.detected_at);
+      return sort === "oldest" ? delta : -delta;
+    });
+  document.getElementById("alertGalleryCount").textContent =
+    `${rows.length} evidence item${rows.length === 1 ? "" : "s"} · ${document.querySelectorAll('input[name="alertViolation"]:checked').length} selected`;
+  gallery.innerHTML = rows.length ? rows.map((row) => {
       const label = formatViolationLabel(row.violation_type);
-      return `<article class="violation-card alert-select-card" data-alert-image="${row.id}">
+      return `<article class="violation-card alert-select-card" data-alert-image="${row.id}" role="button" aria-pressed="${state.alertSelectedIds.has(Number(row.id))}" aria-label="Select evidence image ${row.id}">
         <div class="thumb-wrap">
           <img src="${row.snapshot_url}" alt="${escapeHtml(label)}" loading="lazy">
           <span class="thumb-badge">${escapeHtml(label.toUpperCase())}</span>
-          <label class="alert-select-control" title="Select this image">
-            <input type="checkbox" name="alertViolation" value="${row.id}">
+          <label class="alert-select-control" title="Select this image" aria-hidden="true">
+            <input type="checkbox" name="alertViolation" value="${row.id}" ${state.alertSelectedIds.has(Number(row.id)) ? "checked" : ""}>
             <span>SELECT</span>
           </label>
         </div>
         <div class="card-meta">
           <div class="card-cam">${escapeHtml(row.camera_name || row.camera_id)}</div>
           <div class="card-time">${escapeHtml(row.zone || "Unassigned")} · ${escapeHtml(new Date(row.detected_at).toLocaleString())}</div>
-          <div class="review-status alert-ready-status">READY FOR DISPATCH</div>
         </div>
       </article>`;
-    }).join("") : '<div class="empty-state">No helmet or phone evidence images are available for this filter.</div>';
-    gallery.querySelectorAll(".alert-select-card").forEach((card) => {
-      const image = card.querySelector("img");
-      card.addEventListener("click", (event) => {
-        if (event.target.closest(".alert-select-control")) return;
-        openViolationLightbox(image.src);
-      });
-      card.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          openViolationLightbox(image.src);
-        }
-      });
-      card.tabIndex = 0;
-    });
-    document.getElementById("btnTestPowerAutomate").disabled = !rows.length;
-    document.querySelectorAll('input[name="alertViolation"]').forEach((input) => {
-      input.addEventListener("change", updateAlertSelectionSummary);
-    });
-    updateAlertSelectionSummary();
-  } catch (error) {
-    gallery.innerHTML = `<div class="error-state">${escapeHtml(error.message)}</div>`;
-  }
+    }).join("") : '<div class="empty-state">No evidence matches the current filters.</div>';
+  gallery.querySelectorAll(".alert-select-card").forEach((card) => { card.tabIndex = 0; });
+  document.getElementById("btnTestPowerAutomate").disabled = !document.querySelectorAll('input[name="alertViolation"]').length;
 }
 
 function setupAlertDeliveryDashboard() {
@@ -2728,14 +2820,14 @@ async function loadAlertDeliveryStatus() {
 async function sendPowerAutomateTest() {
   const button = document.getElementById("btnTestPowerAutomate");
   const status = document.getElementById("powerAutomateTestStatus");
-  const selected = [...document.querySelectorAll('input[name="alertViolation"]:checked')];
-  if (!selected.length) {
+  const selectedIds = [...state.alertSelectedIds];
+  if (!selectedIds.length) {
     status.textContent = "Select one or more evidence images first.";
     status.className = "error";
     return;
   }
   button.disabled = true;
-  status.textContent = `Sending ${selected.length} selected helmet/phone image${selected.length === 1 ? "" : "s"}…`;
+  status.textContent = `Sending ${selectedIds.length} selected helmet/phone image${selectedIds.length === 1 ? "" : "s"}…`;
   status.className = "loading";
   try {
     const response = await fetch("/api/alerts/power-automate/test", {
@@ -2743,7 +2835,7 @@ async function sendPowerAutomateTest() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         recipient: "nikita.gosavi@adityabirla.com",
-        violation_ids: selected.map((input) => Number(input.value)),
+        violation_ids: selectedIds,
       }),
     });
     const body = await response.json().catch(() => ({}));
@@ -2759,15 +2851,16 @@ async function sendPowerAutomateTest() {
 }
 
 function updateAlertSelectionSummary() {
-  const selectedCount = document.querySelectorAll('input[name="alertViolation"]:checked').length;
+  const selectedCount = state.alertSelectedIds.size;
+  const totalCount = document.querySelectorAll('input[name="alertViolation"]').length;
   const button = document.getElementById("btnTestPowerAutomate");
   if (button) button.textContent = selectedCount ? `SEND ${selectedCount} SELECTED` : "SEND SELECTED";
   const count = document.getElementById("alertGalleryCount");
   if (count) {
-    count.textContent = selectedCount
-      ? `${selectedCount} selected`
-      : `${document.querySelectorAll('input[name="alertViolation"]').length} evidence items`;
+    count.textContent = `${totalCount} evidence item${totalCount === 1 ? "" : "s"} · ${selectedCount} selected`;
   }
+  const summary = document.getElementById("alertSelectionCount");
+  if (summary) summary.textContent = `${selectedCount} evidence image${selectedCount === 1 ? "" : "s"} selected`;
 }
 
 // ---------------------------------------------------------------

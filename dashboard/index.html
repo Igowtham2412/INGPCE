@@ -107,6 +107,7 @@
       </div>
 
       <div id="tab-violations" class="tab-pane">
+        <div class="tab-intro"><div><span class="tab-eyebrow">SAFETY OPERATIONS / INCIDENT REVIEW</span><h2>Incident command</h2><p>Review, classify, and preserve evidence from every detected safety event.</p></div><span class="tab-live-indicator">● LIVE INDEX</span></div>
         <div class="filter-bar">
           <select id="violationCameraFilter"><option value="">ALL CAMERAS</option></select>
           <select id="violationAreaGroupFilter"><option value="">ALL SECTORS</option></select>
@@ -145,10 +146,20 @@
         </div>
         <section class="face-subtab-pane active" id="face-panel-matches">
           <div class="face-command-bar">
-            <div><span class="face-eyebrow">FACIAL IDENTIFICATION / SECURE REVIEW</span><strong>FACE MATCHES</strong><span id="faceLiveStatus" class="face-live-status">EVENT STREAM STANDBY</span></div>
-            <div><button class="ops-btn-sec" id="btnRefreshFaceMatches" type="button">SYNC INDEX</button><a class="ops-btn-sec" href="/api/face/matches/export.csv">EXPORT</a><button class="ops-btn-sec" id="btnPrintFaceMatches" type="button">PRINT</button></div>
+            <div class="face-command-title">
+              <div class="face-title-line"><span class="face-status-dot" aria-hidden="true"></span><span class="face-eyebrow">FACIAL IDENTIFICATION / SECURE REVIEW</span></div>
+              <strong>Face match workbench</strong>
+              <span id="faceLiveStatus" class="face-live-status">EVENT STREAM STANDBY</span>
+            </div>
+            <div class="face-command-actions"><span class="face-last-sync">Review suggestions only</span><button class="ops-btn-sec" id="btnRefreshFaceMatches" type="button">↻ SYNC INDEX</button><a class="ops-btn-sec" href="/api/face/matches/export.csv">↓ EXPORT</a><button class="ops-btn-sec" id="btnPrintFaceMatches" type="button">PRINT</button></div>
+          </div>
+          <div class="face-insight-strip">
+            <div><span>REVIEW QUEUE</span><strong id="faceQueueInsight">—</strong><small>Face match records in view</small></div>
+            <div><span>ACTIVE FILTERS</span><strong id="faceFilterInsight">0</strong><small>Filters currently applied</small></div>
+            <div><span>WORKFLOW</span><strong>HUMAN REVIEW</strong><small>Suggestions never auto-decide</small></div>
           </div>
           <div class="face-filter-deck">
+            <div class="face-filter-heading"><span class="face-eyebrow">QUERY BUILDER</span><strong>Find a face result</strong><small>Use one or more filters to narrow the secure review queue.</small></div>
             <label for="faceViolationTypeFilter">VIOLATION TYPE</label>
             <select id="faceViolationTypeFilter">
               <option value="">ALL ELIGIBLE TYPES</option>
@@ -172,10 +183,11 @@
             <label for="faceSearchFilter">SEARCH</label><input id="faceSearchFilter" type="search" placeholder="Name or employee ID" />
             <label for="faceSourceFilter">SOURCE</label>
             <select id="faceSourceFilter"><option value="">ALL</option><option value="live">LIVE</option><option value="historian">HISTORIAN</option></select>
+            <button class="ops-btn-sec face-clear-filters" id="btnClearFaceFilters" type="button">CLEAR FILTERS</button>
           </div>
           <div class="face-workbench">
             <section class="face-result-list" aria-label="Face match results">
-              <div class="face-list-heading"><span>RESULT QUEUE</span><span id="faceResultCount">0 RECORDS</span></div>
+              <div class="face-list-heading"><div><span class="face-eyebrow">SECURE REVIEW QUEUE</span><strong>RESULTS</strong></div><span id="faceResultCount">0 RECORDS</span></div>
               <div id="faceMatchesBody"><div class="empty-state">Face matches will appear here after eligible incidents are processed.</div></div>
             </section>
             <section class="face-detail-pane" id="faceMatchDrawer" aria-labelledby="faceMatchDrawerTitle">
@@ -356,6 +368,7 @@
       </div>
 
       <div id="tab-cameras" class="tab-pane">
+        <div class="tab-intro"><div><span class="tab-eyebrow">INFRASTRUCTURE / VIDEO SOURCES</span><h2>Camera registry</h2><p>Manage registered feeds, sectors, and detection requirements.</p></div><span class="tab-live-indicator">● STREAM CONTROL</span></div>
         <div class="cam-toolbar">
           <button class="ops-btn" id="btnNewCamera">+ ADD CAMERA</button>
           <button class="ops-btn-sec" id="btnManageGroups">MANAGE SECTORS</button>
@@ -369,6 +382,7 @@
       </div>
 
       <div id="tab-camera-status" class="tab-pane">
+        <div class="tab-intro"><div><span class="tab-eyebrow">INFRASTRUCTURE / RELIABILITY</span><h2>Camera health</h2><p>Track stream availability and connectivity history across the site.</p></div><span class="tab-live-indicator">● MONITORING</span></div>
         <div class="status-report-toolbar">
           <label>DATE RANGE
             <select id="cameraStatusRange">
@@ -417,26 +431,47 @@
 
       <div id="tab-alert-delivery" class="tab-pane">
         <section class="alert-delivery-panel">
-          <div class="status-report-heading">
-            <div><h3>POWER AUTOMATE EMAIL DELIVERY</h3>
-              <p>Immediate alerts and shift digests send only missing-helmet and phone evidence images. Test sends the latest eligible image.</p>
+          <div class="alert-delivery-header">
+            <div class="alert-delivery-title">
+              <div class="alert-title-line">
+                <span class="alert-status-dot" aria-hidden="true"></span>
+                <span class="alert-eyebrow">AUTOMATION CONTROL / EMAIL DELIVERY</span>
+              </div>
+              <h2>Alert delivery center</h2>
+              <p>Review verified evidence, prepare a dispatch, and monitor every Power Automate handoff.</p>
             </div>
-            <button class="ops-btn-sec" id="btnRefreshAlertDelivery" type="button">↻ REFRESH</button>
+            <div class="alert-header-actions">
+              <span class="alert-last-sync" id="alertDeliveryUpdated">Last sync —</span>
+              <button class="ops-btn-sec alert-refresh-button" id="btnRefreshAlertDelivery" type="button">↻ REFRESH</button>
+            </div>
           </div>
           <div class="alert-delivery-health" id="alertDeliveryHealth">
-            <div class="delivery-health-card"><span>FLOW CONFIGURATION</span><strong>—</strong><small>Checking server configuration</small></div>
-            <div class="delivery-health-card"><span>SENT LAST 24H</span><strong>—</strong><small>Power Automate deliveries</small></div>
-            <div class="delivery-health-card"><span>QUEUED / FAILED</span><strong>—</strong><small>Pending and dead jobs</small></div>
+            <div class="delivery-health-card"><span>FLOW CONFIGURATION</span><strong>—</strong><small>Checking server configuration</small><i class="health-card-icon">↗</i></div>
+            <div class="delivery-health-card"><span>SENT LAST 24H</span><strong>—</strong><small>Power Automate deliveries</small><i class="health-card-icon">✓</i></div>
+            <div class="delivery-health-card"><span>QUEUED / FAILED</span><strong>—</strong><small>Pending and dead jobs</small><i class="health-card-icon">!</i></div>
           </div>
-          <div class="email-report-base-settings">
-            <label>RECIPIENTS
-              <input value="nikita.gosavi@adityabirla.com; gowtham.isakapatla@adityabirla.com" readonly />
-            </label>
+          <div class="alert-recipient-panel">
+            <div>
+              <span class="alert-section-label">PRIMARY ROUTE</span>
+              <p>Manual evidence dispatch is routed to these operations recipients.</p>
+            </div>
+            <div class="alert-recipient-list" aria-label="Delivery recipients">
+              <span class="alert-recipient"><i>NG</i> nikita.gosavi@adityabirla.com</span>
+              <span class="alert-recipient"><i>GI</i> gowtham.isakapatla@adityabirla.com</span>
+            </div>
           </div>
           <section class="delivery-history">
             <div class="alert-command-heading">
-              <div><span class="alert-eyebrow">EVIDENCE CONTROL / MANUAL DISPATCH</span><h3>SELECT EVIDENCE IMAGES</h3><p>Select one or more verified helmet or phone incidents. Each selected image is sent as a separate email attachment.</p></div>
-              <button class="ops-btn-sec" id="btnRefreshAlertGallery" type="button">↻ SYNC GALLERY</button>
+              <div>
+                <span class="alert-eyebrow">EVIDENCE CONTROL / MANUAL DISPATCH</span>
+                <h3>Select evidence images</h3>
+                <p>Select verified helmet or phone incidents. Each selected image is sent as a separate email attachment.</p>
+              </div>
+              <div class="alert-command-actions">
+                <button class="ops-btn-sec" id="btnRefreshAlertGallery" type="button">↻ SYNC GALLERY</button>
+                <button class="ops-btn-sec" id="btnSelectAllAlertEvidence" type="button">SELECT ALL</button>
+                <button class="ops-btn-sec" id="btnClearAlertEvidence" type="button">CLEAR</button>
+              </div>
             </div>
             <div class="alert-gallery-toolbar">
               <label>TYPE
@@ -453,16 +488,30 @@
                   <option value="all">ALL AVAILABLE</option>
                 </select>
               </label>
-              <span id="alertGalleryCount">0 evidence items</span>
+              <label class="alert-gallery-search">SEARCH
+                <input id="alertGallerySearch" type="search" placeholder="Camera, zone or incident…" />
+              </label>
+              <label>SORT
+                <select id="alertGallerySort">
+                  <option value="newest">NEWEST FIRST</option>
+                  <option value="oldest">OLDEST FIRST</option>
+                </select>
+              </label>
+              <span class="alert-gallery-summary" id="alertGalleryCount">0 evidence items · 0 selected</span>
             </div>
             <div id="alertViolationGallery" class="incidents-grid alert-incidents-gallery"><div class="empty-state">Loading eligible evidence…</div></div>
           </section>
           <div class="alert-delivery-actions">
+            <div class="dispatch-summary">
+              <span class="alert-section-label">DISPATCH QUEUE</span>
+              <strong id="alertSelectionCount">0 evidence images selected</strong>
+              <small>Review your selection before sending.</small>
+            </div>
             <div id="powerAutomateTestStatus" role="status" aria-live="polite"></div>
-            <button class="ops-btn-sec" id="btnTestPowerAutomate" type="button" disabled>SEND SELECTED</button>
+            <button class="ops-btn" id="btnTestPowerAutomate" type="button" disabled>✈ SEND SELECTED</button>
           </div>
           <section class="delivery-history">
-            <div class="status-report-heading"><h3>RECENT DELIVERY ACTIVITY</h3><span id="alertDeliveryUpdated">Not loaded</span></div>
+            <div class="status-report-heading"><div><span class="alert-eyebrow">AUDIT TRAIL</span><h3>Recent delivery activity</h3></div><span>Latest 50 events</span></div>
             <div id="alertDeliveryMessage" class="camera-status-message" role="status" aria-live="polite"></div>
             <div class="status-log-scroll">
               <table class="ops-table">
@@ -475,6 +524,7 @@
       </div>
 
       <div id="tab-rules" class="tab-pane">
+        <div class="tab-intro"><div><span class="tab-eyebrow">AUTOMATION / ESCALATION LOGIC</span><h2>Alert rules</h2><p>Configure how verified incidents are routed to your response team.</p></div><span class="tab-live-indicator">● RULE ENGINE</span></div>
         <div class="rules-panel">
           <div class="rules-hdr"><h3>ALERT RULES</h3><button class="ops-btn" id="btnNewRule">+ NEW RULE</button></div>
           <table class="ops-table">
