@@ -20,6 +20,8 @@ dataset/face_test_crops/*
 evidence/
 snapshots/
 logs/
+local-app.log
+local-app.err
 models/
 IMG_2729.jpeg
 build/

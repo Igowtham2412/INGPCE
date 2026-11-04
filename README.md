@@ -1,5 +1,14 @@
 # INGPCE Safety Monitoring — Executive Overview and Handover
 
+## Maintainer documentation
+
+Use the focused guides for ongoing development and operations:
+
+- [Documentation hub](./docs/README.md)
+- [Architecture and code map](./docs/ARCHITECTURE.md)
+- [Development guide](./docs/DEVELOPMENT.md)
+- [Operations runbook](./docs/OPERATIONS.md)
+
 ## Executive overview
 
 INGPCE is a camera-based safety-support system for industrial operations. It
