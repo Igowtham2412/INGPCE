@@ -312,15 +312,16 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                     await page.locator("#alertGalleryType").select_option("phone_detected")
                 self.assertEqual(gallery_requests[-1]["violation_type"], ["phone_detected"])
                 self.assertEqual(gallery_requests[-1]["limit"], ["500"])
-                checkbox = page.locator('.alert-select-card input[name="alertViolation"]')
-                await checkbox.check()
-                self.assertTrue(await checkbox.is_checked())
+                select_evidence = page.locator('[data-alert-select="102"]')
+                await select_evidence.click()
+                self.assertEqual(await select_evidence.get_attribute("aria-pressed"), "true")
                 await page.locator("#alertGallerySearch").fill("CAM02")
                 await page.locator("#alertGallerySort").select_option("oldest")
                 self.assertIn("1 selected", await page.locator("#alertGalleryCount").inner_text())
                 await page.locator("#btnTestPowerAutomate").click()
                 await page.get_by_text("1 selected violation", exact=False).wait_for()
                 self.assertEqual(self.power_automate_ids, [102])
+                await page.locator("#alertGallerySearch").fill("")
                 await page.locator("#btnClearAlertEvidence").click()
                 self.assertIn("0 selected", await page.locator("#alertGalleryCount").inner_text())
                 self.assertTrue(await page.locator("#btnTestPowerAutomate").is_disabled())
@@ -328,9 +329,15 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 await page.get_by_role("button", name="ALERT RULES").click()
                 await page.get_by_role("button", name="+ NEW RULE").click()
                 await page.locator("#ruleName").fill("Power Automate test rule")
+                await page.locator('#ruleCameraOptions input[value="CAM01"]').check()
+                await page.locator('#ruleCameraOptions input[value="CAM02"]').check()
                 await page.locator("#chanPowerAutomate").check()
                 await page.locator("#ruleEmailRecipients").fill("safety@example.test")
                 await page.get_by_role("button", name="SAVE RULE").click()
+                self.assertEqual(
+                    self.rule_payload["camera_ids"],
+                    ["CAM01", "CAM02"],
+                )
                 self.assertEqual(
                     self.rule_payload["channels"],
                     ["power_automate"],

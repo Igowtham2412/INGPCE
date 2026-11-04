@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS alert_rules (
     id BIGSERIAL PRIMARY KEY,
     name TEXT NOT NULL,
     camera_id TEXT,
+    camera_ids TEXT[] NOT NULL DEFAULT '{}',
     zone TEXT,
     violation_type TEXT,
     min_severity INTEGER NOT NULL DEFAULT 1,
@@ -2678,22 +2679,30 @@ async def list_rules(enabled_only: bool = False) -> list[dict[str, Any]]:
 
 
 async def create_rule(name, camera_id, zone, violation_type, min_severity,
-                       channels, cooldown_seconds, email_recipients, enabled=True) -> dict[str, Any]:
+                       channels, cooldown_seconds, email_recipients, enabled=True,
+                       camera_ids=None) -> dict[str, Any]:
+    selected_camera_ids = list(dict.fromkeys(camera_ids or ([] if not camera_id else [camera_id])))
+    legacy_camera_id = selected_camera_ids[0] if len(selected_camera_ids) == 1 else None
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
             """INSERT INTO alert_rules
-               (name, camera_id, zone, violation_type, min_severity, channels,
+               (name, camera_id, camera_ids, zone, violation_type, min_severity, channels,
                 cooldown_seconds, email_recipients, enabled)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *""",
-            name, camera_id, zone, violation_type, min_severity, channels,
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *""",
+            name, legacy_camera_id, selected_camera_ids, zone, violation_type, min_severity, channels,
             cooldown_seconds, email_recipients, enabled,
         )
         return dict(row)
 
-
 async def update_rule(rule_id: int, **fields) -> dict[str, Any] | None:
     if not fields:
         return None
+    if "camera_ids" in fields:
+        selected_camera_ids = list(dict.fromkeys(fields["camera_ids"] or []))
+        fields["camera_ids"] = selected_camera_ids
+        fields["camera_id"] = (
+            selected_camera_ids[0] if len(selected_camera_ids) == 1 else None
+        )
     set_clauses, params = [], []
     for key, value in fields.items():
         params.append(value)

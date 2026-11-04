@@ -615,10 +615,12 @@
     <form id="ruleForm">
       <input type="hidden" id="ruleId" />
       <label>RULE NAME<input type="text" id="ruleName" required placeholder="Substation Helmet Escalation" /></label>
-      <div class="form-row">
-      <label>CAMERA SOURCE<select id="ruleCameraId"><option value="">All available cameras</option></select></label>
-        <label>SECTOR (blank=any)<input type="text" id="ruleZone" placeholder="Substation" /></label>
+      <div class="rule-camera-picker">
+        <div class="rule-camera-picker-heading"><label>CAMERA SOURCES</label><span id="ruleCameraSelectionCount">All cameras</span></div>
+        <p>Select one or more cameras. Leave all unchecked to apply this rule to every camera.</p>
+        <div id="ruleCameraOptions" class="rule-camera-options"></div>
       </div>
+      <label>SECTOR (blank=any)<input type="text" id="ruleZone" placeholder="Substation" /></label>
       <div class="form-row">
         <label>VIOLATION TYPE
             <select id="ruleViolationType">

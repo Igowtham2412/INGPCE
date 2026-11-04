@@ -349,9 +349,10 @@ The browser client is a static application in `dashboard/`:
 ### Camera-scoped alert rules
 
 Alert Rules supports creating one rule for any available enabled camera through
-the camera selector. A rule can target:
+the camera selector. Select multiple cameras independently with the rule's
+camera-source checklist. A rule can target:
 
-- one registered camera or all available cameras;
+- any combination of registered cameras, or all cameras when none are selected;
 - one violation type;
 - an optional sector/zone;
 - a configurable cooldown;
@@ -360,7 +361,9 @@ the camera selector. A rule can target:
 - enabled or disabled state.
 
 The selector is populated from the live camera registry rather than requiring
-operators to type an identifier. Deleting or disabling a camera does not
+operators to type identifiers. Selected cameras are saved as `camera_ids`; a
+database migration preserves existing single-camera `camera_id` rules.
+Deleting or disabling a camera does not
 silently rewrite existing rules; review affected rules before disabling a
 source. Rule changes are persisted through `POST`, `PUT`, and `DELETE
 /api/rules` endpoints and the alert engine refreshes its in-memory rules after

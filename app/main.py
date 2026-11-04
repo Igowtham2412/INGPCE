@@ -2616,6 +2616,7 @@ async def review_violation(violation_id: int, review: ViolationReviewIn, request
 class RuleIn(BaseModel):
     name: str
     camera_id: str | None = None
+    camera_ids: list[str] = Field(default_factory=list, max_length=100)
     zone: str | None = None
     violation_type: Literal[
         "no_helmet", "no_arc_flash_suit", "phone_detected",
@@ -2632,6 +2633,7 @@ class RuleIn(BaseModel):
 class RuleUpdate(BaseModel):
     name: str | None = None
     camera_id: str | None = None
+    camera_ids: list[str] | None = Field(default=None, max_length=100)
     zone: str | None = None
     violation_type: Literal[
         "no_helmet", "no_arc_flash_suit", "phone_detected",
@@ -2654,11 +2656,19 @@ async def get_rules():
 
 @app.post("/api/rules")
 async def add_rule(rule: RuleIn):
-    if rule.camera_id and not await db.get_camera(rule.camera_id):
-        raise HTTPException(status_code=400, detail="Selected camera does not exist")
+    camera_ids = list(dict.fromkeys(rule.camera_ids or ([] if not rule.camera_id else [rule.camera_id])))
+    if camera_ids:
+        available_ids = {camera["camera_id"] for camera in await db.list_cameras()}
+        unknown_ids = sorted(set(camera_ids) - available_ids)
+        if unknown_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Selected camera(s) do not exist: {', '.join(unknown_ids)}",
+            )
     created = await db.create_rule(
-        rule.name, rule.camera_id, rule.zone, rule.violation_type, rule.min_severity,
+        rule.name, None, rule.zone, rule.violation_type, rule.min_severity,
         rule.channels, rule.cooldown_seconds, rule.email_recipients, rule.enabled,
+        camera_ids=camera_ids,
     )
     await _alert_manager.rules_engine.force_refresh()
     return created
@@ -2666,9 +2676,19 @@ async def add_rule(rule: RuleIn):
 
 @app.put("/api/rules/{rule_id}")
 async def edit_rule(rule_id: int, rule: RuleUpdate):
-    if rule.camera_id and not await db.get_camera(rule.camera_id):
-        raise HTTPException(status_code=400, detail="Selected camera does not exist")
-    fields = {k: v for k, v in rule.model_dump().items() if v is not None}
+    fields = {k: v for k, v in rule.model_dump(exclude_unset=True).items() if v is not None}
+    if "camera_ids" in fields:
+        fields["camera_ids"] = list(dict.fromkeys(fields["camera_ids"]))
+    elif fields.get("camera_id"):
+        fields["camera_ids"] = [fields["camera_id"]]
+    if fields.get("camera_ids"):
+        available_ids = {camera["camera_id"] for camera in await db.list_cameras()}
+        unknown_ids = sorted(set(fields["camera_ids"]) - available_ids)
+        if unknown_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Selected camera(s) do not exist: {', '.join(unknown_ids)}",
+            )
     updated = await db.update_rule(rule_id, **fields)
     if not updated:
         raise HTTPException(status_code=404, detail="Rule not found")

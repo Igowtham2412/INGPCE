@@ -60,10 +60,13 @@ class RulesEngine:
         return rule_type.lower() == event_type.lower()
 
     @staticmethod
-    def _camera_matches(rule_camera: str | None, event_camera: str) -> bool:
-        if not rule_camera:
+    def _camera_matches(rule: dict, event_camera: str) -> bool:
+        rule_cameras = rule.get("camera_ids") or []
+        if not rule_cameras and rule.get("camera_id"):
+            rule_cameras = [rule["camera_id"]]
+        if not rule_cameras:
             return True
-        return rule_camera == event_camera
+        return event_camera in rule_cameras
 
     async def evaluate(self, event: ViolationEvent) -> list[MatchedAlert]:
         await self._refresh_if_needed()
@@ -73,7 +76,7 @@ class RulesEngine:
         for rule in self._rules_cache:
             if event.severity < rule.get("min_severity", 1):
                 continue
-            if not self._camera_matches(rule.get("camera_id"), event.camera_id):
+            if not self._camera_matches(rule, event.camera_id):
                 continue
             if not self._zone_matches(rule.get("zone"), event.zone):
                 continue

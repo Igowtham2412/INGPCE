@@ -318,22 +318,43 @@ async function loadCameras() {
 }
 
 function populateRuleCameraSelect() {
-  const select = document.getElementById("ruleCameraId");
-  if (!select) return;
-  const currentValue = select.value;
-  select.innerHTML = '<option value="">All available cameras</option>';
-  state.cameras
+  const container = document.getElementById("ruleCameraOptions");
+  if (!container) return;
+  const selected = new Set(
+    [...container.querySelectorAll('input[name="ruleCameraId"]:checked')]
+      .map((input) => input.value),
+  );
+  container.replaceChildren();
+  const cameras = state.cameras
+    .filter((camera) => camera.enabled)
     .slice()
-    .sort((a, b) => String(a.name).localeCompare(String(b.name)))
-    .forEach((camera) => {
-      const option = document.createElement("option");
-      option.value = camera.camera_id;
-      option.textContent = `${camera.name} · ${camera.camera_id}${camera.enabled ? "" : " · disabled"}`;
-      option.disabled = !camera.enabled;
-      select.appendChild(option);
-    });
-  select.value = state.cameras.some((camera) => camera.camera_id === currentValue)
-    ? currentValue : "";
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  if (!cameras.length) {
+    container.innerHTML = '<span class="rule-camera-empty">No enabled cameras are available.</span>';
+    return;
+  }
+  cameras.forEach((camera) => {
+    const label = document.createElement("label");
+    label.className = "rule-camera-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.name = "ruleCameraId";
+    checkbox.value = camera.camera_id;
+    checkbox.checked = selected.has(camera.camera_id);
+    const text = document.createElement("span");
+    text.innerHTML = `<strong>${escapeHtml(camera.name)}</strong><small>${escapeHtml(camera.camera_id)} · ${escapeHtml(camera.area_group_name || "Unassigned")}</small>`;
+    label.append(checkbox, text);
+    container.appendChild(label);
+  });
+  updateRuleCameraSelectionCount();
+}
+
+function updateRuleCameraSelectionCount() {
+  const selectedCount = document.querySelectorAll(
+    '#ruleCameraOptions input[name="ruleCameraId"]:checked',
+  ).length;
+  const count = document.getElementById("ruleCameraSelectionCount");
+  if (count) count.textContent = selectedCount ? `${selectedCount} selected` : "All cameras";
 }
 
 function updateCameraFleetSummary() {
@@ -2740,20 +2761,16 @@ function setupPowerAutomateTest() {
     .addEventListener("click", loadAlertViolationGallery);
   document.getElementById("btnSelectAllAlertEvidence")
     .addEventListener("click", () => {
-      document.querySelectorAll('input[name="alertViolation"]').forEach((input) => {
-        input.checked = true;
-        state.alertSelectedIds.add(Number(input.value));
-        input.closest(".alert-select-card")?.setAttribute("aria-pressed", "true");
-      });
+      document.querySelectorAll(".alert-select-card").forEach((card) =>
+        state.alertSelectedIds.add(Number(card.dataset.alertImage)),
+      );
+      syncAlertCardSelection();
       updateAlertSelectionSummary();
     });
   document.getElementById("btnClearAlertEvidence")
     .addEventListener("click", () => {
       state.alertSelectedIds.clear();
-      document.querySelectorAll('input[name="alertViolation"]').forEach((input) => {
-        input.checked = false;
-        input.closest(".alert-select-card")?.setAttribute("aria-pressed", "false");
-      });
+      syncAlertCardSelection();
       updateAlertSelectionSummary();
     });
   document.getElementById("alertGalleryType")
@@ -2765,14 +2782,6 @@ function setupPowerAutomateTest() {
   document.getElementById("alertGallerySort")
     .addEventListener("change", renderAlertViolationGallery);
   const gallery = document.getElementById("alertViolationGallery");
-  gallery.addEventListener("change", (event) => {
-    const input = event.target.closest('input[name="alertViolation"]');
-    if (!input) return;
-    if (input.checked) state.alertSelectedIds.add(Number(input.value));
-    else state.alertSelectedIds.delete(Number(input.value));
-    input.closest(".alert-select-card")?.setAttribute("aria-pressed", String(input.checked));
-    updateAlertSelectionSummary();
-  });
   loadAlertViolationGallery();
 }
 
@@ -2801,31 +2810,21 @@ async function loadAlertViolationGallery() {
     gallery.onclick = (event) => {
       const card = event.target.closest(".alert-select-card");
       if (!card) return;
+      const selectButton = event.target.closest("[data-alert-select]");
+      if (selectButton) {
+        const incidentId = Number(selectButton.dataset.alertSelect);
+        if (state.alertSelectedIds.has(incidentId)) state.alertSelectedIds.delete(incidentId);
+        else state.alertSelectedIds.add(incidentId);
+        syncAlertCardSelection();
+        updateAlertSelectionSummary();
+        return;
+      }
       const image = card.querySelector("img");
       if (event.target.closest("img")) {
         if (image) openViolationLightbox(image.src);
-        return;
-      }
-      if (event.target.closest("input, label, button, a")) return;
-      const input = card.querySelector('input[name="alertViolation"]');
-      if (input) {
-        input.checked = !input.checked;
-        input.dispatchEvent(new Event("change", { bubbles: true }));
       }
     };
-    gallery.onkeydown = (event) => {
-      const card = event.target.closest(".alert-select-card");
-      if (card && !event.target.closest("input, button, a")
-          && (event.key === "Enter" || event.key === " ")) {
-        event.preventDefault();
-        const input = card.querySelector('input[name="alertViolation"]');
-        if (input) {
-          input.checked = !input.checked;
-          card.setAttribute("aria-pressed", String(input.checked));
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-      }
-    };
+    gallery.onkeydown = null;
     updateAlertSelectionSummary();
   } catch (error) {
     gallery.innerHTML = `<div class="error-state">${escapeHtml(error.message)}</div>`;
@@ -2848,22 +2847,36 @@ function renderAlertViolationGallery() {
     `${rows.length} evidence item${rows.length === 1 ? "" : "s"} · ${state.alertSelectedIds.size} selected`;
   gallery.innerHTML = rows.length ? rows.map((row) => {
       const label = formatViolationLabel(row.violation_type);
-      return `<article class="violation-card alert-select-card" data-alert-image="${row.id}" role="group" aria-pressed="${state.alertSelectedIds.has(Number(row.id))}" aria-label="Evidence image ${row.id}">
+      return `<article class="violation-card alert-select-card${state.alertSelectedIds.has(Number(row.id)) ? " selected" : ""}" data-alert-image="${row.id}" role="group" aria-label="Evidence image ${row.id}">
         <div class="thumb-wrap">
           <img src="${row.snapshot_url}" alt="${escapeHtml(label)}" loading="lazy">
           <span class="thumb-badge">${escapeHtml(label.toUpperCase())}</span>
-          <label class="alert-select-control" title="Select this image">
-            <input type="checkbox" name="alertViolation" value="${row.id}" ${state.alertSelectedIds.has(Number(row.id)) ? "checked" : ""}>
-            <span>SELECT</span>
-          </label>
         </div>
         <div class="card-meta">
           <div class="card-cam">${escapeHtml(row.camera_name || row.camera_id)}</div>
           <div class="card-time">${escapeHtml(row.zone || "Unassigned")} · ${escapeHtml(new Date(row.detected_at).toLocaleString())}</div>
+          <button type="button" class="alert-evidence-select${state.alertSelectedIds.has(Number(row.id)) ? " selected" : ""}" data-alert-select="${row.id}" aria-pressed="${state.alertSelectedIds.has(Number(row.id))}">
+            <span class="alert-select-indicator" aria-hidden="true">${state.alertSelectedIds.has(Number(row.id)) ? "✓" : "+"}</span>
+            <span>${state.alertSelectedIds.has(Number(row.id)) ? "SELECTED FOR DISPATCH" : "ADD TO DISPATCH"}</span>
+          </button>
         </div>
       </article>`;
     }).join("") : '<div class="empty-state">No evidence matches the current filters.</div>';
+  syncAlertCardSelection();
   updateAlertSelectionSummary();
+}
+
+function syncAlertCardSelection() {
+  document.querySelectorAll(".alert-select-card").forEach((card) => {
+    const selected = state.alertSelectedIds.has(Number(card.dataset.alertImage));
+    card.classList.toggle("selected", selected);
+    const button = card.querySelector("[data-alert-select]");
+    if (!button) return;
+    button.classList.toggle("selected", selected);
+    button.setAttribute("aria-pressed", String(selected));
+    button.querySelector(".alert-select-indicator").textContent = selected ? "✓" : "+";
+    button.lastElementChild.textContent = selected ? "SELECTED FOR DISPATCH" : "ADD TO DISPATCH";
+  });
 }
 
 function setupAlertDeliveryDashboard() {
@@ -2928,13 +2941,13 @@ async function sendPowerAutomateTest() {
     status.textContent = `Power Automate test failed: ${error.message}`;
     status.className = "error";
   } finally {
-    button.disabled = false;
+    button.disabled = state.alertSelectedIds.size === 0;
   }
 }
 
 function updateAlertSelectionSummary() {
   const selectedCount = state.alertSelectedIds.size;
-  const totalCount = document.querySelectorAll('input[name="alertViolation"]').length;
+  const totalCount = document.querySelectorAll(".alert-select-card").length;
   const button = document.getElementById("btnTestPowerAutomate");
   if (button) {
     button.textContent = selectedCount ? `SEND ${selectedCount} SELECTED` : "SEND SELECTED";
@@ -2994,7 +3007,16 @@ async function refreshRules() {
   state.rules.forEach((rule) => {
     const tr = document.createElement("tr");
     const channels = (rule.channels || []).map(c => `<span class="chan-pill">${escapeHtml(c)}</span>`).join("");
-    tr.innerHTML = `<td>${escapeHtml(rule.name)}</td><td>${rule.camera_id || "<span style='color:var(--text-dim)'>any</span>"}</td><td>${rule.zone || "<span style='color:var(--text-dim)'>any</span>"}</td><td>${rule.violation_type || "<span style='color:var(--text-dim)'>any</span>"}</td><td>${channels}</td><td>${rule.cooldown_seconds}s</td><td><span class="badge ${rule.enabled ? "on" : "off"}">${rule.enabled ? "ENABLED" : "DISABLED"}</span></td><td><button class="icon-btn" data-edit="${rule.id}">Edit</button><button class="icon-btn danger" data-delete="${rule.id}">Delete</button></td>`;
+    const cameraIds = rule.camera_ids?.length
+      ? rule.camera_ids
+      : rule.camera_id ? [rule.camera_id] : [];
+    const cameraNames = cameraIds.length
+      ? cameraIds.map((id) => {
+        const camera = state.cameras.find((item) => item.camera_id === id);
+        return escapeHtml(camera ? camera.name : id);
+      }).join(", ")
+      : "<span style='color:var(--text-dim)'>All cameras</span>";
+    tr.innerHTML = `<td>${escapeHtml(rule.name)}</td><td>${cameraNames}</td><td>${escapeHtml(rule.zone || "any")}</td><td>${escapeHtml(rule.violation_type || "any")}</td><td>${channels}</td><td>${rule.cooldown_seconds}s</td><td><span class="badge ${rule.enabled ? "on" : "off"}">${rule.enabled ? "ENABLED" : "DISABLED"}</span></td><td><button class="icon-btn" data-edit="${rule.id}">Edit</button><button class="icon-btn danger" data-delete="${rule.id}">Delete</button></td>`;
     tbody.appendChild(tr);
   });
   tbody.querySelectorAll("[data-edit]").forEach(btn => btn.addEventListener("click", () => openRuleModal(Number(btn.dataset.edit))));
@@ -3016,6 +3038,7 @@ function setupRuleModal() {
       window.alert(`Could not save alert rule: ${error.message}`);
     }
   });
+  document.getElementById("ruleCameraOptions").addEventListener("change", updateRuleCameraSelectionCount);
 }
 
 function openRuleModal(ruleId) {
@@ -3024,7 +3047,14 @@ function openRuleModal(ruleId) {
   document.getElementById("ruleModalTitle").textContent = rule ? "Edit Alert Rule" : "New Alert Rule";
   document.getElementById("ruleId").value = rule ? rule.id : "";
   document.getElementById("ruleName").value = rule ? rule.name : "";
-  document.getElementById("ruleCameraId").value = rule ? (rule.camera_id || "") : "";
+  populateRuleCameraSelect();
+  const selectedCameraIds = rule?.camera_ids?.length
+    ? rule.camera_ids
+    : rule?.camera_id ? [rule.camera_id] : [];
+  document.querySelectorAll('#ruleCameraOptions input[name="ruleCameraId"]').forEach((input) => {
+    input.checked = selectedCameraIds.includes(input.value);
+  });
+  updateRuleCameraSelectionCount();
   document.getElementById("ruleZone").value = rule ? (rule.zone || "") : "";
   document.getElementById("ruleViolationType").value = rule?.violation_type || "no_helmet";
   document.getElementById("ruleCooldown").value = rule ? rule.cooldown_seconds : 300;
@@ -3043,7 +3073,8 @@ async function saveRule() {
   }
   const payload = {
     name: document.getElementById("ruleName").value,
-    camera_id: document.getElementById("ruleCameraId").value || null,
+    camera_ids: [...document.querySelectorAll('#ruleCameraOptions input[name="ruleCameraId"]:checked')]
+      .map((input) => input.value),
     zone: document.getElementById("ruleZone").value || null,
     violation_type: document.getElementById("ruleViolationType").value || null,
     cooldown_seconds: parseInt(document.getElementById("ruleCooldown").value, 10),
