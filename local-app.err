@@ -1,4 +1,4 @@
-INFO:     Started server process [30204]
+INFO:     Started server process [29200]
 INFO:     Waiting for application startup.
 ======================================================================
 INGPCE PPE COMPLIANCE SYSTEM - STARTING UP
@@ -18,5 +18,198 @@ INFO:     Application startup complete.
 INFO:     Uvicorn running on http://127.0.0.1:8080 (Press CTRL+C to quit)
 WARNI [ppe.compliance] [CAM05] model is missing explicit violation classes ['no_arc_flash_suit']; affected PPE status will be unknown until the model/config is corrected
 WARNI [ppe.compliance] [CAM07] model is missing explicit violation classes ['no_arc_flash_suit', 'no_boots']; affected PPE status will be unknown until the model/config is corrected
-INFO:     127.0.0.1:64911 - "WebSocket /ws/events" [accepted]
+INFO:     127.0.0.1:64587 - "WebSocket /ws/events" [accepted]
 INFO:     connection open
+WARNI [ppe.stream] [CAM06] connection failed, retrying in 2.0s
+[hevc @ 000002a00b50f480] PPS id out of range: 0
+[hevc @ 000002a00b50f480] PPS id out of range: 0
+[hevc @ 000002a00b50f480] PPS id out of range: 0
+[hevc @ 000002a00b50f480] PPS id out of range: 0
+[hevc @ 000002a00b554300] Could not find ref with POC 8
+[hevc @ 000002a055b38080] PPS id out of range: 0
+[hevc @ 000002a055b38080] PPS id out of range: 0
+[hevc @ 000002a055b38080] PPS id out of range: 0
+[hevc @ 000002a055b38080] PPS id out of range: 0
+[hevc @ 000002a055b38080] Could not find ref with POC 13
+[rtsp @ 000002a05b1385c0] method DESCRIBE failed: 404 Not Found
+[hevc @ 000002a0586f0080] PPS id out of range: 0
+[hevc @ 000002a0586f0080] PPS id out of range: 0
+[hevc @ 000002a0586f0080] PPS id out of range: 0
+[hevc @ 000002a0586f0080] PPS id out of range: 0
+[hevc @ 000002a0789ffb80] Could not find ref with POC 47
+[hevc @ 000002a0789fc080] PPS id out of range: 0
+[hevc @ 000002a0789fc080] PPS id out of range: 0
+[hevc @ 000002a0789fc080] PPS id out of range: 0
+[hevc @ 000002a0789fc080] PPS id out of range: 0
+[hevc @ 000002a07bdfd080] Could not find ref with POC 47
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07beff400] PPS id out of range: 0
+[hevc @ 000002a07befe540] Could not find ref with POC 13
+[hevc @ 000002a07e8fde00] PPS id out of range: 0
+[hevc @ 000002a07e8fde00] PPS id out of range: 0
+[hevc @ 000002a07e8fde00] PPS id out of range: 0
+[hevc @ 000002a07e8fde00] PPS id out of range: 0
+[hevc @ 000002a07e8fde00] PPS id out of range: 0
+[hevc @ 000002a07e8fde00] PPS id out of range: 0
+[hevc @ 000002a07e8fde00] PPS id out of range: 0
+[hevc @ 000002a07e8fde00] PPS id out of range: 0
+[hevc @ 000002a07e8ff400] Could not find ref with POC 8
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a08WARNI [ppe.stream] [CAM16] connection failed, retrying in 2.0s
+WARNI [ppe.stream] [CAM06] connection failed, retrying in 4.0s
+WARNI [ppe.stream] [CAM16] connection failed, retrying in 4.0s
+WARNI [ppe.stream] [CAM05] connection failed, retrying in 2.0s
+INFO:     127.0.0.1:54504 - "WebSocket /ws/video?camera_ids=CAM01%2CCAM02%2CCAM05%2CCAM06%2CCAM07%2CCAM08%2CCAM09%2CCAM10%2CCAM12%2CCAM14%2CCAM15%2CCAM16%2CCAM17%2CCAM20" [accepted]
+INFO:     connection open
+WARNI [ppe.stream] [CAM05] connection failed, retrying in 4.0s
+WARNI [ppe.stream] [CAM06] connection failed, retrying in 8.0s
+WARNI [ppe.stream] [CAM16] connection failed, retrying in 8.0s
+WARNI [ppe.stream] [CAM05] connection failed, retrying in 8.0s
+1cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cfe540] PPS id out of range: 0
+[hevc @ 000002a081cff080] Could not find ref with POC 30
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfc540] PPS id out of range: 0
+[hevc @ 000002a088dfaf40] Could not find ref with POC 38
+[rtsp @ 000002a0d9bfc8c0] method DESCRIBE failed: 404 Not Found
+[hevc @ 000002a088bfeb80] PPS id out of range: 0
+[hevc @ 000002a088bfeb80] PPS id out of range: 0
+[hevc @ 000002a088bfeb80] PPS id out of range: 0
+[hevc @ 000002a088bfbf40] Could not find ref with POC 30
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf96c0] PPS id out of range: 0
+[hevc @ 000002a088bf8080] Could not find ref with POC 5
+[rtsp @ 000002a05b139080] method DESCRIBE failed: 404 Not Found
+[rtsp @ 000002a05b139080] method DESCRIBE failed: 404 Not Found
+[rtsp @ 000002a05b1385c0] method DESCRIBE failed: 404 Not Found
+[rtsp @ 000002a05b139080] method DESCRIBE failed: 404 Not Found
+[rtsp @ 000002a05b139080] method DESCRIBE failed: 404 Not Found
+[rtsp @ 000002a05b1385c0] method DESCRIBE failed: 404 Not Found
+[rtsp @ 000002a05b138e00] method DESCRIBE failed: 404 Not Found
+[ WARN:0@22.139] global cap_ffmpeg_impl.hpp:453 _opencv_ffmpeg_interrupt_callback Stream timeout triggered after 3031.748000 ms
+WARNI [ppe.stream] [CAM06] connection failed, retrying in 16.0s
+WARNI [ppe.stream] [CAM16] connection failed, retrying in 16.0s
+WARNI [ppe.stream] [CAM05] connection failed, retrying in 16.0s
+WARNI [ppe.stream] [CAM06] connection failed, retrying in 32.0s
+[rtsp @ 000002a05b139080] method DESCRIBE failed: 404 Not Found
+[rtsp @ 000002a05b138e00] method DESCRIBE failed: 404 Not Found
+[hevc @ 000002a088bfd900] Could not find ref with POC 5
+[rtsp @ 000002a05b1385c0] method DESCRIBE failed: 404 Not Found
+[rtsp @ 000002a05b139080] method DESCRIBE failed: 404 Not Found
+[ WARN:1@40.215] global cap_ffmpeg_impl.hpp:453 _opencv_ffmpeg_interrupt_callback Stream timeout triggered after 3057.110000 ms
+WARNI [ppe.stream] [CAM16] connection failed, retrying in 32.0s
+WARNI [ppe.stream] [CAM05] connection failed, retrying in 32.0s
+[rtsp @ 000002a05b1385c0] method DESCRIBE failed: 404 Not Found
+[rtsp @ 000002a05b1385c0] method DESCRIBE failed: 404 Not Found
+[ WARN:1@43.286] global cap_ffmpeg_impl.hpp:453 _opencv_ffmpeg_interrupt_callback Stream timeout triggered after 3069.472000 ms
+[ WARN:1@46.332] global cap_ffmpeg_impl.hpp:453 _opencv_ffmpeg_interrupt_callback Stream timeout triggered after 3040.540000 ms
+WARNI [ppe.stream] [CAM20] frame capture stalled or failed; reconnecting
+[ WARN:1@51.438] global cap_ffmpeg_impl.hpp:453 _opencv_ffmpeg_interrupt_callback Stream timeout triggered after 3097.558000 ms
+WARNI [ppe.stream] [CAM20] connection failed, retrying in 4.0s
