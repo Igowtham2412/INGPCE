@@ -929,6 +929,22 @@ body::after { content: none; }
   .intel-panel { max-height: 400px; }
 }
 
+/* Camera health uses unmistakable operational status colors. */
+.status-legend i.online,
+.status-cell.online { background: #39d98a; box-shadow: 0 0 8px rgba(57, 217, 138, .36); }
+.status-legend i.partial,
+.status-cell.partial {
+  background-image: linear-gradient(135deg, #f3c969 25%, #b8872e 25%, #b8872e 50%, #f3c969 50%, #f3c969 75%, #b8872e 75%);
+  background-size: 8px 8px;
+  box-shadow: 0 0 8px rgba(243, 201, 105, .24);
+}
+.status-legend i.offline,
+.status-cell.offline { background: #ff5f68; box-shadow: 0 0 8px rgba(255, 95, 104, .34); }
+.status-legend i.unknown,
+.status-cell.unknown { background: #586466; }
+.status-log-event.online { color: #39d98a; }
+.status-log-event.offline { color: #ff5f68; }
+
 /* ===== COHESIVE COMMAND-CENTER FINISH ===== */
 :root { color-scheme: dark; }
 ::selection { color: #101010; background: var(--accent-cyan); }
