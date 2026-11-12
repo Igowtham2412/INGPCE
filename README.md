@@ -155,11 +155,15 @@ configuration outside the dashboard.
 
 ### Git controls
 
-The Settings tab includes Git status, commit, and push actions. They are
-available only to authenticated administrators:
+The Settings tab includes Git status, commit, push, and commit-author controls.
+They are available only to authenticated administrators. The author editor
+updates repository-local `user.name` and `user.email` in `.git/config`; it
+does not change the credential used to authenticate pushes. GitHub credentials
+are managed separately by Git Credential Manager:
 
 1. **Refresh Status** shows the current branch and every changed, deleted, or
-   untracked path reported by Git.
+   untracked path reported by Git, along with the configured commit author,
+   origin repository, credential helper, and GitHub CLI account when available.
 2. **Commit** requires a commit message, the exact phrase `COMMIT ALL CHANGES`,
    and a second confirmation. It stages and commits all non-ignored changes in
    the repository. Review the complete path list first; do not commit secrets,
@@ -171,7 +175,18 @@ available only to authenticated administrators:
 These controls run fixed Git commands in the repository; the browser cannot
 choose a shell command, remote, or branch. They do not replace normal code
 review and release procedures. Ensure Git credentials and remote permissions
-are configured for the account running the application.
+are configured for the account running the application. Git's `user.name` and
+`user.email` are commit-author metadata, and the owner shown in the origin URL
+is the repository owner; neither necessarily identifies the account used to
+authenticate. Git Credential Manager does not reveal its account through Git
+configuration, so the dashboard does not claim that identity unless a local
+GitHub CLI login can be detected.
+
+To switch the account used for pushes on Windows, review the GitHub entry in
+Windows Credential Manager and remove only that entry if you intend to sign in
+as another account. The next Git operation may open Git Credential Manager to
+authenticate again. Never enter a password or personal access token in the
+dashboard.
 
 ## Application configuration
 
@@ -207,6 +222,7 @@ The settings and Git endpoints are administrative and require authentication:
 |---|---|---|
 | `GET` / `PUT` | `/api/app-settings` | Read or persist supported non-secret settings |
 | `GET` | `/api/git/status` | Read current branch and changed paths |
+| `PUT` | `/api/git/identity` | Update repository-local commit author name/email |
 | `POST` | `/api/git/commit` | Commit all non-ignored repository changes after confirmation |
 | `POST` | `/api/git/push` | Push current `HEAD` to `origin` after confirmation |
 

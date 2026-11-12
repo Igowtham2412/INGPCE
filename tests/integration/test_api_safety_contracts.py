@@ -167,6 +167,7 @@ class ApiSafetyContractsTests(unittest.TestCase):
         self.assertEqual(_minimum_role("/api/auth/users/4", "DELETE"), "admin")
         self.assertEqual(_minimum_role("/api/app-settings", "GET"), "admin")
         self.assertEqual(_minimum_role("/api/git/status", "GET"), "admin")
+        self.assertEqual(_minimum_role("/api/git/identity", "PUT"), "admin")
 
     def test_application_settings_and_git_are_blocked_without_authentication(self):
         settings = self.client.get("/api/app-settings")
@@ -175,10 +176,15 @@ class ApiSafetyContractsTests(unittest.TestCase):
             "/api/git/commit",
             json={"message": "test", "confirmation": "COMMIT ALL CHANGES"},
         )
+        identity = self.client.put(
+            "/api/git/identity",
+            json={"name": "Safety Operator", "email": "operator@example.com"},
+        )
 
         self.assertEqual(settings.status_code, 403)
         self.assertEqual(git_status.status_code, 403)
         self.assertEqual(commit.status_code, 403)
+        self.assertEqual(identity.status_code, 403)
 
     def test_admin_can_load_safe_settings_and_persist_updates(self):
         admin_session = {
@@ -195,12 +201,30 @@ class ApiSafetyContractsTests(unittest.TestCase):
                 new=AsyncMock(return_value=admin_session),
             ),
             patch("app.main.settings_store.save_settings") as save_settings,
+            patch(
+                "app.main.git_operations.set_commit_identity",
+                return_value={
+                    "commit_name": "Safety Operator",
+                    "commit_email": "operator@example.com",
+                    "origin_repository": "github.com/owner/repo",
+                    "credential_helper": "manager",
+                    "github_cli_account": None,
+                },
+            ) as set_identity,
         ):
             settings = self.client.get("/api/app-settings")
             updated = self.client.put(
                 "/api/app-settings",
                 headers={"X-CSRF-Token": "test-csrf"},
                 json={"values": {"FRAME_SKIP": 4}},
+            )
+            identity = self.client.put(
+                "/api/git/identity",
+                headers={"X-CSRF-Token": "test-csrf"},
+                json={
+                    "name": "Safety Operator",
+                    "email": "operator@example.com",
+                },
             )
 
         self.assertEqual(settings.status_code, 200)
@@ -210,6 +234,11 @@ class ApiSafetyContractsTests(unittest.TestCase):
         self.assertEqual(updated.status_code, 200)
         self.assertTrue(updated.json()["restart_required"])
         save_settings.assert_called_once()
+        self.assertEqual(identity.status_code, 200)
+        self.assertTrue(identity.json()["updated"])
+        set_identity.assert_called_once_with(
+            "Safety Operator", "operator@example.com",
+        )
 
 
 if __name__ == "__main__":

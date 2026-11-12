@@ -3863,6 +3863,9 @@ function setupApplicationSettings() {
   document.getElementById("btnReloadApplicationSettings").addEventListener("click", loadApplicationSettings);
   document.getElementById("applicationSettingsForm").addEventListener("submit", saveApplicationSettings);
   document.getElementById("btnRefreshGitStatus").addEventListener("click", loadGitStatus);
+  const gitIdentityForm = document.getElementById("gitIdentityForm");
+  gitIdentityForm.addEventListener("input", () => { gitIdentityForm.dataset.dirty = "true"; });
+  gitIdentityForm.addEventListener("submit", saveGitIdentity);
   document.getElementById("gitCommitForm").addEventListener("submit", commitGitChanges);
   document.getElementById("gitPushForm").addEventListener("submit", pushGitChanges);
 }
@@ -3950,6 +3953,7 @@ async function saveApplicationSettings(event) {
 
 async function loadGitStatus() {
   const summary = document.getElementById("gitStatusSummary");
+  const connectionSummary = document.getElementById("gitConnectionSummary");
   const list = document.getElementById("gitChangeList");
   const pushButton = document.getElementById("btnGitPush");
   summary.textContent = "Checking Git status…";
@@ -3957,6 +3961,21 @@ async function loadGitStatus() {
     const response = await fetch("/api/git/status");
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+    const connection = result.connection || {};
+    const authorName = connection.commit_name || "Not configured";
+    const authorEmail = connection.commit_email ? ` &lt;${escapeHtml(connection.commit_email)}&gt;` : "";
+    const ghAccount = connection.github_cli_account || "Not detected";
+    const identityForm = document.getElementById("gitIdentityForm");
+    if (identityForm.dataset.dirty !== "true") {
+      document.getElementById("gitAuthorName").value = connection.commit_name || "";
+      document.getElementById("gitAuthorEmail").value = connection.commit_email || "";
+    }
+    connectionSummary.innerHTML = `
+      <div><span>GitHub CLI account</span><strong>${escapeHtml(ghAccount)}</strong><small>${connection.github_cli_account ? "Detected from the local GitHub CLI login." : "Git configuration does not expose the credential account."}</small></div>
+      <div><span>Origin repository</span><strong>${escapeHtml(connection.origin_repository || "Not configured")}</strong><small>Repository target; its owner may differ from the account used to authenticate.</small></div>
+      <div><span>Commit author</span><strong>${escapeHtml(authorName)}${authorEmail}</strong><small>Identity recorded in new commits.</small></div>
+      <div><span>Credential helper</span><strong>${escapeHtml(connection.credential_helper || "Not configured")}</strong><small>Provides Git credentials for remote operations.</small></div>
+    `;
     summary.textContent = `Branch: ${result.branch} · Remote: ${result.remote}${result.clean ? " · Working tree clean" : ` · ${result.changes.length} changed path(s)`}`;
     list.innerHTML = result.changes.length
       ? result.changes.map((item) => `<li><code>${escapeHtml(item)}</code></li>`).join("")
@@ -3965,9 +3984,41 @@ async function loadGitStatus() {
     pushButton.disabled = !result.clean;
   } catch (error) {
     summary.textContent = `Could not load Git status: ${error.message}`;
+    connectionSummary.textContent = "Could not read Git account details.";
     list.innerHTML = '<li class="settings-error">Git actions are unavailable until status can be read.</li>';
     document.getElementById("btnGitCommit").disabled = true;
     pushButton.disabled = true;
+  }
+}
+
+async function saveGitIdentity(event) {
+  event.preventDefault();
+  const status = document.getElementById("gitIdentityStatus");
+  const button = document.getElementById("btnSaveGitIdentity");
+  const form = document.getElementById("gitIdentityForm");
+  button.disabled = true;
+  status.textContent = "Saving repository commit identity…";
+  status.className = "loading";
+  try {
+    const response = await fetch("/api/git/identity", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: document.getElementById("gitAuthorName").value,
+        email: document.getElementById("gitAuthorEmail").value,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+    form.dataset.dirty = "";
+    status.textContent = result.message;
+    status.className = "success";
+    await loadGitStatus();
+  } catch (error) {
+    status.textContent = `Could not save commit identity: ${error.message}`;
+    status.className = "error";
+  } finally {
+    button.disabled = false;
   }
 }
 

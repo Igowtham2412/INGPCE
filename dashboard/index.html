@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>INGPCE — SURVEILLANCE OPERATIONS CENTER</title>
-<link rel="stylesheet" href="/static/style.css?v=20261112-app-settings" />
+<link rel="stylesheet" href="/static/style.css?v=20261112-git-identity" />
 </head>
 <body>
 
@@ -616,6 +616,21 @@
             <button type="button" class="ops-btn-sec" id="btnRefreshGitStatus">REFRESH STATUS</button>
           </div>
           <p>Review every listed path before committing. Commit stages all non-ignored changes in this repository. Push sends the current branch to the fixed <code>origin</code> remote.</p>
+          <div class="git-connection-summary" id="gitConnectionSummary" aria-live="polite">Loading Git account details…</div>
+          <section class="git-identity-editor">
+            <h4>Commit author identity</h4>
+            <p>This changes the name and email recorded on future commits in this repository only. It does not change the account used to authenticate a push.</p>
+            <form id="gitIdentityForm">
+              <label>Author name<input id="gitAuthorName" type="text" maxlength="100" required /></label>
+              <label>Author email<input id="gitAuthorEmail" type="email" maxlength="254" required /></label>
+              <button type="submit" class="ops-btn-sec" id="btnSaveGitIdentity">SAVE COMMIT IDENTITY</button>
+            </form>
+            <p id="gitIdentityStatus" class="git-action-status" role="status" aria-live="polite"></p>
+          </section>
+          <div class="git-auth-guidance" id="gitAuthGuidance">
+            <strong>Changing the authenticated GitHub account</strong>
+            <p>Git Credential Manager controls push authentication; its account is not exposed here. To switch accounts, open Windows Credential Manager, remove only the GitHub credential, then push again and sign in with the intended account. Never enter a password or personal access token in this dashboard.</p>
+          </div>
           <div class="git-status-summary" id="gitStatusSummary" role="status" aria-live="polite">Git status has not been loaded.</div>
           <ul class="git-change-list" id="gitChangeList"><li class="empty-state">No status loaded.</li></ul>
           <div class="git-action-grid">
@@ -794,6 +809,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20261112-app-settings"></script>
+<script src="/static/app.js?v=20261112-git-identity"></script>
 </body>
 </html>

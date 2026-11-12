@@ -52,8 +52,12 @@ class DashboardUnauthenticatedSmokeTests(unittest.TestCase):
         self.assertIn('id="applicationSettingsForm"', markup)
         self.assertIn('id="gitCommitConfirmation"', markup)
         self.assertIn('id="gitPushConfirmation"', markup)
+        self.assertIn('id="gitConnectionSummary"', markup)
+        self.assertIn('id="gitIdentityForm"', markup)
+        self.assertIn('id="gitAuthGuidance"', markup)
         self.assertIn(".app_settings.json", markup)
         self.assertIn("/api/app-settings", script)
+        self.assertIn("github_cli_account", script)
         self.assertIn("/api/git/commit", script)
         self.assertIn("/api/git/push", script)
 

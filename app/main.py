@@ -422,6 +422,19 @@ class GitPushIn(BaseModel):
     confirmation: str = Field(min_length=1, max_length=40)
 
 
+class GitIdentityIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    email: str = Field(min_length=3, max_length=254)
+
+    @model_validator(mode="after")
+    def validate_identity(self):
+        if self.name != self.name.strip() or any(ord(char) < 32 for char in self.name):
+            raise ValueError("Commit author name must not contain surrounding whitespace or controls")
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", self.email):
+            raise ValueError("Enter a valid commit author email address")
+        return self
+
+
 class FaceHistorianJobIn(BaseModel):
     date_from: datetime
     date_to: datetime
@@ -741,6 +754,22 @@ def read_git_status(request: Request):
         return git_operations.status()
     except git_operations.GitOperationError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+@app.put("/api/git/identity")
+def update_git_identity(payload: GitIdentityIn, request: Request):
+    _require_admin(request)
+    try:
+        connection = git_operations.set_commit_identity(
+            payload.name, payload.email,
+        )
+    except git_operations.GitOperationError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {
+        "updated": True,
+        "connection": connection,
+        "message": "Repository commit identity updated.",
+    }
 
 
 @app.post("/api/git/commit")

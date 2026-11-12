@@ -2837,6 +2837,60 @@ select option { color: var(--text-primary); background: #222; }
   background: rgba(4, 8, 15, .55);
   font: 12px var(--font-mono);
 }
+.git-connection-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0 8px;
+}
+.git-connection-summary > div {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid var(--border-panel);
+  border-radius: 8px;
+  background: rgba(4, 8, 15, .35);
+}
+.git-connection-summary span { color: var(--text-dim); font: 10px var(--font-tactical); }
+.git-connection-summary strong {
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font: 600 12px var(--font-mono);
+}
+.git-connection-summary small { color: var(--text-dim); font: 10px/1.4 var(--font-tactical); }
+.git-identity-editor, .git-auth-guidance {
+  margin: 10px 0;
+  padding: 12px;
+  border: 1px solid var(--border-panel);
+  border-radius: 9px;
+  background: rgba(4, 8, 15, .3);
+}
+.git-identity-editor h4, .git-auth-guidance strong {
+  color: var(--text-primary);
+  font: 650 12px var(--font-tactical);
+}
+.git-identity-editor > p, .git-auth-guidance p {
+  margin: 6px 0 10px;
+  color: var(--text-dim);
+  font: 11px/1.5 var(--font-tactical);
+}
+.git-identity-editor form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  align-items: end;
+  gap: 10px;
+}
+.git-identity-editor label {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: var(--text-secondary);
+  font: 11px var(--font-tactical);
+}
+.git-identity-editor input { width: 100%; min-height: 36px; padding: 7px 9px; }
+.git-identity-editor .git-action-status { margin-bottom: 0; }
+.git-auth-guidance { border-color: rgba(255, 202, 131, .2); }
 .git-change-list {
   max-height: 220px;
   overflow: auto;
@@ -2866,6 +2920,8 @@ select option { color: var(--text-primary); background: #222; }
 
 @media (max-width: 760px) {
   .application-settings-grid, .git-action-grid { grid-template-columns: 1fr; }
+  .git-connection-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .git-identity-editor form { grid-template-columns: 1fr; }
   .settings-actions { flex-wrap: wrap; }
   .settings-actions > span { flex-basis: 100%; }
 }
