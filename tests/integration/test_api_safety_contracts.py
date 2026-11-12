@@ -165,6 +165,51 @@ class ApiSafetyContractsTests(unittest.TestCase):
         from app.main import _minimum_role
         self.assertEqual(_minimum_role("/api/violations/cleanup", "POST"), "admin")
         self.assertEqual(_minimum_role("/api/auth/users/4", "DELETE"), "admin")
+        self.assertEqual(_minimum_role("/api/app-settings", "GET"), "admin")
+        self.assertEqual(_minimum_role("/api/git/status", "GET"), "admin")
+
+    def test_application_settings_and_git_are_blocked_without_authentication(self):
+        settings = self.client.get("/api/app-settings")
+        git_status = self.client.get("/api/git/status")
+        commit = self.client.post(
+            "/api/git/commit",
+            json={"message": "test", "confirmation": "COMMIT ALL CHANGES"},
+        )
+
+        self.assertEqual(settings.status_code, 403)
+        self.assertEqual(git_status.status_code, 403)
+        self.assertEqual(commit.status_code, 403)
+
+    def test_admin_can_load_safe_settings_and_persist_updates(self):
+        admin_session = {
+            "user_id": 1,
+            "email": "admin@example.com",
+            "role": "admin",
+            "csrf_token": "test-csrf",
+        }
+        self.client.cookies.set("ppe_session", "test-session")
+        with (
+            patch.object(config, "AUTH_ENABLED", True),
+            patch(
+                "app.main.auth.authenticate_token",
+                new=AsyncMock(return_value=admin_session),
+            ),
+            patch("app.main.settings_store.save_settings") as save_settings,
+        ):
+            settings = self.client.get("/api/app-settings")
+            updated = self.client.put(
+                "/api/app-settings",
+                headers={"X-CSRF-Token": "test-csrf"},
+                json={"values": {"FRAME_SKIP": 4}},
+            )
+
+        self.assertEqual(settings.status_code, 200)
+        self.assertNotIn("PG_PASSWORD", settings.text)
+        self.assertNotIn("FACE_ENCRYPTION_KEY", settings.text)
+        self.assertTrue(settings.json()["restart_required"])
+        self.assertEqual(updated.status_code, 200)
+        self.assertTrue(updated.json()["restart_required"])
+        save_settings.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -107,6 +107,62 @@ class FaceJobResultPersistenceTests(unittest.IsolatedAsyncioTestCase):
             insert,
         )
 
+    async def test_retention_deletes_individual_face_records(self):
+        connection = _Connection()
+        connection.execute = AsyncMock(
+            side_effect=["DELETE 0", "DELETE 2", "DELETE 1"],
+        )
+        with patch.object(db, "get_pool", return_value=_Pool(connection)):
+            deleted = await db.delete_expired_face_match_records(None)
+
+        self.assertEqual(deleted, 3)
+        person_delete = connection.execute.await_args_list[1].args[0]
+        self.assertIn("DELETE FROM incident_face_person_matches", person_delete)
+        self.assertIn("status <> 'Processing'", person_delete)
+
+
+class FacePersonLegacyCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_face_match_detail_uses_incident_level_person_number(self):
+        connection = _Connection()
+        connection.fetchrow = AsyncMock(return_value={
+            "incident_id": 42,
+            "person_number": 1,
+            "status": "UNKNOWN",
+            "top5_candidates": [],
+        })
+        with patch.object(db, "get_pool", return_value=_Pool(connection)):
+            result = await db.get_face_match(42)
+
+        self.assertEqual(result["person_number"], 1)
+        query = connection.fetchrow.await_args.args[0]
+        self.assertIn("1::bigint AS person_number", query)
+        self.assertNotIn("m.person_track_id", query)
+
+    async def test_person_detail_falls_back_to_matching_legacy_track(self):
+        connection = _Connection()
+        connection.fetchrow = AsyncMock(side_effect=[
+            None,
+            {
+                "incident_id": 42,
+                "person_track_id": 7,
+                "person_number": 1,
+                "person_bbox": [1, 2, 30, 40],
+                "status": "FACE_NOT_VISIBLE",
+                "top5_candidates": [],
+            },
+        ])
+        with patch.object(db, "get_pool", return_value=_Pool(connection)):
+            result = await db.get_face_person_match(42, 7)
+
+        self.assertEqual(result["incident_id"], 42)
+        self.assertEqual(result["person_track_id"], 7)
+        self.assertEqual(result["person_number"], 1)
+        self.assertEqual(result["person_bbox"], [1, 2, 30, 40])
+        self.assertEqual(connection.fetchrow.await_count, 2)
+        fallback_query = connection.fetchrow.await_args_list[1].args[0]
+        self.assertIn("v.track_id = $2", fallback_query)
+        self.assertIn("NOT EXISTS", fallback_query)
+
     async def test_failed_result_supplies_required_violation_type(self):
         connection = _Connection()
         connection.fetchrow = AsyncMock(return_value=None)

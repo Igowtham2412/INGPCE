@@ -16,6 +16,7 @@ import os
 import threading
 import time
 import uuid
+from collections import defaultdict
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 
@@ -29,9 +30,14 @@ from ..detection.compliance_engine import (
     prune_expired_cooldowns,
     violation_class_for,
 )
+from ..detection.speed_tracking import (
+    SpeedReading,
+    VehicleSpeedTracker,
+    validate_gate_pair,
+)
 from ..faces.face_recognition import violation_requires_face_recognition
-from .stream_handler import RTSPStream
 from ..ws_hub import hub
+from .stream_handler import RTSPStream
 
 logger = logging.getLogger("ppe.camera_manager")
 
@@ -76,6 +82,8 @@ class DetectionScheduler:
 
 def _draw_annotations(
     frame, statuses, camera_label: str, scale_x: float = 1, scale_y: float = 1,
+    speed_readings: list[SpeedReading] | None = None,
+    speed_settings: dict | None = None,
 ):
     for status in statuses:
         x1, y1, x2, y2 = status.box
@@ -102,23 +110,147 @@ def _draw_annotations(
                 frame, "PHONE", (px1, max(20, py1 - 6)),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.45, BOX_COLOR_UNKNOWN, 2,
             )
+    if speed_settings and speed_settings.get("enabled"):
+        for gate_name in ("gate_a", "gate_b"):
+            gate = speed_settings.get(gate_name) or []
+            if len(gate) != 2:
+                continue
+            start = (
+                int(gate[0][0] * frame.shape[1]),
+                int(gate[0][1] * frame.shape[0]),
+            )
+            end = (
+                int(gate[1][0] * frame.shape[1]),
+                int(gate[1][1] * frame.shape[0]),
+            )
+            cv2.line(frame, start, end, (255, 200, 0), 2)
+            cv2.putText(
+                frame, gate_name[-1].upper(), start,
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 0), 2,
+            )
+    for reading in speed_readings or []:
+        x1, y1, x2, y2 = reading.box
+        x1, x2 = int(x1 * scale_x), int(x2 * scale_x)
+        y1, y2 = int(y1 * scale_y), int(y2 * scale_y)
+        color = (0, 0, 255) if reading.speeding else (255, 220, 0)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        label = f"{reading.speed_kmh:.1f} km/h"
+        cv2.putText(
+            frame, label, (x1, max(20, y1 - 8)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2,
+        )
     cv2.putText(frame, camera_label, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     cv2.putText(frame, time.strftime("%Y-%m-%d %H:%M:%S"), (10, frame.shape[0] - 12),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     return frame
 
 
-def _encode_annotated_frame(frame, statuses, camera_label: str):
+def _encode_annotated_frame(
+    frame, statuses, camera_label: str,
+    speed_readings: list[SpeedReading] | None = None,
+    speed_settings: dict | None = None,
+):
     height, width = frame.shape[:2]
     tile = _resize_to_tile(frame)
     scale_x = tile.shape[1] / width
     scale_y = tile.shape[0] / height
     annotated = _draw_annotations(
-        tile, statuses, camera_label, scale_x=scale_x, scale_y=scale_y,
+        tile, statuses, camera_label,
+        scale_x=scale_x, scale_y=scale_y,
+        speed_readings=speed_readings,
+        speed_settings=speed_settings,
     )
     ok, buffer = cv2.imencode(
         ".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, config.JPEG_QUALITY])
     return buffer.tobytes() if ok else None
+
+
+def _save_speed_snapshot(
+    path: str,
+    frame,
+    statuses,
+    camera_label: str,
+    reading: SpeedReading,
+    speed_settings: dict,
+) -> None:
+    annotated = _draw_annotations(
+        frame.copy(), statuses, camera_label,
+        speed_readings=[reading], speed_settings=speed_settings,
+    )
+    if not cv2.imwrite(path, annotated):
+        raise OSError(f"Could not write speeding snapshot: {path}")
+
+
+def convert_speed_clip_to_webm(video_path: str) -> str:
+    if os.path.splitext(video_path)[1].lower() == ".webm":
+        return video_path
+
+    capture = cv2.VideoCapture(video_path)
+    if not capture.isOpened():
+        capture.release()
+        raise OSError(f"Could not open saved speed clip: {video_path}")
+    fps = capture.get(cv2.CAP_PROP_FPS)
+    if not np.isfinite(fps) or fps <= 0:
+        fps = config.EVIDENCE_CLIP_FPS
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if width <= 0 or height <= 0:
+        capture.release()
+        raise OSError(f"Saved speed clip has invalid dimensions: {video_path}")
+
+    stem, _ = os.path.splitext(video_path)
+    converted_path = f"{stem}.webm"
+    temporary_path = f"{stem}.{uuid.uuid4().hex}.webm"
+    writer = cv2.VideoWriter(
+        temporary_path,
+        cv2.VideoWriter_fourcc(*"VP80"),
+        fps,
+        (width, height),
+    )
+    if not writer.isOpened():
+        capture.release()
+        writer.release()
+        raise OSError("WebM/VP8 video encoder is unavailable")
+
+    frames_written = 0
+    try:
+        while True:
+            success, frame = capture.read()
+            if not success:
+                break
+            writer.write(frame)
+            frames_written += 1
+    finally:
+        capture.release()
+        writer.release()
+
+    if frames_written == 0:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+        raise OSError(f"Saved speed clip contains no decodable frames: {video_path}")
+    os.replace(temporary_path, converted_path)
+    return converted_path
+
+
+def _group_violation_people(statuses, cooldowns, now, cooldown_seconds):
+    grouped = defaultdict(dict)
+    for status in statuses:
+        if not status.is_violation:
+            continue
+        violation_types = list(status.missing_ppe)
+        if status.phone_detected:
+            violation_types.append("phone_detected")
+        for violation_type in violation_types:
+            alert_key = (status.track_id, violation_type)
+            if not cooldown_active(
+                    cooldowns, alert_key, now, cooldown_seconds):
+                grouped[violation_class_for(violation_type)][status.track_id] = (
+                    status, violation_type,
+                )
+    return {
+        violation_type: list(people.values())
+        for violation_type, people in grouped.items()
+    }
 
 
 def _encode_fullscreen_frame(frame):
@@ -158,6 +290,8 @@ class CameraManager:
             config.CAMERA_MAX_SIMULTANEOUS_RECONNECTS
         )
         self._latest_statuses = {}
+        self._latest_speed_readings: dict[str, list[SpeedReading]] = {}
+        self._latest_speed_settings: dict[str, dict] = {}
         self._detection_metrics = {}
         self._inference_semaphore = asyncio.Semaphore(
             config.INFERENCE_CONCURRENCY,
@@ -203,6 +337,8 @@ class CameraManager:
         if stream:
             stream.stop()
         self._latest_statuses.pop(camera_id, None)
+        self._latest_speed_readings.pop(camera_id, None)
+        self._latest_speed_settings.pop(camera_id, None)
         self._detection_metrics.pop(camera_id, None)
         try:
             await db.delete_camera_status(camera_id)
@@ -448,6 +584,123 @@ class CameraManager:
                                  stream.camera_id, video_path)
             raise
 
+    async def _write_speed_evidence_clip(
+        self, stream: RTSPStream, camera_id: str,
+        measurement_id: int, end_time: float,
+    ):
+        if end_time > time.monotonic():
+            await asyncio.sleep(end_time - time.monotonic())
+        clip_directory = config.evidence_directory(
+            config.EVIDENCE_CLIP_DIR, "speeding",
+        )
+        os.makedirs(clip_directory, exist_ok=True)
+        video_path = os.path.join(
+            clip_directory, f"speed_measurement_{measurement_id}.webm",
+        )
+        start_time = end_time - (
+            config.EVIDENCE_CLIP_PRE_SECONDS
+            + config.EVIDENCE_CLIP_POST_SECONDS
+        )
+        samples = stream.clip_frames(start_time, end_time)
+        if not samples:
+            logger.warning(
+                "[%s] no buffered frames available for speeding measurement %s clip",
+                camera_id, measurement_id,
+            )
+            return
+        first_image = cv2.imdecode(
+            np.frombuffer(samples[0][1], dtype=np.uint8), cv2.IMREAD_COLOR,
+        )
+        if first_image is None:
+            logger.error(
+                "[%s] could not decode buffered frames for speeding measurement %s",
+                camera_id, measurement_id,
+            )
+            return
+        height, width = first_image.shape[:2]
+        writer = cv2.VideoWriter(
+            video_path, cv2.VideoWriter_fourcc(*"VP80"),
+            config.EVIDENCE_CLIP_FPS, (width, height),
+        )
+        if not writer.isOpened():
+            logger.error(
+                "[%s] video encoder unavailable for speeding measurement %s",
+                camera_id, measurement_id,
+            )
+            return
+        try:
+            timestamps = [timestamp for timestamp, _ in samples]
+            sample_index = 0
+            latest = first_image
+            frame_count = max(
+                1,
+                int(
+                    (config.EVIDENCE_CLIP_PRE_SECONDS
+                     + config.EVIDENCE_CLIP_POST_SECONDS)
+                    * config.EVIDENCE_CLIP_FPS
+                ),
+            )
+            for index in range(frame_count):
+                target_time = start_time + index / config.EVIDENCE_CLIP_FPS
+                while (sample_index + 1 < len(samples)
+                       and timestamps[sample_index + 1] <= target_time):
+                    sample_index += 1
+                    decoded = cv2.imdecode(
+                        np.frombuffer(
+                            samples[sample_index][1], dtype=np.uint8,
+                        ),
+                        cv2.IMREAD_COLOR,
+                    )
+                    if decoded is not None:
+                        latest = decoded
+                writer.write(latest)
+        finally:
+            writer.release()
+
+        try:
+            if not await db.update_vehicle_speed_evidence(
+                camera_id, measurement_id, video_path=video_path,
+            ):
+                os.remove(video_path)
+                logger.warning(
+                    "[%s] speeding measurement %s disappeared before its clip path was saved",
+                    camera_id, measurement_id,
+                )
+        except Exception:
+            try:
+                os.remove(video_path)
+            except OSError:
+                logger.exception(
+                    "[%s] could not remove unregistered speed evidence clip %s",
+                    camera_id, video_path,
+                )
+            raise
+
+    def _schedule_speed_evidence_clip(
+        self, stream: RTSPStream, camera_id: str,
+        measurement_id: int, event_time: float,
+    ):
+        end_time = event_time + config.EVIDENCE_CLIP_POST_SECONDS
+        task = asyncio.create_task(
+            self._write_speed_evidence_clip(
+                stream, camera_id, measurement_id, end_time,
+            ),
+        )
+        self._evidence_tasks.add(task)
+
+        def completed(completed_task):
+            self._evidence_tasks.discard(completed_task)
+            if completed_task.cancelled():
+                return
+            error = completed_task.exception()
+            if error:
+                logger.error(
+                    "[%s] speeding evidence clip job failed: %s",
+                    camera_id, error, exc_info=error,
+                )
+
+        task.add_done_callback(completed)
+
     def _schedule_evidence_clip(
         self, stream: RTSPStream, camera: dict, violation_id: int,
         violation_time: float, violation_at: datetime,
@@ -575,6 +828,31 @@ class CameraManager:
         required_ppe = camera["required_ppe"]
         zones = await db.list_camera_zones(camera_id)
         camera_rois = [zone["polygon"] for zone in zones] or None
+        speed_settings = await db.get_camera_speed_settings(camera_id)
+        speed_tracker = None
+        if speed_settings and speed_settings["enabled"]:
+            try:
+                validate_gate_pair(
+                    speed_settings["gate_a"], speed_settings["gate_b"],
+                )
+            except ValueError as error:
+                logger.error(
+                    "[%s] vehicle speed tracking paused: %s",
+                    camera_id, error,
+                )
+                self._latest_speed_settings.pop(camera_id, None)
+                self._latest_speed_readings.pop(camera_id, None)
+            else:
+                speed_tracker = VehicleSpeedTracker(
+                    speed_settings["gate_a"],
+                    speed_settings["gate_b"],
+                    float(speed_settings["distance_m"]),
+                    float(speed_settings["speed_limit_kmh"]),
+                )
+                self._latest_speed_settings[camera_id] = speed_settings
+        else:
+            self._latest_speed_settings.pop(camera_id, None)
+            self._latest_speed_readings.pop(camera_id, None)
 
         detector = self._detector_getter()
         if detector is None:
@@ -603,9 +881,119 @@ class CameraManager:
 
                     inference_started = time.monotonic()
                     detections = await asyncio.to_thread(
-                        detector.infer, frame, camera_id, camera_rois)
+                        detector.infer,
+                        frame,
+                        camera_id,
+                        camera_rois,
+                        include_vehicles=speed_tracker is not None,
+                    )
+                speed_events = []
+                if speed_tracker:
+                    speed_events = speed_tracker.update(
+                        detections,
+                        frame.shape,
+                        time.monotonic(),
+                    )
+                    self._latest_speed_readings[camera_id] = (
+                        speed_tracker.current_readings(time.monotonic())
+                    )
                 last_statuses = engine.evaluate(detections, frame.shape)
                 self._latest_statuses[camera_id] = last_statuses
+                for reading in speed_events:
+                    measurement = None
+                    try:
+                        measurement = await db.record_vehicle_speed_measurement(
+                            camera_id,
+                            reading.track_id,
+                            reading.vehicle_type,
+                            reading.speed_kmh,
+                            reading.speed_limit_kmh,
+                            reading.speeding,
+                            reading.direction,
+                            reading.measured_at,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "[%s] could not persist vehicle speed measurement",
+                            camera_id,
+                        )
+                    snapshot_url = None
+                    if reading.speeding and measurement:
+                        measurement_id = int(measurement["id"])
+                        snapshot_path = None
+                        try:
+                            snapshot_directory = config.evidence_directory(
+                                config.SNAPSHOT_DIR, "speeding",
+                            )
+                            os.makedirs(snapshot_directory, exist_ok=True)
+                            snapshot_path = os.path.join(
+                                snapshot_directory,
+                                f"speed_measurement_{measurement_id}_{uuid.uuid4().hex}.jpg",
+                            )
+                            await asyncio.to_thread(
+                                _save_speed_snapshot,
+                                snapshot_path,
+                                frame,
+                                last_statuses,
+                                f"{camera_name} ({area_group_name})",
+                                reading,
+                                speed_settings,
+                            )
+                            if await db.update_vehicle_speed_evidence(
+                                camera_id,
+                                measurement_id,
+                                snapshot_path=snapshot_path,
+                            ):
+                                snapshot_url = (
+                                    f"/api/cameras/{camera_id}/speed-measurements/"
+                                    f"{measurement_id}/evidence"
+                                )
+                                self._schedule_speed_evidence_clip(
+                                    stream, camera_id, measurement_id,
+                                    time.monotonic(),
+                                )
+                            else:
+                                os.remove(snapshot_path)
+                                logger.warning(
+                                    "[%s] speed measurement %s disappeared before its snapshot path was saved",
+                                    camera_id, measurement_id,
+                                )
+                        except Exception:
+                            if snapshot_path and os.path.exists(snapshot_path):
+                                try:
+                                    os.remove(snapshot_path)
+                                except OSError:
+                                    logger.exception(
+                                        "[%s] could not remove unregistered speed snapshot %s",
+                                        camera_id, snapshot_path,
+                                    )
+                            logger.exception(
+                                "[%s] could not collect evidence for speed measurement %s",
+                                camera_id, measurement_id,
+                            )
+                    if reading.speeding:
+                        await hub.broadcast_event({
+                            "type": "speeding",
+                            "measurement_id": int(measurement["id"])
+                            if measurement else None,
+                            "camera_id": camera_id,
+                            "camera_name": camera_name,
+                            "area_group": area_group_name,
+                            "vehicle_type": reading.vehicle_type,
+                            "track_id": reading.track_id,
+                            "speed_kmh": reading.speed_kmh,
+                            "speed_limit_kmh": reading.speed_limit_kmh,
+                            "direction": reading.direction,
+                            "snapshot_url": snapshot_url,
+                            "video_url": (
+                                f"/api/cameras/{camera_id}/speed-measurements/"
+                                f"{int(measurement['id'])}/evidence?kind=video"
+                                if measurement and snapshot_url else None
+                            ),
+                            "timestamp": datetime.fromtimestamp(
+                                reading.measured_at, UTC,
+                            ).astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+                        })
                 if self._face_recognition_worker is not None:
                     self._face_recognition_worker.observe(
                         camera_id, frame, last_statuses,
@@ -624,109 +1012,119 @@ class CameraManager:
                     config.VIOLATION_COOLDOWN_SECONDS,
                 )
 
-                for status in last_statuses:
-                    if not status.is_violation:
-                        continue
+                violation_groups = _group_violation_people(
+                    last_statuses, last_alerted_at, completed_at,
+                    config.VIOLATION_COOLDOWN_SECONDS,
+                )
+                for stored_violation_type, group in violation_groups.items():
+                    primary_status = group[0][0]
+                    people = [
+                        {
+                            "track_id": int(person_status.track_id),
+                            "person_box": list(person_status.box),
+                        }
+                        for person_status, _ in group
+                    ]
+                    try:
+                        snapshot_directory = config.evidence_directory(
+                            config.SNAPSHOT_DIR, stored_violation_type,
+                        )
+                        os.makedirs(snapshot_directory, exist_ok=True)
+                        evidence_id = uuid.uuid4().hex
+                        clean_snapshot_path = os.path.join(
+                            snapshot_directory, f"{evidence_id}_clean.jpg")
+                        snapshot_path = os.path.join(
+                            snapshot_directory, f"{evidence_id}_annotated.jpg")
+                        evidence_frame = _draw_annotations(
+                            frame.copy(), last_statuses,
+                            f"{camera_name} ({area_group_name})")
+                        if not cv2.imwrite(clean_snapshot_path, frame):
+                            raise OSError(f"Could not write clean snapshot: {clean_snapshot_path}")
+                        if not cv2.imwrite(snapshot_path, evidence_frame):
+                            raise OSError(f"Could not write annotated snapshot: {snapshot_path}")
+                        detection_metadata = {
+                            "person_box": people[0]["person_box"],
+                            "detected_persons": people,
+                            "frame_width": int(frame.shape[1]),
+                            "frame_height": int(frame.shape[0]),
+                            "model_names": {
+                                str(class_id): str(class_name)
+                                for class_id, class_name in detector.names.items()
+                            },
+                            "detections": [
+                                {
+                                    "class_id": detection.class_id,
+                                    "class_name": detection.cls_norm,
+                                    "box": list(detection.box),
+                                    "confidence": detection.confidence,
+                                }
+                                for detection in detections
+                            ],
+                        }
 
-                    violation_types = list(status.missing_ppe)
-                    if status.phone_detected:
-                        violation_types.append("phone_detected")
-
-                    for violation_type in violation_types:
-                        alert_key = (status.track_id, violation_type)
-                        stored_violation_type = violation_class_for(violation_type)
-                        if cooldown_active(
-                                last_alerted_at, alert_key, completed_at,
-                                config.VIOLATION_COOLDOWN_SECONDS):
+                        violation_id = await db.log_violation(
+                            camera_id, camera_name, area_group_name,
+                            primary_status.track_id, stored_violation_type,
+                            snapshot_path, area_group_id, area_group_name,
+                            clean_snapshot_path, detection_metadata,
+                            config.VIOLATION_COOLDOWN_SECONDS,
+                        )
+                        if violation_id is None:
+                            os.remove(snapshot_path)
+                            os.remove(clean_snapshot_path)
                             continue
-
-                        try:
-                            snapshot_directory = config.evidence_directory(
-                                config.SNAPSHOT_DIR, stored_violation_type,
+                        violation_time = time.monotonic()
+                        self._schedule_evidence_clip(
+                            stream, camera, violation_id, violation_time,
+                            datetime.now(UTC), stored_violation_type,
+                        )
+                        if (
+                            self._face_recognition_worker is not None
+                            and violation_requires_face_recognition(
+                                stored_violation_type,
                             )
-                            os.makedirs(snapshot_directory, exist_ok=True)
-                            evidence_id = uuid.uuid4().hex
-                            clean_snapshot_path = os.path.join(
-                                snapshot_directory, f"{evidence_id}_clean.jpg")
-                            snapshot_path = os.path.join(
-                                snapshot_directory, f"{evidence_id}_annotated.jpg")
-                            evidence_frame = _draw_annotations(
-                                frame.copy(), last_statuses, f"{camera_name} ({area_group_name})")
-                            if not cv2.imwrite(clean_snapshot_path, frame):
-                                raise OSError(f"Could not write clean snapshot: {clean_snapshot_path}")
-                            if not cv2.imwrite(snapshot_path, evidence_frame):
-                                raise OSError(f"Could not write annotated snapshot: {snapshot_path}")
-                            detection_metadata = {
-                                "person_box": list(status.box),
-                                "frame_width": int(frame.shape[1]),
-                                "frame_height": int(frame.shape[0]),
-                                "model_names": {
-                                    str(class_id): str(class_name)
-                                    for class_id, class_name in detector.names.items()
-                                },
-                                "detections": [
-                                    {
-                                        "class_id": detection.class_id,
-                                        "class_name": detection.cls_norm,
-                                        "box": list(detection.box),
-                                        "confidence": detection.confidence,
-                                    }
-                                    for detection in detections
-                                ],
-                            }
-
-                            violation_id = await db.log_violation(
-                                camera_id, camera_name, area_group_name, status.track_id,
-                                stored_violation_type, snapshot_path, area_group_id, area_group_name,
-                                clean_snapshot_path, detection_metadata,
-                                config.VIOLATION_COOLDOWN_SECONDS,
-                            )
-                            if violation_id is None:
-                                os.remove(snapshot_path)
-                                os.remove(clean_snapshot_path)
-                                continue
-                            violation_time = time.monotonic()
-                            self._schedule_evidence_clip(
-                                stream, camera, violation_id, violation_time,
-                                datetime.now(UTC), stored_violation_type,
-                            )
-                            if (
-                                self._face_recognition_worker is not None
-                                and violation_requires_face_recognition(
+                        ):
+                            try:
+                                self._face_recognition_worker.enqueue_violation(
+                                    violation_id, camera_id,
+                                    primary_status.track_id,
                                     stored_violation_type,
+                                    detected_persons=people,
                                 )
-                            ):
-                                try:
-                                    self._face_recognition_worker.enqueue_violation(
-                                        violation_id, camera_id, status.track_id,
-                                        stored_violation_type,
-                                    )
-                                except Exception as face_exc:
-                                    logger.error(
-                                        "[%s] could not queue optional face recognition (%s)",
-                                        camera_id, type(face_exc).__name__,
-                                    )
-                            last_alerted_at[alert_key] = time.monotonic()
-                            matches = await self._alert_manager.handle_violation(
-                                violation_id, camera_id, camera_name, area_group_name,
-                                status.track_id, stored_violation_type, snapshot_path,
-                            )
-                            await hub.broadcast_event({
-                                "type": "violation",
-                                "violation_id": violation_id,
-                                "camera_id": camera_id,
-                                "camera_name": camera_name,
-                                "zone": area_group_name,
-                                "area_group": area_group_name,
-                                "violation_type": stored_violation_type,
-                                "track_id": status.track_id,
-                                "snapshot_url": f"/api/snapshot/{violation_id}",
-                                "rules_matched": [m.rule_name for m in matches],
-                                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                            })
-                        except Exception as e:
-                            logger.warning(f"[{camera_id}] failed to log/alert violation "
-                                            f"'{violation_type}' (will retry next frame): {e}")
+                            except Exception as face_exc:
+                                logger.error(
+                                    "[%s] could not queue optional face recognition (%s)",
+                                    camera_id, type(face_exc).__name__,
+                                )
+                        for person_status, original_type in group:
+                            last_alerted_at[
+                                (person_status.track_id, original_type)
+                            ] = time.monotonic()
+                        matches = await self._alert_manager.handle_violation(
+                            violation_id, camera_id, camera_name,
+                            area_group_name, primary_status.track_id,
+                            stored_violation_type, snapshot_path,
+                        )
+                        await hub.broadcast_event({
+                            "type": "violation",
+                            "violation_id": violation_id,
+                            "camera_id": camera_id,
+                            "camera_name": camera_name,
+                            "zone": area_group_name,
+                            "area_group": area_group_name,
+                            "violation_type": stored_violation_type,
+                            "track_id": primary_status.track_id,
+                            "detected_persons": people,
+                            "detected_person_count": len(people),
+                            "snapshot_url": f"/api/snapshot/{violation_id}",
+                            "rules_matched": [m.rule_name for m in matches],
+                            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        })
+                    except Exception as e:
+                        logger.warning(
+                            f"[{camera_id}] failed to log/alert violation "
+                            f"'{stored_violation_type}' (will retry next frame): {e}"
+                        )
 
             except asyncio.CancelledError:
                 logger.info(f"[{camera_id}] detection worker cancelled")
@@ -759,6 +1157,8 @@ class CameraManager:
                         frame,
                         statuses,
                         f"{camera_name} ({area_group_name})",
+                        self._latest_speed_readings.get(camera_id, []),
+                        self._latest_speed_settings.get(camera_id),
                     )
                     if jpeg_bytes is not None:
                         await hub.broadcast_frame(camera_id, jpeg_bytes)

@@ -21,8 +21,8 @@ from ..ws_hub import hub
 from .face_dataset import (
     FaceAnalyzer,
     ImageRejected,
-    create_face_analyzer,
     _encryption_key,
+    create_face_analyzer,
     decrypt_embedding,
     encrypt_face_crop,
 )
@@ -36,7 +36,7 @@ logger = logging.getLogger("ppe.face_recognition")
 _MAX_TRACK_BUFFERS = 64
 _MAX_PENDING_CROPS = 64
 _CAPTURE_QUEUE_SIZE = 4
-_JPEG_QUALITY = 78
+_JPEG_QUALITY = 92
 
 
 def violation_requires_face_recognition(violation_type: str) -> bool:
@@ -226,10 +226,11 @@ def _read_person_crop(row: dict[str, Any]) -> tuple[np.ndarray | None, list[int]
             return None, None
     if not isinstance(metadata, dict):
         return None, None
-    box = metadata.get("person_box")
+    box = row.get("person_box") or metadata.get("person_box")
     if not isinstance(box, (list, tuple)) or len(box) != 4:
         return None, None
-    return _crop_person(frame, box)
+    selected_box = row.get("person_box") or box
+    return _crop_person(frame, selected_box)
 
 
 def _best_face_from_crops(
@@ -263,10 +264,11 @@ def _best_face_from_crops(
                     int(face_box[3] + origin[1]),
                 ]
             face_crop = None
-            crop_box = measurements.get("bbox_input", face_box)
-            if isinstance(crop_box, (list, tuple)) and len(crop_box) == 4:
+            if isinstance(face_box, (list, tuple)) and len(face_box) == 4:
+                # bbox is expressed in the source image passed to analyze();
+                # bbox_input may refer to an upscaled detector image.
                 height, width = image.shape[:2]
-                x1, y1, x2, y2 = [int(value) for value in crop_box]
+                x1, y1, x2, y2 = [int(value) for value in face_box]
                 pad_x = max(4, int((x2 - x1) * 0.15))
                 pad_y = max(4, int((y2 - y1) * 0.15))
                 x1, x2 = max(0, x1 - pad_x), min(width, x2 + pad_x)
@@ -327,7 +329,7 @@ class FaceRecognitionWorker:
             tuple[str, int], deque[tuple[float, bytes, list[int]]]
         ] = OrderedDict()
         self._pending_crops: dict[
-            int, list[tuple[bytes, list[int] | None]]
+            int, dict[int, list[tuple[bytes, list[int]]]]
         ] = {}
         self._capture_task: asyncio.Task | None = None
         self._recognition_task: asyncio.Task | None = None
@@ -398,6 +400,7 @@ class FaceRecognitionWorker:
     def enqueue_violation(
             self, incident_id: int, camera_id: str, track_id: int,
             violation_type: str,
+            detected_persons: Sequence[dict[str, Any]] | None = None,
     ) -> None:
         if not self._running or not config.FACE_ENABLED:
             return
@@ -409,13 +412,23 @@ class FaceRecognitionWorker:
                 incident_id,
             )
             return
-        key = (camera_id, track_id)
+        people = detected_persons or [{"track_id": track_id}]
+        track_ids = {
+            int(person["track_id"])
+            for person in people
+            if person.get("track_id") is not None
+        } or {track_id}
         self._prune_buffers(time.monotonic())
         if len(self._pending_crops) < _MAX_PENDING_CROPS:
-            self._pending_crops[incident_id] = [
-                (image, origin)
-                for _timestamp, image, origin in self._frame_buffers.get(key, ())
-            ]
+            self._pending_crops[incident_id] = {
+                selected_track_id: [
+                    (image, origin)
+                    for _timestamp, image, origin in self._frame_buffers.get(
+                        (camera_id, selected_track_id), (),
+                    )
+                ]
+                for selected_track_id in track_ids
+            }
         task = asyncio.create_task(self._enqueue_job(incident_id))
         self._enqueue_tasks.add(task)
         task.add_done_callback(self._enqueue_tasks.discard)
@@ -533,6 +546,67 @@ class FaceRecognitionWorker:
             )
 
     async def _process_job(self, job: dict[str, Any]) -> None:
+        metadata = job.get("detection_metadata") or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except json.JSONDecodeError:
+                metadata = {}
+        people = metadata.get("detected_persons", []) if isinstance(
+            metadata, dict,
+        ) else []
+        valid_people = []
+        for person in people if isinstance(people, list) else []:
+            if not isinstance(person, dict):
+                continue
+            try:
+                track_id = int(person["track_id"])
+                box = [int(value) for value in person["person_box"]]
+            except (KeyError, TypeError, ValueError):
+                continue
+            if len(box) == 4 and box[2] > box[0] and box[3] > box[1]:
+                valid_people.append({
+                    "track_id": track_id,
+                    "person_box": box,
+                })
+
+        if not valid_people:
+            try:
+                await self._process_single_job(job)
+            finally:
+                self._pending_crops.pop(int(job["incident_id"]), None)
+            return
+
+        primary_track_id = int(job.get("track_id", valid_people[0]["track_id"]))
+        if not any(person["track_id"] == primary_track_id for person in valid_people):
+            primary_track_id = valid_people[0]["track_id"]
+        ordered_people = [
+            person for person in valid_people
+            if person["track_id"] != primary_track_id
+        ] + [
+            person for person in valid_people
+            if person["track_id"] == primary_track_id
+        ]
+        try:
+            for person in ordered_people:
+                person_job = {
+                    **job,
+                    "track_id": person["track_id"],
+                    "person_box": person["person_box"],
+                }
+                await self._process_single_job(
+                    person_job,
+                    person_track_id=person["track_id"],
+                    save_legacy=person["track_id"] == primary_track_id,
+                )
+        finally:
+            self._pending_crops.pop(int(job["incident_id"]), None)
+
+    async def _process_single_job(
+            self, job: dict[str, Any],
+            person_track_id: int | None = None,
+            save_legacy: bool = True,
+    ) -> None:
         incident_id = int(job["incident_id"])
         started = time.perf_counter()
         try:
@@ -553,7 +627,8 @@ class FaceRecognitionWorker:
             }
 
             crops: list[tuple[np.ndarray, str, list[int] | None]] = []
-            buffered_crops = self._pending_crops.pop(incident_id, [])
+            pending = self._pending_crops.get(incident_id, {})
+            buffered_crops = list(pending.get(int(job["track_id"]), []))
             self._prune_buffers(time.monotonic())
             buffered_crops.extend(
                 (encoded, origin)
@@ -601,25 +676,44 @@ class FaceRecognitionWorker:
             aggregated_embedding = aggregate_embeddings(
                 observations, config.FACE_IDENTIFY_AGGREGATION,
             )
+            minimum_quality = thresholds_used[
+                "quality_min_by_violation"
+            ].get(job["violation_type"], 0.0)
+            evidence_face, evidence_rejected = await self._run_blocking(
+                _best_face_from_crops, analyzer, base_crops, minimum_quality,
+            )
             elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
             if best_observation_result is None or aggregated_embedding is None:
                 status = (
                     "FACE_NOT_VISIBLE"
                 )
-                await db.complete_face_recognition_job(
-                    incident_id, status, None, None, None,
-                    {
-                        "rejected_reasons": rejected_reasons,
-                        "processing_ms": elapsed_ms,
-                    },
-                    None, [], analyzer.model_name, analyzer.model_version,
-                    source=job.get("source", "live"),
-                    thresholds=thresholds_used,
-                )
-                await self._audit_result(incident_id, status)
+                face_quality = {
+                    "quality_status": "Face Not Clearly Visible",
+                    "rejected_reasons": rejected_reasons,
+                    "processing_ms": elapsed_ms,
+                }
+                if person_track_id is not None:
+                    await db.complete_face_person_match(
+                        incident_id, person_track_id,
+                        list(job["person_box"]), status, None, None, None,
+                        face_quality, None, [], analyzer.model_name,
+                        analyzer.model_version,
+                        source=job.get("source", "live"),
+                        thresholds=thresholds_used,
+                    )
+                if save_legacy:
+                    await db.complete_face_recognition_job(
+                        incident_id, status, None, None, None,
+                        face_quality, None, [], analyzer.model_name,
+                        analyzer.model_version,
+                        source=job.get("source", "live"),
+                        thresholds=thresholds_used,
+                    )
+                await self._audit_result(incident_id, status, person_track_id)
                 await hub.broadcast_event({
                     "type": "face_match_processed",
                     "incident_id": incident_id,
+                    "person_track_id": person_track_id,
                     "status": status,
                     "source": job.get("source", "live"),
                 })
@@ -656,24 +750,46 @@ class FaceRecognitionWorker:
                 "faces_aggregated": len(observations),
                 "runtime_provider": getattr(analyzer, "runtime_provider", "unknown"),
                 "processing_ms": elapsed_ms,
+                "quality_status": (
+                    "Face Available" if evidence_face is not None
+                    else "Face Not Clearly Visible"
+                ),
+                "evidence_rejected_reasons": evidence_rejected,
             }
             stored_face_crop = None
-            if best_face is not None:
+            if evidence_face is not None:
                 stored_face_crop = await self._run_blocking(
-                    _encrypt_recognized_face_crop, best_face, key,
+                    _encrypt_recognized_face_crop, evidence_face, key,
                 )
-            await db.complete_face_recognition_job(
-                incident_id, status, matched_person_id, score, margin,
-                face_quality, best_face["absolute_bbox"], candidates,
-                analyzer.model_name, analyzer.model_version,
-                stored_face_crop,
-                source=job.get("source", "live"),
-                thresholds=thresholds_used,
+            face_bbox = (
+                evidence_face["absolute_bbox"]
+                if evidence_face is not None
+                else best_face["absolute_bbox"]
             )
-            await self._audit_result(incident_id, status)
+            if person_track_id is not None:
+                await db.complete_face_person_match(
+                    incident_id, person_track_id,
+                    list(job["person_box"]), status, matched_person_id,
+                    score, margin, face_quality, face_bbox, candidates,
+                    analyzer.model_name, analyzer.model_version,
+                    stored_face_crop,
+                    source=job.get("source", "live"),
+                    thresholds=thresholds_used,
+                )
+            if save_legacy:
+                await db.complete_face_recognition_job(
+                    incident_id, status, matched_person_id, score, margin,
+                    face_quality, face_bbox, candidates,
+                    analyzer.model_name, analyzer.model_version,
+                    stored_face_crop,
+                    source=job.get("source", "live"),
+                    thresholds=thresholds_used,
+                )
+            await self._audit_result(incident_id, status, person_track_id)
             await hub.broadcast_event({
                 "type": "face_match_processed",
                 "incident_id": incident_id,
+                "person_track_id": person_track_id,
                 "status": status,
                 "source": job.get("source", "live"),
             })
@@ -683,7 +799,15 @@ class FaceRecognitionWorker:
                 "Face-recognition job failed (%s)", error_code, exc_info=True,
             )
             try:
-                await db.fail_face_recognition_job(incident_id, error_code)
+                if person_track_id is not None:
+                    await db.fail_face_person_match(
+                        incident_id, person_track_id,
+                        list(job["person_box"]), error_code,
+                    )
+                if save_legacy:
+                    await db.fail_face_recognition_job(
+                        incident_id, error_code,
+                    )
             except Exception as store_exc:
                 logger.error(
                     "Could not record face-recognition failure (%s)",
@@ -692,11 +816,10 @@ class FaceRecognitionWorker:
             await hub.broadcast_event({
                 "type": "face_match_processed",
                 "incident_id": incident_id,
+                "person_track_id": person_track_id,
                 "status": "Error",
                 "source": job.get("source", "live"),
             })
-        finally:
-            self._pending_crops.pop(incident_id, None)
 
     async def _load_gallery(
             self, key: bytes, model_name: str, model_version: str,
@@ -726,11 +849,26 @@ class FaceRecognitionWorker:
         return gallery
 
     @staticmethod
-    async def _audit_result(incident_id: int, status: str) -> None:
+    async def _audit_result(
+            incident_id: int, status: str,
+            person_track_id: int | None = None,
+    ) -> None:
         try:
+            target_type = (
+                "incident_face_person"
+                if person_track_id is not None else "incident"
+            )
+            target_id = (
+                f"{incident_id}:{person_track_id}"
+                if person_track_id is not None else str(incident_id)
+            )
             await db.write_audit_log(
-                "face_match_processed", target_type="incident",
-                target_id=str(incident_id), details={"status": status},
+                "face_match_processed", target_type=target_type,
+                target_id=target_id,
+                details={
+                    "status": status,
+                    "person_track_id": person_track_id,
+                },
             )
         except Exception as exc:
             logger.error("Could not audit face-recognition result (%s)", type(exc).__name__)

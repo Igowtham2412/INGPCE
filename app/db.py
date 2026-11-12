@@ -1,10 +1,10 @@
 """
 db.py — async PostgreSQL data layer (asyncpg, connection-pooled).
 
-`sync_seed_data()` is the fix for cameras silently missing from the
-frontend: it runs on EVERY app startup AND is exposed via
+`sync_seed_data()` runs on EVERY app startup AND is exposed via
 POST /api/cameras/sync-seed (a dashboard button), and works per-camera:
   - ensures every area group in SEED_AREA_GROUPS exists (create if missing)
+  - skips configured cameras explicitly deleted by an operator
   - creates missing configured cameras without overwriting existing stream URLs
   - disables retired seed cameras without deleting their incident history
 This makes seeding idempotent while preserving operator-managed camera
@@ -15,7 +15,7 @@ import json
 import logging
 import sys
 import time
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -346,9 +346,14 @@ async def sync_seed_data() -> dict[str, Any]:
     existing_cameras = await list_cameras()
     cameras_by_id = {c["camera_id"]: c for c in existing_cameras}
     newly_created_camera_ids: list[str] = []
+    excluded_camera_ids = await list_camera_seed_exclusions()
+    suppressed_camera_ids: list[str] = []
 
     for cam in config.SEED_CAMERAS:
         camera_id = cam["camera_id"]
+        if camera_id in excluded_camera_ids:
+            suppressed_camera_ids.append(camera_id)
+            continue
         existing = cameras_by_id.get(camera_id)
         if existing:
             configured_main = cam.get("main_stream_url")
@@ -436,6 +441,7 @@ async def sync_seed_data() -> dict[str, Any]:
         "updated_camera_ids": updated_camera_ids,
         "disabled_camera_ids": disabled_camera_ids,
         "newly_created_camera_ids": newly_created_camera_ids,
+        "suppressed_camera_ids": suppressed_camera_ids,
     }
 
 
@@ -488,6 +494,138 @@ async def list_cameras() -> list[dict[str, Any]]:
                ORDER BY c.camera_id ASC"""
         )
         return [dict(r) for r in rows]
+
+
+async def list_camera_seed_exclusions() -> set[str]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT camera_id FROM camera_seed_exclusions",
+        )
+        return {row["camera_id"] for row in rows}
+
+
+async def get_camera_speed_settings(camera_id: str) -> dict[str, Any] | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM camera_speed_settings WHERE camera_id = $1",
+            camera_id,
+        )
+    if row is None:
+        return None
+    settings = dict(row)
+    for key in ("gate_a", "gate_b"):
+        if isinstance(settings[key], str):
+            settings[key] = json.loads(settings[key])
+    return settings
+
+
+async def set_camera_speed_settings(
+    camera_id: str,
+    distance_m: float,
+    speed_limit_kmh: float,
+    gate_a: list[list[float]],
+    gate_b: list[list[float]],
+) -> dict[str, Any]:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO camera_speed_settings (
+                   camera_id, distance_m, speed_limit_kmh, gate_a, gate_b
+               )
+               VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+               ON CONFLICT (camera_id) DO UPDATE SET
+                   distance_m = EXCLUDED.distance_m,
+                   speed_limit_kmh = EXCLUDED.speed_limit_kmh,
+                   gate_a = EXCLUDED.gate_a,
+                   gate_b = EXCLUDED.gate_b,
+                   enabled = true,
+                   updated_at = now()
+               RETURNING *""",
+            camera_id, distance_m, speed_limit_kmh,
+            json.dumps(gate_a), json.dumps(gate_b),
+        )
+    settings = dict(row)
+    for key in ("gate_a", "gate_b"):
+        if isinstance(settings[key], str):
+            settings[key] = json.loads(settings[key])
+    return settings
+
+
+async def record_vehicle_speed_measurement(
+    camera_id: str,
+    track_id: int,
+    vehicle_type: str,
+    speed_kmh: float,
+    speed_limit_kmh: float,
+    speeding: bool,
+    direction: str,
+    measured_at: float,
+) -> dict[str, Any]:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO vehicle_speed_measurements (
+                   camera_id, track_id, vehicle_type, speed_kmh,
+                   speed_limit_kmh, speeding, direction, measured_at
+               )
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               RETURNING *""",
+            camera_id, track_id, vehicle_type, speed_kmh,
+            speed_limit_kmh, speeding, direction,
+            datetime.fromtimestamp(measured_at, UTC),
+        )
+        return dict(row)
+
+
+async def update_vehicle_speed_evidence(
+    camera_id: str,
+    measurement_id: int,
+    *,
+    snapshot_path: str | None = None,
+    video_path: str | None = None,
+) -> bool:
+    updates = []
+    values: list[Any] = [measurement_id, camera_id]
+    if snapshot_path is not None:
+        values.append(snapshot_path)
+        updates.append(f"snapshot_path = ${len(values)}")
+    if video_path is not None:
+        values.append(video_path)
+        updates.append(f"video_path = ${len(values)}")
+    if not updates:
+        raise ValueError("At least one speed evidence path must be provided")
+    async with get_pool().acquire() as conn:
+        result = await conn.execute(
+            f"""UPDATE vehicle_speed_measurements
+                   SET {", ".join(updates)}
+                 WHERE id = $1 AND camera_id = $2""",
+            *values,
+        )
+        return result.endswith(" 1")
+
+
+async def get_vehicle_speed_measurement(
+    camera_id: str, measurement_id: int,
+) -> dict[str, Any] | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT * FROM vehicle_speed_measurements
+               WHERE camera_id = $1 AND id = $2""",
+            camera_id, measurement_id,
+        )
+        return dict(row) if row else None
+
+
+async def list_vehicle_speed_measurements(
+    camera_id: str, limit: int = 50,
+) -> list[dict[str, Any]]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT * FROM vehicle_speed_measurements
+               WHERE camera_id = $1
+               ORDER BY measured_at DESC, id DESC
+               LIMIT $2""",
+            camera_id, limit,
+        )
+        return [dict(row) for row in rows]
 
 
 async def list_camera_zones(camera_id: str, enabled_only: bool = True) -> list[dict[str, Any]]:
@@ -577,15 +715,20 @@ async def create_camera(camera_id: str, name: str, rtsp_url: str,
         inferred_sub_url = config.sub_stream_url_for(main_stream_url)
     sub_stream_url = sub_stream_url or inferred_sub_url
     async with get_pool().acquire() as conn:
-        row = await conn.fetchrow(
-            """INSERT INTO cameras (
-                   camera_id, name, rtsp_url, main_stream_url, sub_stream_url,
-                   area_group_id, required_ppe, enabled
-               )
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *""",
-            camera_id, name, rtsp_url, main_stream_url, sub_stream_url,
-            area_group_id, required_ppe, enabled,
-        )
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """INSERT INTO cameras (
+                       camera_id, name, rtsp_url, main_stream_url, sub_stream_url,
+                       area_group_id, required_ppe, enabled
+                   )
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *""",
+                camera_id, name, rtsp_url, main_stream_url, sub_stream_url,
+                area_group_id, required_ppe, enabled,
+            )
+            await conn.execute(
+                "DELETE FROM camera_seed_exclusions WHERE camera_id = $1",
+                camera_id,
+            )
         return dict(row)
 
 
@@ -616,8 +759,17 @@ async def update_camera(camera_id: str, **fields) -> dict[str, Any] | None:
 
 async def delete_camera(camera_id: str) -> bool:
     async with get_pool().acquire() as conn:
-        result = await conn.execute("DELETE FROM cameras WHERE camera_id = $1", camera_id)
-        return result.endswith("1")
+        async with conn.transaction():
+            await conn.execute(
+                """INSERT INTO camera_seed_exclusions (camera_id)
+                   VALUES ($1)
+                   ON CONFLICT (camera_id) DO UPDATE SET deleted_at = now()""",
+                camera_id,
+            )
+            result = await conn.execute(
+                "DELETE FROM cameras WHERE camera_id = $1", camera_id,
+            )
+            return result.endswith("1")
 
 
 async def log_violation(camera_id: str, camera_name: str, zone: str, track_id: int,
@@ -1107,6 +1259,36 @@ async def enqueue_face_recognition_job(incident_id: int) -> bool:
                        processed_at = NULL""",
             incident_id,
         )
+        await conn.execute(
+            """INSERT INTO incident_face_person_matches (
+                       incident_id, person_track_id, person_bbox, status,
+                       violation_type, source
+                   )
+                   SELECT v.id, (person->>'track_id')::integer,
+                          person->'person_box', 'Queued',
+                          v.violation_type, 'live'
+                   FROM violations AS v
+                   CROSS JOIN LATERAL jsonb_array_elements(
+                       CASE
+                           WHEN jsonb_typeof(
+                               v.detection_metadata->'detected_persons'
+                           ) = 'array'
+                           THEN v.detection_metadata->'detected_persons'
+                           ELSE '[]'::jsonb
+                       END
+                   ) AS person
+                   WHERE v.id = $1
+                     AND person->>'track_id' ~ '^-?[0-9]+$'
+                     AND jsonb_typeof(person->'person_box') = 'array'
+                   ON CONFLICT (incident_id, person_track_id) DO UPDATE SET
+                       person_bbox = EXCLUDED.person_bbox,
+                       status = 'Queued', matched_person_id = NULL,
+                       similarity = NULL, margin_to_second = NULL,
+                       face_quality = '{}'::jsonb, face_bbox = NULL,
+                       face_crop = NULL, top3_candidates = '[]'::jsonb,
+                       top5_candidates = '[]'::jsonb, processed_at = NULL"""
+            , incident_id,
+        )
         return True
 
 
@@ -1135,6 +1317,30 @@ async def enqueue_missing_face_recognition_jobs() -> int:
                JOIN inserted_jobs AS j ON j.incident_id = v.id
                RETURNING incident_id""",
             sorted(config.FACE_VIOLATION_TYPES),
+        )
+        await conn.execute(
+            """INSERT INTO incident_face_person_matches (
+                       incident_id, person_track_id, person_bbox, status,
+                       violation_type, source
+                   )
+                   SELECT v.id, (person->>'track_id')::integer,
+                          person->'person_box', 'Queued',
+                          v.violation_type, 'live'
+                   FROM violations AS v
+                   JOIN face_recognition_jobs AS job ON job.incident_id = v.id
+                   CROSS JOIN LATERAL jsonb_array_elements(
+                       CASE
+                           WHEN jsonb_typeof(
+                               v.detection_metadata->'detected_persons'
+                           ) = 'array'
+                           THEN v.detection_metadata->'detected_persons'
+                           ELSE '[]'::jsonb
+                       END
+                   ) AS person
+                   WHERE job.status = 'pending'
+                     AND person->>'track_id' ~ '^-?[0-9]+$'
+                     AND jsonb_typeof(person->'person_box') = 'array'
+                   ON CONFLICT (incident_id, person_track_id) DO NOTHING"""
         )
         return len(rows)
 
@@ -1196,6 +1402,17 @@ async def claim_face_recognition_job() -> dict[str, Any] | None:
                        source = EXCLUDED.source,
                        reused_from_track = false,
                        processed_at = NULL""",
+            job["incident_id"], job["source"],
+        )
+        await conn.execute(
+            """UPDATE incident_face_person_matches
+                   SET status = 'Processing', matched_person_id = NULL,
+                       similarity = NULL, margin_to_second = NULL,
+                       face_quality = '{}'::jsonb, face_bbox = NULL,
+                       face_crop = NULL, top3_candidates = '[]'::jsonb,
+                       top5_candidates = '[]'::jsonb, processed_at = NULL,
+                       source = $2
+                   WHERE incident_id = $1""",
             job["incident_id"], job["source"],
         )
         incident = await conn.fetchrow(
@@ -1412,6 +1629,88 @@ async def complete_face_recognition_job(
         await _finish_historian_job_item(conn, incident_id, status)
 
 
+async def complete_face_person_match(
+        incident_id: int, person_track_id: int,
+        person_bbox: list[int], status: str,
+        matched_person_id: int | None, similarity: float | None,
+        margin_to_second: float | None, face_quality: dict[str, Any],
+        face_bbox: list[int] | None,
+        top5_candidates: list[dict[str, Any]], model_name: str,
+        model_version: str, face_crop: bytes | None = None,
+        source: str = "live", thresholds: dict[str, Any] | None = None,
+) -> None:
+    if status not in {
+        "MATCHED", "NEEDS_REVIEW", "UNKNOWN", "FACE_NOT_VISIBLE",
+    }:
+        raise ValueError("Invalid completed face-recognition status")
+    if source not in {"live", "historian"}:
+        raise ValueError("Invalid face-recognition source")
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            """INSERT INTO incident_face_person_matches (
+                       incident_id, person_track_id, person_bbox, status,
+                       matched_person_id, similarity, margin_to_second,
+                       face_quality, face_bbox, face_crop, top3_candidates,
+                       top5_candidates, model_name, model_version,
+                       processed_at, source, thresholds, violation_type
+                   )
+                   SELECT $1,$2,$3::jsonb,$4,$5,$6,$7,$8::jsonb,
+                          $9::jsonb,$10,$11::jsonb,$11::jsonb,$12,$13,
+                          now(),$14,$15::jsonb,v.violation_type
+                   FROM violations AS v
+                   WHERE v.id = $1
+                   ON CONFLICT (incident_id, person_track_id) DO UPDATE SET
+                       person_bbox = EXCLUDED.person_bbox,
+                       status = EXCLUDED.status,
+                       matched_person_id = EXCLUDED.matched_person_id,
+                       similarity = EXCLUDED.similarity,
+                       margin_to_second = EXCLUDED.margin_to_second,
+                       face_quality = EXCLUDED.face_quality,
+                       face_bbox = EXCLUDED.face_bbox,
+                       face_crop = EXCLUDED.face_crop,
+                       top3_candidates = EXCLUDED.top3_candidates,
+                       top5_candidates = EXCLUDED.top5_candidates,
+                       model_name = EXCLUDED.model_name,
+                       model_version = EXCLUDED.model_version,
+                       processed_at = now(), source = EXCLUDED.source,
+                       thresholds = EXCLUDED.thresholds""",
+            incident_id, person_track_id, json.dumps(person_bbox), status,
+            matched_person_id, similarity, margin_to_second,
+            json.dumps(face_quality),
+            json.dumps(face_bbox) if face_bbox is not None else None,
+            face_crop, json.dumps(top5_candidates), model_name,
+            model_version, source, json.dumps(thresholds or {}),
+        )
+
+
+async def fail_face_person_match(
+        incident_id: int, person_track_id: int, person_bbox: list[int],
+        error_code: str,
+) -> None:
+    async with get_pool().acquire() as conn:
+        await conn.execute(
+            """INSERT INTO incident_face_person_matches (
+                       incident_id, person_track_id, person_bbox, status,
+                       face_quality, processed_at, violation_type
+                   )
+                   SELECT $1,$2,$3::jsonb,'Error',$4::jsonb,now(),
+                          violation_type
+                   FROM violations WHERE id = $1
+                   ON CONFLICT (incident_id, person_track_id) DO UPDATE SET
+                       person_bbox = EXCLUDED.person_bbox,
+                       status = 'Error', face_quality = EXCLUDED.face_quality,
+                       matched_person_id = NULL, similarity = NULL,
+                       margin_to_second = NULL, face_bbox = NULL,
+                       face_crop = NULL, top3_candidates = '[]'::jsonb,
+                       top5_candidates = '[]'::jsonb, model_name = NULL,
+                       model_version = NULL, review_decision = NULL,
+                       reviewed_by = NULL, reviewed_at = NULL,
+                       review_comment = NULL, processed_at = now()""",
+            incident_id, person_track_id, json.dumps(person_bbox),
+            json.dumps({"error_code": error_code}),
+        )
+
+
 async def fail_face_recognition_job(incident_id: int, error_code: str) -> None:
     async with get_pool().acquire() as conn, conn.transaction():
         await conn.execute(
@@ -1426,7 +1725,14 @@ async def fail_face_recognition_job(incident_id: int, error_code: str) -> None:
                    ON CONFLICT (incident_id) DO UPDATE SET
                        status = 'Error', face_quality = EXCLUDED.face_quality,
                        violation_type = EXCLUDED.violation_type,
+                       matched_person_id = NULL, similarity = NULL,
+                       margin_to_second = NULL, face_bbox = NULL,
                        face_crop = NULL,
+                       top3_candidates = '[]'::jsonb,
+                       top5_candidates = '[]'::jsonb,
+                       model_name = NULL, model_version = NULL,
+                       review_decision = NULL, reviewed_by = NULL,
+                       reviewed_at = NULL, review_comment = NULL,
                        processed_at = now()""",
             incident_id, json.dumps({"error_code": error_code}),
         )
@@ -1443,7 +1749,8 @@ async def fail_face_recognition_job(incident_id: int, error_code: str) -> None:
 async def get_face_match(incident_id: int) -> dict[str, Any] | None:
     async with get_pool().acquire() as conn:
         row = await conn.fetchrow(
-            """SELECT m.*, e.employee_code AS matched_employee_code,
+            """SELECT m.*, 1::bigint AS person_number,
+                      e.employee_code AS matched_employee_code,
                       e.full_name AS matched_full_name,
                       e.department AS matched_department,
                       e.designation AS matched_designation,
@@ -1469,12 +1776,141 @@ async def get_face_match(incident_id: int) -> dict[str, Any] | None:
         return result
 
 
+async def get_face_person_match(
+        incident_id: int, person_track_id: int,
+) -> dict[str, Any] | None:
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT m.*,
+                      (SELECT count(*) + 1
+                       FROM incident_face_person_matches AS prior
+                       WHERE prior.incident_id = m.incident_id
+                         AND prior.person_track_id < m.person_track_id)
+                        AS person_number,
+                      e.employee_code AS matched_employee_code,
+                      e.full_name AS matched_full_name,
+                      e.department AS matched_department,
+                      e.designation AS matched_designation,
+                      e.active AS matched_person_active,
+                      v.camera_id, v.camera_name,
+                      v.area_group AS area_group_name,
+                      v.epoch_time, v.review_status AS violation_status,
+                      v.clean_snapshot_path, v.snapshot_path,
+                      v.detection_metadata
+               FROM incident_face_person_matches AS m
+               JOIN violations AS v ON v.id = m.incident_id
+               LEFT JOIN face_enrollments AS e
+                 ON e.person_id = m.matched_person_id
+               WHERE m.incident_id = $1 AND m.person_track_id = $2""",
+            incident_id, person_track_id,
+        )
+        if row is None:
+            row = await conn.fetchrow(
+                """SELECT m.*, v.track_id AS person_track_id,
+                          1 AS person_number,
+                          v.detection_metadata->'person_box' AS person_bbox,
+                          e.employee_code AS matched_employee_code,
+                          e.full_name AS matched_full_name,
+                          e.department AS matched_department,
+                          e.designation AS matched_designation,
+                          e.active AS matched_person_active,
+                          v.camera_id, v.camera_name,
+                          v.area_group AS area_group_name,
+                          v.epoch_time, v.review_status AS violation_status,
+                          v.clean_snapshot_path, v.snapshot_path,
+                          v.detection_metadata
+                   FROM incident_face_matches AS m
+                   JOIN violations AS v ON v.id = m.incident_id
+                   LEFT JOIN face_enrollments AS e
+                     ON e.person_id = m.matched_person_id
+                   WHERE m.incident_id = $1 AND v.track_id = $2
+                     AND NOT EXISTS (
+                         SELECT 1 FROM incident_face_person_matches AS people
+                         WHERE people.incident_id = m.incident_id
+                     )""",
+                incident_id, person_track_id,
+            )
+        if row is None:
+            return None
+        result = dict(row)
+        result["top3_candidates"] = result.get("top5_candidates") or result.get(
+            "top3_candidates", [],
+        )
+        return result
+
+
+async def list_face_person_matches(incident_id: int) -> list[dict[str, Any]]:
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT person_track_id, person_bbox, status, face_quality,
+                      (face_crop IS NOT NULL) AS face_crop_available,
+                      review_decision, processed_at
+               FROM incident_face_person_matches
+               WHERE incident_id = $1
+               ORDER BY person_track_id""",
+            incident_id,
+        )
+        return [dict(row) for row in rows]
+
+
+async def get_face_person_summaries(
+        incident_ids: list[int],
+) -> dict[int, dict[str, Any]]:
+    if not incident_ids:
+        return {}
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT v.id AS incident_id,
+                      CASE
+                        WHEN jsonb_typeof(v.detection_metadata->'detected_persons') = 'array'
+                        THEN jsonb_array_length(v.detection_metadata->'detected_persons')
+                        ELSE 0
+                      END AS detected_person_count,
+                      COALESCE(person_rows.person_count, 0)
+                        AS person_records_count,
+                      COALESCE(person_rows.face_crops_available, 0)
+                        + CASE
+                            WHEN COALESCE(person_rows.person_count, 0) = 0
+                             AND legacy.face_crop IS NOT NULL THEN 1
+                            ELSE 0
+                          END AS face_crops_available,
+                      COALESCE(person_rows.people, '[]'::jsonb) AS people
+               FROM violations AS v
+               LEFT JOIN LATERAL (
+                   SELECT count(*) AS person_count,
+                          count(*) FILTER (WHERE m.face_crop IS NOT NULL)
+                            AS face_crops_available,
+                          jsonb_agg(jsonb_build_object(
+                              'person_track_id', m.person_track_id,
+                              'person_bbox', m.person_bbox,
+                              'status', m.status,
+                              'face_quality', m.face_quality,
+                              'face_crop_available', m.face_crop IS NOT NULL,
+                              'review_decision', m.review_decision
+                          ) ORDER BY m.person_track_id) AS people
+                   FROM incident_face_person_matches AS m
+                   WHERE m.incident_id = v.id
+               ) AS person_rows ON true
+               LEFT JOIN incident_face_matches AS legacy
+                 ON legacy.incident_id = v.id
+               WHERE v.id = ANY($1::bigint[])""",
+            incident_ids,
+        )
+        return {
+            int(row["incident_id"]): dict(row)
+            for row in rows
+        }
+
+
 async def get_face_match_availability(incident_ids: list[int]) -> set[int]:
     if not incident_ids:
         return set()
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
             """SELECT incident_id FROM incident_face_matches
+               WHERE incident_id = ANY($1::bigint[])
+               UNION
+               SELECT incident_id FROM incident_face_person_matches
                WHERE incident_id = ANY($1::bigint[])""",
             incident_ids,
         )
@@ -1491,23 +1927,66 @@ async def list_face_matches(
 ) -> list[dict[str, Any]]:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
-            """SELECT m.incident_id, m.violation_type, m.status, m.source,
+            """WITH match_records AS (
+                   SELECT m.incident_id, m.person_track_id,
+                          row_number() OVER (
+                              PARTITION BY m.incident_id
+                              ORDER BY m.person_track_id
+                          ) AS person_number,
+                          m.person_bbox,
+                          true AS person_match,
+                          m.violation_type, m.status, m.source,
+                          m.similarity, m.margin_to_second,
+                          false AS reused_from_track,
+                          m.review_decision, m.reviewed_by, m.reviewed_at,
+                          m.processed_at, m.face_quality, m.face_bbox,
+                          m.model_version,
+                          m.thresholds, m.top5_candidates,
+                          m.matched_person_id,
+                          (m.face_crop IS NOT NULL) AS face_crop_available
+                   FROM incident_face_person_matches AS m
+                   UNION ALL
+                   SELECT m.incident_id, v.track_id AS person_track_id,
+                          1::bigint AS person_number,
+                          v.detection_metadata->'person_box' AS person_bbox,
+                          false AS person_match,
+                          m.violation_type, m.status, m.source,
+                          m.similarity, m.margin_to_second,
+                          m.reused_from_track,
+                          m.review_decision, m.reviewed_by, m.reviewed_at,
+                          m.processed_at, m.face_quality, m.face_bbox,
+                          m.model_version,
+                          m.thresholds, m.top5_candidates,
+                          m.matched_person_id,
+                          (m.face_crop IS NOT NULL) AS face_crop_available
+                   FROM incident_face_matches AS m
+                   JOIN violations AS v ON v.id = m.incident_id
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM incident_face_person_matches AS person_match
+                       WHERE person_match.incident_id = m.incident_id
+                   )
+               )
+               SELECT m.incident_id, m.person_track_id, m.person_number,
+                      m.person_bbox,
+                      m.person_match,
+                      m.violation_type, m.status, m.source,
                       m.similarity, m.margin_to_second, m.reused_from_track,
                       m.review_decision, m.reviewed_by, m.reviewed_at,
-                      m.processed_at, m.face_bbox, m.model_version,
+                      m.processed_at, m.face_quality, m.face_bbox,
+                      m.model_version,
                       m.thresholds, m.top5_candidates,
                       v.camera_id, v.camera_name,
                       v.area_group AS area_group_name,
                       (v.snapshot_path IS NOT NULL) AS snapshot_available,
                       (v.clean_snapshot_path IS NOT NULL) AS clean_snapshot_available,
-                      (m.face_crop IS NOT NULL) AS face_crop_available,
+                      m.face_crop_available,
                       v.epoch_time, v.review_status AS violation_status,
                       e.person_id, e.employee_code, e.full_name,
                       e.department, e.designation,
                       enrolled_photo.person_id AS gallery_photo_person_id,
                       enrolled_photo.embedding_id AS gallery_photo_id,
                       count(*) OVER() AS total_count
-               FROM incident_face_matches AS m
+               FROM match_records AS m
                JOIN violations AS v ON v.id = m.incident_id
                LEFT JOIN face_enrollments AS e
                  ON e.person_id = m.matched_person_id
@@ -1543,7 +2022,8 @@ async def list_face_matches(
                       e.full_name ILIKE '%' || $10 || '%' OR
                       e.employee_code ILIKE '%' || $10 || '%')
                  AND ($11::text IS NULL OR m.source = $11)
-               ORDER BY m.processed_at DESC NULLS LAST, m.incident_id DESC
+               ORDER BY m.processed_at DESC NULLS LAST,
+                        m.incident_id DESC, m.person_track_id
                LIMIT $12 OFFSET $13""",
             violation_type, date_from, date_to, camera_id, status,
             employee, department, score_min, score_max, search, source,
@@ -1775,12 +2255,26 @@ async def get_face_employee_history(
 ) -> list[dict[str, Any]]:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
-            """SELECT m.incident_id, m.violation_type, m.status, m.similarity,
+            """WITH match_records AS (
+                   SELECT incident_id, violation_type, status, similarity,
+                          review_decision, source, matched_person_id
+                   FROM incident_face_person_matches
+                   UNION ALL
+                   SELECT m.incident_id, m.violation_type, m.status,
+                          m.similarity, m.review_decision, m.source,
+                          m.matched_person_id
+                   FROM incident_face_matches AS m
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM incident_face_person_matches AS pm
+                       WHERE pm.incident_id = m.incident_id
+                   )
+               )
+               SELECT m.incident_id, m.violation_type, m.status, m.similarity,
                       m.review_decision, m.source, v.camera_id, v.camera_name,
                       v.area_group AS area_group_name, v.epoch_time,
                       v.review_status AS violation_status,
                       count(*) OVER() AS repeat_offender_count
-               FROM incident_face_matches AS m
+               FROM match_records AS m
                JOIN violations AS v ON v.id = m.incident_id
                WHERE m.matched_person_id = $1
                ORDER BY v.epoch_time DESC, m.incident_id DESC
@@ -1914,16 +2408,32 @@ async def remove_face_enrollment(
 async def review_face_match(
         incident_id: int, decision: str, reviewer_id: int | None,
         comment: str | None, person_id: int | None = None,
+        person_track_id: int | None = None,
 ) -> dict[str, Any] | None:
     if decision not in {"Confirmed", "Rejected", "Reassigned", "Unknown"}:
         raise ValueError("Invalid face review decision")
     async with get_pool().acquire() as conn:
         async with conn.transaction():
+            table = (
+                "incident_face_person_matches"
+                if person_track_id is not None
+                else "incident_face_matches"
+            )
+            where_clause = (
+                "incident_id = $1 AND person_track_id = $2"
+                if person_track_id is not None
+                else "incident_id = $1"
+            )
+            value_start = 3 if person_track_id is not None else 2
+            match_args = (
+                (incident_id, person_track_id)
+                if person_track_id is not None else (incident_id,)
+            )
             match = await conn.fetchrow(
-                """SELECT status, matched_person_id, similarity, top5_candidates
-                   FROM incident_face_matches
-                   WHERE incident_id = $1 FOR UPDATE""",
-                incident_id,
+                f"""SELECT status, matched_person_id, similarity, top5_candidates
+                    FROM {table}
+                    WHERE {where_clause} FOR UPDATE""",
+                *match_args,
             )
             if match is None:
                 return None
@@ -1966,16 +2476,21 @@ async def review_face_match(
                     None,
                 )
             row = await conn.fetchrow(
-                """UPDATE incident_face_matches
-                   SET status = $2, matched_person_id = $3, similarity = $4,
-                       review_decision = $5, reviewed_by = $6, reviewed_at = now(),
-                       review_comment = $7
-                   WHERE incident_id = $1
-                   RETURNING incident_id, status, matched_person_id, similarity,
-                             margin_to_second, top3_candidates, review_decision,
-                             reviewed_by, reviewed_at, review_comment""",
-                incident_id, status, matched_person_id, similarity, decision,
-                reviewer_id, comment,
+                f"""UPDATE {table}
+                    SET status = ${value_start},
+                        matched_person_id = ${value_start + 1},
+                        similarity = ${value_start + 2},
+                        review_decision = ${value_start + 3},
+                        reviewed_by = ${value_start + 4}, reviewed_at = now(),
+                        review_comment = ${value_start + 5}
+                    WHERE {where_clause}
+                    RETURNING incident_id, status, matched_person_id, similarity,
+                              margin_to_second, top3_candidates, review_decision,
+                              reviewed_by, reviewed_at, review_comment""",
+                *(match_args + (
+                    status, matched_person_id, similarity, decision,
+                    reviewer_id, comment,
+                )),
             )
             return dict(row)
 
@@ -2081,11 +2596,23 @@ async def get_face_repeat_violations(
 ) -> list[dict[str, Any]]:
     async with get_pool().acquire() as conn:
         rows = await conn.fetch(
-            """SELECT e.person_id, e.employee_code, e.full_name, e.department,
+            """WITH match_records AS (
+                   SELECT incident_id, matched_person_id, review_decision
+                   FROM incident_face_person_matches
+                   UNION ALL
+                   SELECT m.incident_id, m.matched_person_id,
+                          m.review_decision
+                   FROM incident_face_matches AS m
+                   WHERE NOT EXISTS (
+                       SELECT 1 FROM incident_face_person_matches AS pm
+                       WHERE pm.incident_id = m.incident_id
+                   )
+               )
+               SELECT e.person_id, e.employee_code, e.full_name, e.department,
                       v.violation_type,
                       count(*) AS confirmed_violations,
                       max(v.epoch_time) AS last_violation_epoch
-               FROM incident_face_matches AS m
+               FROM match_records AS m
                JOIN face_enrollments AS e ON e.person_id = m.matched_person_id
                JOIN violations AS v ON v.id = m.incident_id
                WHERE m.review_decision IN ('Confirmed', 'Reassigned')
@@ -2113,7 +2640,17 @@ async def delete_expired_face_match_records(cutoff: datetime) -> int:
                        SELECT incident_id FROM incident_face_matches
                        WHERE COALESCE(processed_at, created_at) < $1
                          AND status <> 'Processing'
+                       UNION
+                       SELECT incident_id FROM incident_face_person_matches
+                       WHERE COALESCE(processed_at, created_at) < $1
+                         AND status <> 'Processing'
                    )""",
+            cutoff,
+        )
+        person_result = await conn.execute(
+            """DELETE FROM incident_face_person_matches
+                   WHERE COALESCE(processed_at, created_at) < $1
+                     AND status <> 'Processing'""",
             cutoff,
         )
         result = await conn.execute(
@@ -2122,7 +2659,9 @@ async def delete_expired_face_match_records(cutoff: datetime) -> int:
                      AND status <> 'Processing'""",
             cutoff,
         )
-        return int(result.rsplit(" ", 1)[-1])
+        deleted_people = int(person_result.rsplit(" ", 1)[-1])
+        deleted_incidents = int(result.rsplit(" ", 1)[-1])
+        return deleted_people + deleted_incidents
 
 
 async def mark_alert_dispatched(violation_id: int):
@@ -2390,7 +2929,13 @@ async def get_recent_violations(limit: int = 50, camera_id: str | None = None,
         query += f" AND area_group_id = ${len(params)}"
     if employee_code is not None or department is not None:
         query += """ AND EXISTS (
-            SELECT 1 FROM incident_face_matches AS fm
+            SELECT 1 FROM (
+                SELECT incident_id, matched_person_id, review_decision
+                FROM incident_face_matches
+                UNION ALL
+                SELECT incident_id, matched_person_id, review_decision
+                FROM incident_face_person_matches
+            ) AS fm
             JOIN face_enrollments AS fe ON fe.person_id = fm.matched_person_id
             WHERE fm.incident_id = violations.id
               AND fm.review_decision IN ('Confirmed', 'Reassigned')

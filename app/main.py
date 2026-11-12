@@ -17,16 +17,15 @@ import logging
 import os
 import re
 import secrets
-import sys
 import stat
+import sys
 import tempfile
 import time
 import traceback
 import zipfile
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
@@ -34,9 +33,9 @@ import cv2
 import numpy as np
 import uvicorn
 from fastapi import (
+    FastAPI,
     File,
     Form,
-    FastAPI,
     HTTPException,
     Query,
     Request,
@@ -49,10 +48,11 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from . import auth, config, db, feedback
+from . import auth, config, db, feedback, git_operations, settings_store
 from .alerts.alert_manager import AlertManager
-from .cameras.camera_manager import CameraManager
+from .cameras.camera_manager import CameraManager, convert_speed_clip_to_webm
 from .detection.detector import PPEDetector
+from .detection.speed_tracking import validate_gate_pair
 from .faces.face_recognition import FaceRecognitionWorker
 from .ws_hub import hub
 
@@ -146,6 +146,8 @@ if os.path.isdir(DASHBOARD_DIR):
 
 
 def _minimum_role(path: str, method: str) -> str:
+    if path.startswith(("/api/app-settings", "/api/git/")):
+        return "admin"
     if path == "/api/alerts/power-automate/test":
         return "manager"
     if path == "/api/violations/cleanup":
@@ -219,6 +221,18 @@ def _require_face_manager(request: Request) -> dict[str, Any]:
 def _require_face_admin(request: Request) -> dict[str, Any]:
     actor = _require_face_manager(request)
     if actor.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+    return actor
+
+
+def _require_admin(request: Request) -> dict[str, Any]:
+    if not config.AUTH_ENABLED:
+        raise HTTPException(
+            status_code=403,
+            detail="Authentication must be enabled to access application administration",
+        )
+    actor = getattr(request.state, "user", None)
+    if actor is None or actor.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin role required")
     return actor
 
@@ -362,6 +376,7 @@ class FaceDatasetImportIn(BaseModel):
 class FaceMatchReviewIn(BaseModel):
     decision: Literal["Confirmed", "Rejected", "Reassigned", "Unknown"]
     person_id: int | None = Field(default=None, ge=1)
+    person_track_id: int | None = Field(default=None, ge=0)
     comment: str | None = Field(default=None, max_length=2000)
     add_crop_embedding: bool = False
 
@@ -392,6 +407,19 @@ class FaceMatchSettingsIn(BaseModel):
         if any(not 0 <= value <= 1 for value in self.quality_min_by_violation.values()):
             raise ValueError("Quality thresholds must be between 0 and 1")
         return self
+
+
+class ApplicationSettingsIn(BaseModel):
+    values: dict[str, Any]
+
+
+class GitCommitIn(BaseModel):
+    message: str = Field(min_length=1, max_length=200)
+    confirmation: str = Field(min_length=1, max_length=40)
+
+
+class GitPushIn(BaseModel):
+    confirmation: str = Field(min_length=1, max_length=40)
 
 
 class FaceHistorianJobIn(BaseModel):
@@ -673,6 +701,74 @@ async def health():
             _camera_manager.stream_telemetry() if _camera_manager else {}
         ),
     }
+
+
+@app.get("/api/app-settings")
+async def read_application_settings(request: Request):
+    _require_admin(request)
+    return {
+        "groups": settings_store.get_settings(vars(config)),
+        "restart_required": True,
+    }
+
+
+@app.put("/api/app-settings")
+async def save_application_settings(
+    payload: ApplicationSettingsIn, request: Request,
+):
+    _require_admin(request)
+    try:
+        settings_store.save_settings(payload.values, vars(config))
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except (OSError, RuntimeError) as error:
+        logger.exception("Could not save dashboard application settings")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save settings. Check the application log.",
+        ) from error
+    return {
+        "saved": True,
+        "restart_required": True,
+        "message": "Settings saved. Restart the application for them to take effect.",
+    }
+
+
+@app.get("/api/git/status")
+def read_git_status(request: Request):
+    _require_admin(request)
+    try:
+        return git_operations.status()
+    except git_operations.GitOperationError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+@app.post("/api/git/commit")
+def commit_git_changes(payload: GitCommitIn, request: Request):
+    _require_admin(request)
+    if payload.confirmation != "COMMIT ALL CHANGES":
+        raise HTTPException(
+            status_code=422,
+            detail='Type "COMMIT ALL CHANGES" after reviewing the file list.',
+        )
+    try:
+        return git_operations.commit_all(payload.message)
+    except git_operations.GitOperationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.post("/api/git/push")
+def push_git_changes(payload: GitPushIn, request: Request):
+    _require_admin(request)
+    if payload.confirmation != "PUSH TO ORIGIN":
+        raise HTTPException(
+            status_code=422,
+            detail='Type "PUSH TO ORIGIN" to confirm the push.',
+        )
+    try:
+        return git_operations.push_current_branch()
+    except git_operations.GitOperationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @app.get("/api/face/readiness")
@@ -1087,6 +1183,36 @@ class CameraUpdate(BaseModel):
     enabled: bool | None = None
 
 
+class CameraSpeedSettingsIn(BaseModel):
+    distance_m: float = Field(gt=0, le=500)
+    speed_limit_kmh: float = Field(gt=0, le=200)
+    gate_a: list[list[float]]
+    gate_b: list[list[float]]
+
+    @field_validator("gate_a", "gate_b")
+    @classmethod
+    def validate_gate(cls, gate):
+        if len(gate) != 2 or any(
+            len(point) != 2
+            or any(not 0 <= coordinate <= 1 for coordinate in point)
+            for point in gate
+        ):
+            raise ValueError(
+                "Each speed gate must contain two normalized [x, y] points",
+            )
+        if gate[0] == gate[1]:
+            raise ValueError("A speed gate must have non-zero length")
+        return gate
+
+    @model_validator(mode="after")
+    def validate_gates_are_distinct(self):
+        try:
+            validate_gate_pair(self.gate_a, self.gate_b)
+        except ValueError as error:
+            raise ValueError(str(error)) from error
+        return self
+
+
 class CameraZoneIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     polygon: list[list[float]]
@@ -1221,6 +1347,144 @@ async def get_camera(camera_id: str):
     if not cam:
         raise HTTPException(status_code=404, detail="Camera not found")
     return _public_camera(cam)
+
+
+@app.get("/api/cameras/{camera_id}/speed-settings")
+async def get_camera_speed_settings(camera_id: str):
+    camera = await db.get_camera(camera_id)
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    settings = await db.get_camera_speed_settings(camera_id)
+    if settings is None:
+        return {
+            "camera_id": camera_id,
+            "enabled": False,
+            "distance_m": None,
+            "speed_limit_kmh": None,
+            "gate_a": None,
+            "gate_b": None,
+        }
+    if settings["enabled"]:
+        try:
+            validate_gate_pair(settings["gate_a"], settings["gate_b"])
+        except ValueError as error:
+            settings["calibration_error"] = str(error)
+    return settings
+
+
+@app.put("/api/cameras/{camera_id}/speed-settings")
+async def update_camera_speed_settings(
+    camera_id: str, settings: CameraSpeedSettingsIn,
+):
+    camera = await db.get_camera(camera_id)
+    if not camera:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    if not camera["enabled"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Enable this camera before configuring vehicle speed tracking",
+        )
+    saved = await db.set_camera_speed_settings(
+        camera_id,
+        settings.distance_m,
+        settings.speed_limit_kmh,
+        settings.gate_a,
+        settings.gate_b,
+    )
+    if _camera_manager is None or not await _camera_manager.refresh_camera(
+        camera_id, restart_stream=False,
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Settings were saved, but the camera worker could not reload them",
+        )
+    return saved
+
+
+@app.get("/api/cameras/{camera_id}/speed-measurements")
+async def get_camera_speed_measurements(
+    camera_id: str,
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    if not await db.get_camera(camera_id):
+        raise HTTPException(status_code=404, detail="Camera not found")
+    measurements = await db.list_vehicle_speed_measurements(camera_id, limit)
+    for measurement in measurements:
+        measurement_id = int(measurement["id"])
+        measurement["snapshot_url"] = (
+            f"/api/cameras/{camera_id}/speed-measurements/"
+            f"{measurement_id}/evidence"
+            if measurement.get("snapshot_path") else None
+        )
+        measurement["video_url"] = (
+            f"/api/cameras/{camera_id}/speed-measurements/"
+            f"{measurement_id}/evidence?kind=video"
+            if measurement.get("video_path") else None
+        )
+        measurement.pop("snapshot_path", None)
+        measurement.pop("video_path", None)
+    return measurements
+
+
+@app.get(
+    "/api/cameras/{camera_id}/speed-measurements/{measurement_id}/evidence",
+)
+async def get_vehicle_speed_evidence(
+    camera_id: str,
+    measurement_id: int,
+    kind: Literal["snapshot", "video"] = "snapshot",
+):
+    measurement = await db.get_vehicle_speed_measurement(
+        camera_id, measurement_id,
+    )
+    if measurement is None:
+        raise HTTPException(status_code=404, detail="Speed measurement not found")
+    path = measurement.get(
+        "snapshot_path" if kind == "snapshot" else "video_path",
+    )
+    if not path or not os.path.isfile(path):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Speed measurement {kind} evidence is not available",
+        )
+    if kind == "video":
+        original_path = path
+        try:
+            path = await asyncio.to_thread(
+                convert_speed_clip_to_webm, original_path,
+            )
+        except OSError as error:
+            logger.exception(
+                "Could not convert saved speed clip for measurement %s",
+                measurement_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Speed clip could not be converted to browser-playable video",
+            ) from error
+        if path != original_path:
+            updated = await db.update_vehicle_speed_evidence(
+                camera_id, measurement_id, video_path=path,
+            )
+            if not updated:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Speed measurement disappeared during clip conversion",
+                )
+            try:
+                os.remove(original_path)
+            except OSError:
+                logger.warning(
+                    "Converted speed clip, but could not remove old clip %s",
+                    original_path,
+                    exc_info=True,
+                )
+    return FileResponse(
+        path,
+        media_type="image/jpeg" if kind == "snapshot" else "video/webm",
+        filename=os.path.basename(path),
+        content_disposition_type="inline",
+    )
 
 
 @app.post("/api/cameras")
@@ -1475,7 +1739,37 @@ async def violations(request: Request,
         await db.get_face_match_availability([int(row["id"]) for row in rows])
         if config.FACE_ENABLED else set()
     )
+    face_summaries = (
+        await db.get_face_person_summaries([int(row["id"]) for row in rows])
+        if config.FACE_ENABLED else {}
+    )
     for row in rows:
+        metadata = row.get("detection_metadata") or {}
+        if isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except json.JSONDecodeError:
+                metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        row["detection_metadata"] = metadata
+        summary = face_summaries.get(int(row["id"]), {})
+        row["detected_person_count"] = max(
+            int(summary.get("detected_person_count") or 0),
+            int(summary.get("person_records_count") or 0),
+            len(metadata.get("detected_persons", []))
+            if isinstance(metadata.get("detected_persons"), list) else 0,
+        )
+        row["face_crops_available"] = int(
+            summary.get("face_crops_available") or 0
+        )
+        people = summary.get("people") or []
+        if isinstance(people, str):
+            try:
+                people = json.loads(people)
+            except json.JSONDecodeError:
+                people = []
+        row["detected_people"] = people if isinstance(people, list) else []
         row["face_recognition_enabled"] = config.FACE_ENABLED
         row["face_match_available"] = int(row["id"]) in available_ids
         row["snapshot_url"] = f"/api/snapshot/{row['id']}" if row.get("snapshot_path") else None
@@ -1489,24 +1783,59 @@ async def violations(request: Request,
 
 @app.get("/api/violations/{violation_id}/face-match")
 async def get_violation_face_match(
-        violation_id: int, request: Request):
+        violation_id: int, request: Request,
+        person_track_id: int | None = Query(default=None, ge=0)):
     actor = _require_face_manager(request)
     violation = await db.get_violation_by_id(violation_id)
     if violation is None:
         raise HTTPException(status_code=404, detail="Incident not found")
-    match = await db.get_face_match(violation_id)
+    match = (
+        await db.get_face_person_match(violation_id, person_track_id)
+        if person_track_id is not None
+        else await db.get_face_match(violation_id)
+    )
     await db.write_audit_log(
         "face_identity_viewed", int(actor["user_id"]), actor["email"],
-        target_type="incident", target_id=str(violation_id),
-        details={"view": "match_details", "match_available": match is not None},
+        target_type=(
+            "incident_face_person"
+            if person_track_id is not None else "incident"
+        ),
+        target_id=(
+            f"{violation_id}:{person_track_id}"
+            if person_track_id is not None else str(violation_id)
+        ),
+        details={
+            "view": "match_details",
+            "match_available": match is not None,
+            "person_track_id": person_track_id,
+        },
     )
     if match is None:
         return {"incident_id": violation_id, "status": "Queued"}
-    encrypted_face_crop = match.pop("face_crop", None)
-    match["face_crop_available"] = encrypted_face_crop is not None
+    match.pop("face_crop", None)
     for key in ("face_quality", "face_bbox", "top3_candidates", "top5_candidates", "thresholds"):
         if isinstance(match.get(key), str):
-            match[key] = json.loads(match[key])
+            try:
+                match[key] = json.loads(match[key])
+            except json.JSONDecodeError:
+                match[key] = None
+    from .faces.face_dataset import _normalize_face_bbox
+
+    face_bbox = _normalize_face_bbox(match.get("face_bbox"))
+    match["face_bbox"] = list(face_bbox) if face_bbox else None
+    evidence_path = (
+        violation.get("clean_snapshot_path") or violation.get("snapshot_path")
+    )
+    match["face_crop_available"] = bool(face_bbox and evidence_path)
+    if person_track_id is not None:
+        metadata = match.get("detection_metadata") or {}
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["person_box"] = match.get("person_bbox")
+        match["detection_metadata"] = metadata
+        match["person_track_id"] = person_track_id
     match["snapshot_url"] = (
         f"/api/snapshot/{violation_id}"
         if violation.get("snapshot_path") else None
@@ -1519,25 +1848,56 @@ async def get_violation_face_match(
 
 
 @app.get("/api/violations/{violation_id}/face-crop")
-async def get_violation_face_crop(violation_id: int, request: Request):
+async def get_violation_face_crop(
+        violation_id: int, request: Request,
+        person_track_id: int | None = Query(default=None, ge=0)):
     actor = _require_face_manager(request)
-    match = await db.get_face_match(violation_id)
-    if match is None or not match.get("face_crop"):
+    violation = await db.get_violation_by_id(violation_id)
+    if violation is None:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    match = (
+        await db.get_face_person_match(violation_id, person_track_id)
+        if person_track_id is not None
+        else await db.get_face_match(violation_id)
+    )
+    if match is None:
         raise HTTPException(status_code=404, detail="Face crop is not available")
-    from .faces.face_dataset import _encryption_key, decrypt_face_crop
+    face_bbox = match.get("face_bbox")
+    if isinstance(face_bbox, str):
+        try:
+            face_bbox = json.loads(face_bbox)
+        except json.JSONDecodeError:
+            face_bbox = None
+    from .faces.face_dataset import _normalize_face_bbox, _read_face_bbox_crop
 
-    try:
-        face_crop = await asyncio.to_thread(
-            decrypt_face_crop, match["face_crop"], _encryption_key(),
+    normalized_bbox = _normalize_face_bbox(face_bbox)
+    image_path = (
+        violation.get("clean_snapshot_path") or violation.get("snapshot_path")
+    )
+    if normalized_bbox is None or not image_path:
+        raise HTTPException(status_code=404, detail="Face crop is not available")
+    face_crop = await asyncio.to_thread(
+        _read_face_bbox_crop, image_path, normalized_bbox,
+    )
+    if face_crop is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Face crop could not be read from incident evidence",
         )
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=503, detail="Face crop is unavailable") from exc
     await db.write_audit_log(
         "face_identity_viewed", int(actor["user_id"]), actor["email"],
-        target_type="incident", target_id=str(violation_id),
-        details={"view": "face_crop"},
+        target_type="incident_face_person" if person_track_id is not None else "incident",
+        target_id=(
+            f"{violation_id}:{person_track_id}"
+            if person_track_id is not None else str(violation_id)
+        ),
+        details={"view": "face_crop", "person_track_id": person_track_id},
     )
-    return Response(content=face_crop, media_type="image/jpeg")
+    return Response(
+        content=face_crop,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/face/enrollments")
@@ -1740,6 +2100,7 @@ async def upload_face_enrollment(
         imported = await import_face_dataset(
             actor_user_id=int(actor["user_id"]),
             actor_email=actor["email"],
+            employee_code=stored["employee_code"],
         )
     except ConsentError as exc:
         raise HTTPException(
@@ -1883,10 +2244,11 @@ async def delete_face_enrollment(person_id: int, request: Request):
 
 async def _add_reviewed_incident_embedding(
         violation_id: int, person_id: int, actor: dict[str, Any],
+        person_track_id: int | None = None,
 ) -> bool:
     from .faces.face_dataset import (
-        create_face_analyzer,
         _encryption_key,
+        create_face_analyzer,
         decrypt_face_crop,
         encrypt_embedding,
     )
@@ -1894,7 +2256,11 @@ async def _add_reviewed_incident_embedding(
     enrollment = await db.get_face_enrollment(person_id)
     if enrollment is None or not enrollment["active"]:
         raise HTTPException(status_code=422, detail="Selected employee is not enrolled")
-    match = await db.get_face_match(violation_id)
+    match = (
+        await db.get_face_person_match(violation_id, person_track_id)
+        if person_track_id is not None
+        else await db.get_face_match(violation_id)
+    )
     if match is None or not match.get("face_crop"):
         raise HTTPException(status_code=422, detail="Incident face crop is not available")
     try:
@@ -1953,14 +2319,24 @@ async def review_violation_face_match(
         )
     result = await db.review_face_match(
         violation_id, payload.decision, int(actor["user_id"]),
-        payload.comment, payload.person_id,
+        payload.comment, payload.person_id, payload.person_track_id,
     )
     if result is None:
         raise HTTPException(status_code=404, detail="Face match not found")
     await db.write_audit_log(
         "face_match_reviewed", int(actor["user_id"]), actor["email"],
-        target_type="incident", target_id=str(violation_id),
-        details={"decision": payload.decision},
+        target_type=(
+            "incident_face_person"
+            if payload.person_track_id is not None else "incident"
+        ),
+        target_id=(
+            f"{violation_id}:{payload.person_track_id}"
+            if payload.person_track_id is not None else str(violation_id)
+        ),
+        details={
+            "decision": payload.decision,
+            "person_track_id": payload.person_track_id,
+        },
     )
     embedding_added = False
     if payload.add_crop_embedding:
@@ -1968,7 +2344,7 @@ async def review_violation_face_match(
             raise HTTPException(status_code=422, detail="A reviewed employee match is required")
         person_id = int(result["matched_person_id"])
         embedding_added = await _add_reviewed_incident_embedding(
-            violation_id, person_id, actor,
+            violation_id, person_id, actor, payload.person_track_id,
         )
     return {"review": result, "embedding_added": embedding_added}
 
@@ -2049,6 +2425,8 @@ async def list_face_matches(
     )
     for row in rows:
         incident_id = int(row["incident_id"])
+        if isinstance(row.get("face_quality"), str):
+            row["face_quality"] = json.loads(row["face_quality"])
         row["snapshot_url"] = (
             f"/api/snapshot/{incident_id}"
             if row.get("snapshot_available") else None
@@ -2059,6 +2437,11 @@ async def list_face_matches(
             )
         row["face_crop_url"] = (
             f"/api/violations/{incident_id}/face-crop"
+            + (
+                f"?person_track_id={row['person_track_id']}"
+                if row.get("person_match")
+                and row.get("person_track_id") is not None else ""
+            )
             if row.get("face_crop_available") else None
         )
         row["gallery_photo_url"] = (
@@ -2082,26 +2465,56 @@ async def list_face_matches(
 
 
 @app.get("/api/face-matches/{violation_id}")
-async def get_face_match_detail(violation_id: int, request: Request):
+async def get_face_match_detail(
+        violation_id: int, request: Request,
+        person_track_id: int | None = Query(default=None, ge=0)):
     actor = _require_face_manager(request)
     violation = await db.get_violation_by_id(violation_id)
     if violation is None:
         raise HTTPException(status_code=404, detail="Incident not found")
-    match = await db.get_face_match(violation_id)
+    match = (
+        await db.get_face_person_match(violation_id, person_track_id)
+        if person_track_id is not None
+        else await db.get_face_match(violation_id)
+    )
     if match is None:
         raise HTTPException(status_code=404, detail="Face match not found")
     await db.write_audit_log(
         "face_match_detail_viewed", int(actor["user_id"]), actor["email"],
-        target_type="incident", target_id=str(violation_id),
+        target_type=(
+            "incident_face_person"
+            if person_track_id is not None else "incident"
+        ),
+        target_id=(
+            f"{violation_id}:{person_track_id}"
+            if person_track_id is not None else str(violation_id)
+        ),
     )
-    match["face_crop_available"] = bool(match.get("face_crop"))
     match.pop("face_crop", None)
     for key in (
         "face_quality", "face_bbox", "top3_candidates", "top5_candidates",
         "thresholds", "detection_metadata",
     ):
         if isinstance(match.get(key), str):
-            match[key] = json.loads(match[key])
+            try:
+                match[key] = json.loads(match[key])
+            except json.JSONDecodeError:
+                match[key] = None
+    from .faces.face_dataset import _normalize_face_bbox
+
+    face_bbox = _normalize_face_bbox(match.get("face_bbox"))
+    match["face_bbox"] = list(face_bbox) if face_bbox else None
+    evidence_path = (
+        violation.get("clean_snapshot_path") or violation.get("snapshot_path")
+    )
+    match["face_crop_available"] = bool(face_bbox and evidence_path)
+    if person_track_id is not None:
+        metadata = match.get("detection_metadata") or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["person_box"] = match.get("person_bbox")
+        match["detection_metadata"] = metadata
+        match["person_track_id"] = person_track_id
     match["top3_candidates"] = match.get("top5_candidates") or match.get(
         "top3_candidates", [],
     )

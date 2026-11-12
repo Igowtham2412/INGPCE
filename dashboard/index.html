@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>INGPCE — SURVEILLANCE OPERATIONS CENTER</title>
-<link rel="stylesheet" href="/static/style.css" />
+<link rel="stylesheet" href="/static/style.css?v=20261112-app-settings" />
 </head>
 <body>
 
@@ -40,6 +40,7 @@
           <button class="mode-btn" data-tab="cameras">CAMERAS & HEALTH</button>
           <button class="mode-btn" data-tab="alert-delivery" id="alertDeliveryTab" hidden>ALERT DELIVERY</button>
           <button class="mode-btn" data-tab="rules">ALERT RULES</button>
+          <button class="mode-btn" data-tab="settings" id="applicationSettingsTab" hidden>SETTINGS</button>
         </div>
       </div>
 
@@ -66,7 +67,7 @@
             <button class="ops-btn-sec" id="btnReconnectAll">↻ RECONNECT</button>
           </div>
         </div>
-        <div id="feedsByGroup"></div>
+        <div id="feedsByGroup"><span class="loading-state" role="status" aria-live="polite"><span class="mac-loader" aria-hidden="true"></span><span>Loading camera feeds…</span></span></div>
       </div>
 
       <div id="tab-playback" class="tab-pane">
@@ -130,7 +131,20 @@
           <span id="violationCleanupStatus" role="status" aria-live="polite"></span>
         </div>
         <p class="face-recognition-notice">Face Match runs asynchronously for no-helmet, no-arc-flash-suit, and phone incidents, regardless of incident review status. Results are suggestions for a human reviewer only and must never be treated as automatic disciplinary decisions.</p>
-        <div class="incidents-grid" id="violationsGallery"><div class="empty-state">LOADING INCIDENT DATA…</div></div>
+        <div class="incident-browser">
+          <div class="incidents-grid" id="violationsGallery"><span class="loading-state" role="status" aria-live="polite"><span class="mac-loader" aria-hidden="true"></span><span>Loading incident images…</span></span></div>
+          <section class="incident-inspector" id="incidentInspector" aria-label="Selected incident" hidden>
+            <header class="incident-viewer-toolbar">
+              <button type="button" class="ops-btn-sec" id="btnIncidentBack">‹ Gallery</button>
+              <span id="incidentPosition"></span>
+              <div><button type="button" class="ops-btn-sec" id="btnIncidentPrevious" aria-label="Previous image">‹</button><button type="button" class="ops-btn-sec" id="btnIncidentNext" aria-label="Next image">›</button></div>
+            </header>
+            <div class="incident-inspector-layout">
+              <div class="incident-preview-stage"><img id="incidentPreviewImage" alt="" /></div>
+              <aside class="incident-details" id="incidentDetails" aria-label="Image details and actions"></aside>
+            </div>
+          </section>
+        </div>
         <button class="ops-btn-sec load-more-violations" id="btnLoadMoreViolations" type="button" hidden>LOAD MORE INCIDENTS</button>
       </div>
 
@@ -227,7 +241,7 @@
         <section class="face-subtab-pane" id="face-panel-status" hidden>
           <div class="status-report-panel">
             <div class="status-report-heading"><h3>FACE RECOGNITION STATUS</h3><button class="ops-btn-sec" id="btnRefreshFaceStatus" type="button">↻ REFRESH</button></div>
-            <div id="faceRecognitionStatus" class="face-status-content" role="status" aria-live="polite">Loading face-recognition status…</div>
+            <div id="faceRecognitionStatus" class="face-status-content" role="status" aria-live="polite"><span class="loading-state"><span class="mac-loader" aria-hidden="true"></span><span>Loading face-recognition status…</span></span></div>
           </div>
         </section>
         <section class="face-subtab-pane" id="face-panel-enroll" hidden>
@@ -388,8 +402,19 @@
         </div>
         <div class="camera-table-shell"><table class="ops-table">
           <thead><tr><th>ID</th><th>DESIGNATION</th><th>SECTOR</th><th>REQUIRED PPE</th><th>LINK</th><th>STATE</th><th>ACTIONS</th></tr></thead>
-          <tbody id="camerasTableBody"></tbody>
+          <tbody id="camerasTableBody" aria-busy="true"><tr><td colspan="7"><span class="loading-state"><span class="mac-loader" aria-hidden="true"></span><span>Loading cameras…</span></span></td></tr></tbody>
         </table></div>
+        <section class="speed-tracking-panel" aria-labelledby="speedTrackingHeading">
+          <div class="camera-health-heading">
+            <div><span class="tab-eyebrow">VEHICLE SAFETY / CALIBRATED SPEED</span><h3 id="speedTrackingHeading">CAM12 speed tracking</h3><p id="speedTrackingStatus"><span class="loading-state"><span class="mac-loader" aria-hidden="true"></span><span>Loading calibration…</span></span></p></div>
+            <button type="button" class="ops-btn-sec" id="btnConfigureSpeedTracking">CALIBRATE CAM12</button>
+          </div>
+          <p class="speed-tracking-caution">Speed estimates depend on correct gate placement and vehicle detection. Verify readings against a known-speed vehicle before operational use.</p>
+          <div class="camera-table-shell"><table class="ops-table">
+            <thead><tr><th>TIME</th><th>VEHICLE</th><th>SPEED</th><th>LIMIT</th><th>DIRECTION</th><th>RESULT</th><th>EVIDENCE</th></tr></thead>
+            <tbody id="speedMeasurementsBody"><tr><td colspan="7"><span class="loading-state"><span class="mac-loader" aria-hidden="true"></span><span>Loading speed measurements…</span></span></td></tr></tbody>
+          </table></div>
+        </section>
         <section class="camera-health-workspace" aria-labelledby="cameraHealthHeading">
           <div class="camera-health-heading"><div><span class="tab-eyebrow">RELIABILITY / TELEMETRY</span><h3 id="cameraHealthHeading">Connectivity intelligence</h3><p>Review live health and historical availability without leaving the camera workspace.</p></div><span class="health-status-note">● AUTO-REFRESH 8S</span></div>
         <div class="status-report-toolbar">
@@ -423,7 +448,7 @@
             <div class="status-legend"><span><i class="online"></i>Online</span><span><i class="partial"></i>Partial</span><span><i class="offline"></i>Offline</span><span><i class="unknown"></i>No history</span></div>
           </div>
           <div class="status-timeline-scroll" id="cameraStatusTimeline">
-            <div class="empty-state">Loading connectivity history…</div>
+            <span class="loading-state" role="status" aria-live="polite"><span class="mac-loader" aria-hidden="true"></span><span>Loading connectivity history…</span></span>
           </div>
           <p class="status-history-note">Connectivity history begins when status tracking is enabled. No-history periods are shown as unknown, not counted as downtime.</p>
         </section>
@@ -509,7 +534,25 @@
               </label>
               <span class="alert-gallery-summary" id="alertGalleryCount">0 evidence items · 0 selected</span>
             </div>
-            <div id="alertViolationGallery" class="incidents-grid alert-incidents-gallery"><div class="empty-state">Loading eligible evidence…</div></div>
+            <div class="alert-image-browser">
+              <div id="alertViolationGallery" class="incidents-grid alert-incidents-gallery"><span class="loading-state" role="status" aria-live="polite"><span class="mac-loader" aria-hidden="true"></span><span>Loading eligible evidence…</span></span></div>
+              <section class="incident-inspector alert-inspector" id="alertIncidentInspector" aria-label="Selected alert evidence" hidden>
+                <div class="incident-viewer-toolbar">
+                  <button type="button" class="ops-btn-sec" id="btnAlertGalleryBack">← GALLERY</button>
+                  <span id="alertPosition">0 of 0</span>
+                  <div>
+                    <button type="button" class="ops-btn-sec" id="btnAlertPrevious" aria-label="Previous image">←</button>
+                    <button type="button" class="ops-btn-sec" id="btnAlertNext" aria-label="Next image">→</button>
+                  </div>
+                </div>
+                <div class="incident-inspector-layout">
+                  <div class="incident-preview-stage">
+                    <img id="alertPreviewImage" alt="" />
+                  </div>
+                  <aside class="incident-details" id="alertIncidentDetails"></aside>
+                </div>
+              </section>
+            </div>
           </section>
           <div class="alert-delivery-actions">
             <div class="dispatch-summary">
@@ -539,9 +582,58 @@
           <div class="rules-hdr"><h3>ALERT RULES</h3><button class="ops-btn" id="btnNewRule">+ NEW RULE</button></div>
           <table class="ops-table">
             <thead><tr><th>RULE</th><th>CAMERA</th><th>SECTOR</th><th>THREAT TYPE</th><th>CHANNELS</th><th>COOLDOWN</th><th>STATUS</th><th>ACTIONS</th></tr></thead>
-            <tbody id="rulesTableBody"></tbody>
+            <tbody id="rulesTableBody"><tr><td colspan="8"><span class="loading-state"><span class="mac-loader" aria-hidden="true"></span><span>Loading alert rules…</span></span></td></tr></tbody>
           </table>
         </div>
+      </div>
+
+      <div id="tab-settings" class="tab-pane">
+        <div class="tab-intro">
+          <div>
+            <span class="tab-eyebrow">ADMINISTRATION / APPLICATION CONFIGURATION</span>
+            <h2>Application settings</h2>
+            <p>Edit supported non-secret settings for inference, cameras, alerts, storage, the database pool, and face matching. Changes are saved locally and take effect after a server restart.</p>
+          </div>
+          <span class="tab-live-indicator">● ADMIN ONLY</span>
+        </div>
+        <div class="settings-security-note">
+          Passwords, session secrets, camera credentials, and webhook URLs are never shown or saved here. Configure secrets in <code>.env</code>. Settings saved here are stored in the ignored <code>.app_settings.json</code> file and override non-secret environment values at startup.
+        </div>
+        <form id="applicationSettingsForm">
+          <div id="applicationSettingsGroups" class="application-settings-groups">
+            <p class="empty-state">Open Settings to load configuration.</p>
+          </div>
+          <div class="settings-actions">
+            <span id="applicationSettingsStatus" role="status" aria-live="polite"></span>
+            <button type="button" class="ops-btn-sec" id="btnReloadApplicationSettings">RELOAD VALUES</button>
+            <button type="submit" class="ops-btn" id="btnSaveApplicationSettings">SAVE SETTINGS</button>
+          </div>
+        </form>
+
+        <section class="git-admin-panel" aria-labelledby="gitAdminHeading">
+          <div class="settings-section-heading">
+            <div><span class="tab-eyebrow">SOURCE CONTROL / ADMIN ONLY</span><h3 id="gitAdminHeading">Git commit and push</h3></div>
+            <button type="button" class="ops-btn-sec" id="btnRefreshGitStatus">REFRESH STATUS</button>
+          </div>
+          <p>Review every listed path before committing. Commit stages all non-ignored changes in this repository. Push sends the current branch to the fixed <code>origin</code> remote.</p>
+          <div class="git-status-summary" id="gitStatusSummary" role="status" aria-live="polite">Git status has not been loaded.</div>
+          <ul class="git-change-list" id="gitChangeList"><li class="empty-state">No status loaded.</li></ul>
+          <div class="git-action-grid">
+            <form id="gitCommitForm" class="git-action-card">
+              <h4>Commit all changes</h4>
+              <label>Commit message<input id="gitCommitMessage" type="text" maxlength="200" required placeholder="Describe this change" /></label>
+              <label>Type <code>COMMIT ALL CHANGES</code> after reviewing the file list<input id="gitCommitConfirmation" type="text" autocomplete="off" required /></label>
+              <button type="submit" class="ops-btn" id="btnGitCommit" disabled>COMMIT</button>
+            </form>
+            <form id="gitPushForm" class="git-action-card">
+              <h4>Push current branch</h4>
+              <p>Push is available only when the working tree is clean. The server pushes <code>HEAD</code> to <code>origin</code>; remote and branch cannot be changed here.</p>
+              <label>Type <code>PUSH TO ORIGIN</code> to confirm<input id="gitPushConfirmation" type="text" autocomplete="off" required /></label>
+              <button type="submit" class="ops-btn-sec" id="btnGitPush" disabled>PUSH</button>
+            </form>
+          </div>
+          <p id="gitActionStatus" class="git-action-status" role="status" aria-live="polite"></p>
+        </section>
       </div>
     </section>
     <aside class="intel-panel">
@@ -676,6 +768,32 @@
   </div>
 </div>
 
-<script src="/static/app.js"></script>
+<div class="modal-overlay" id="speedCalibrationBackdrop">
+  <div class="ops-modal speed-calibration-modal">
+    <h3 id="speedCalibrationTitle">CALIBRATE CAM12 SPEED TRACKING</h3>
+    <p id="speedCalibrationInstructions">Mark both ends of each roadway line on the live CAM12 image. Place the two gates across the same vehicle path and enter their measured distance.</p>
+    <canvas id="speedCalibrationCanvas" aria-label="Live CAM12 image for speed gate placement"></canvas>
+    <div class="speed-gate-controls">
+      <button type="button" class="ops-btn-sec" id="btnPlaceSpeedGateA">PLACE GATE A</button>
+      <span id="speedGateACount">Not placed</span>
+      <button type="button" class="ops-btn-sec" id="btnPlaceSpeedGateB">PLACE GATE B</button>
+      <span id="speedGateBCount">Not placed</span>
+    </div>
+    <p id="speedCalibrationMessage" role="status" aria-live="polite">Start with Gate A and click its two endpoints in the live image.</p>
+    <form id="speedCalibrationForm">
+      <div class="form-row">
+        <label>GATE DISTANCE (meters)<input id="speedDistanceMeters" type="number" min="0.1" max="500" step="0.1" value="8" required /></label>
+        <label>SPEED LIMIT (km/h)<input id="speedLimitKmh" type="number" min="0.1" max="200" step="0.1" value="15" required /></label>
+      </div>
+      <p class="speed-tracking-caution">This measures travel time between gates. It does not account for turns or verify posted limits.</p>
+      <div class="modal-btns">
+        <button type="button" class="ops-btn-sec" id="btnCancelSpeedCalibration">CANCEL</button>
+        <button type="submit" class="ops-btn" id="btnSaveSpeedCalibration">SAVE &amp; ENABLE</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<script src="/static/app.js?v=20261112-app-settings"></script>
 </body>
 </html>

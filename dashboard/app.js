@@ -6,26 +6,34 @@ const API = {
   cameras: "/api/cameras", areaGroups: "/api/area-groups", violations: "/api/violations",
   stats: "/api/stats", rules: "/api/rules", syncSeed: "/api/cameras/sync-seed",
 };
+const DEFAULT_SPEED_CAMERA_ID = "CAM12";
 const state = {
   cameras: [], areaGroups: [], rules: [], wsEventsConnected: false,
   wallVideoSocket: null, wallVideoReconnectTimer: null,
   wallVideoReconnectAttempts: 0,
   wallSubscribedIds: "", wallResubscribeTimer: null,
   wallFrameBuffer: new Map(), wallRenderQueued: false,
-  violationGallery: [], violationGalleryIndex: 0, violationGalleryOffset: 0, cameraViewerId: null,
+  violationGallery: [], violationRecords: [], selectedIncidentId: null,
+  hasMoreViolations: false,
+  violationGalleryIndex: 0, violationGalleryOffset: 0, cameraViewerId: null,
   cameraStatusReport: null,
   cameraStatusAbortController: null, cameraStatusDebounceTimer: null,
   analyticsStats: null, analyticsWindowHours: 24, analyticsResizeTimer: null,
-  faceSelectedIncident: null, faceAnimationTimer: null, faceViewed: new Set(),
+  faceSelectedIncident: null, faceSelectedTrack: null,
+  faceAnimationTimer: null, faceViewed: new Set(),
   faceLiveQueue: [], faceLiveBusy: false,
   alertGalleryRows: [], alertSelectedIds: new Set(),
+  alertVisibleRows: [], selectedAlertImageId: null,
   faceMatchGallery: [],
   canManageAlertDelivery: false,
   canReviewFaceMatches: false,
   canManageFaceSettings: false,
+  canManageApplicationSettings: false,
   wallColumns: 4,
   playbackActive: false,
   faceFilterTimer: null,
+  speedCameraId: DEFAULT_SPEED_CAMERA_ID, speedSettings: null,
+  speedGatePlacement: null, speedPreviewAnimationFrame: null,
 };
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -33,6 +41,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const authReady = await initializeAuthentication();
   if (!authReady) return;
   setupTabs();
+  setupApplicationSettings();
   await loadAreaGroups();
   await loadCameras();
   connectEventStream();
@@ -51,6 +60,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setupPlayback();
   setupSyncSeed();
   setupCameraStatusReport();
+  setupSpeedTracking();
   setupAnalyticsDashboard();
   setupPowerAutomateTest();
   setupAlertDeliveryDashboard();
@@ -59,6 +69,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   setInterval(() => {
     if (document.getElementById("tab-cameras").classList.contains("active")) {
       loadCameraStatusReport();
+      loadSpeedTracking();
     }
   }, 60000);
 });
@@ -119,8 +130,10 @@ async function initializeAuthentication() {
     state.canManageAlertDelivery = ["admin", "manager"].includes(session.user.role);
     state.canReviewFaceMatches = ["admin", "manager"].includes(session.user.role);
     state.canManageFaceSettings = session.user.role === "admin";
+    state.canManageApplicationSettings = session.user.role === "admin";
     document.getElementById("alertDeliveryTab").hidden = !state.canManageAlertDelivery;
     document.getElementById("faceMatchesTab").hidden = !state.canReviewFaceMatches;
+    document.getElementById("applicationSettingsTab").hidden = !state.canManageApplicationSettings;
     if (session.user.role !== "admin") {
       document.getElementById("btnCleanOldViolations").hidden = true;
     }
@@ -164,6 +177,18 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+function escapeHtmlAttribute(str) {
+  return escapeHtml(str).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function loadingMarkup(message) {
+  return `<span class="loading-state" role="status" aria-live="polite"><span class="mac-loader" aria-hidden="true"></span><span>${escapeHtml(message)}</span></span>`;
+}
+
+function buttonLoadingMarkup(message) {
+  return `<span class="button-loading"><span class="mac-loader mac-loader--small" aria-hidden="true"></span><span>${escapeHtml(message)}</span></span>`;
+}
+
 function formatViolationLabel(violationType) {
   const labels = {
     no_helmet: "Missing Helmet",
@@ -189,7 +214,7 @@ function setupSyncSeed() {
   const statusEl = document.getElementById("syncStatus");
   btn.addEventListener("click", async () => {
     btn.disabled = true;
-    btn.textContent = "Syncing…";
+    btn.innerHTML = buttonLoadingMarkup("Syncing…");
     statusEl.textContent = "";
     statusEl.style.color = "var(--accent-green)";
     try {
@@ -288,6 +313,11 @@ function renderGroupsTable() {
 // ---------------------------------------------------------------
 async function loadCameras() {
   const grid = document.getElementById("feedsByGroup");
+  const tbody = document.getElementById("camerasTableBody");
+  grid.setAttribute("aria-busy", "true");
+  grid.innerHTML = loadingMarkup("Loading camera feeds…");
+  tbody.setAttribute("aria-busy", "true");
+  tbody.innerHTML = `<tr><td colspan="7">${loadingMarkup("Loading cameras…")}</td></tr>`;
   try {
     const res = await fetch(API.cameras);
     if (!res.ok) {
@@ -299,11 +329,16 @@ async function loadCameras() {
     console.error("Failed to load cameras:", e);
     state.cameras = [];
     grid.innerHTML = `<div class="error-state">Could not load cameras.<div class="error-detail">${escapeHtml(e.message)}</div></div>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="error-state">Could not load cameras: ${escapeHtml(e.message)}</td></tr>`;
+    grid.removeAttribute("aria-busy");
+    tbody.removeAttribute("aria-busy");
     return;
   }
 
   renderFeedsGroupedByArea();
   renderCamerasTable();
+  grid.removeAttribute("aria-busy");
+  tbody.removeAttribute("aria-busy");
   populateViolationCameraFilter();
   populateWallCameraFilter();
   populatePlaybackCameraSelect();
@@ -642,7 +677,13 @@ function updateCameraTileStatus(camera) {
   const canvas = document.getElementById(`canvas-${camera.camera_id}`);
   const placeholder = document.getElementById(`placeholder-${camera.camera_id}`);
   if (placeholder && (!canvas || !canvas.width)) {
-    placeholder.textContent = camera.connection_error
+    const isConnecting = label === "CONNECTING" || label === "RETRYING";
+    const loader = placeholder.querySelector(".mac-loader");
+    const placeholderLabel = placeholder.querySelector(".feed-placeholder-label");
+    if (loader) loader.hidden = !isConnecting;
+    if (placeholderLabel) placeholderLabel.textContent = camera.connection_error
+      || (label === "CONNECTING" ? "Connecting…" : "Stream unavailable; retrying…");
+    else placeholder.textContent = camera.connection_error
       || (label === "CONNECTING" ? "Connecting…" : "Stream unavailable; retrying…");
   }
 }
@@ -657,7 +698,7 @@ function buildCameraTile(cam) {
   tile.innerHTML = `
     <div class="feed-wrap">
       <canvas id="canvas-${cam.camera_id}"></canvas>
-      <div class="feed-placeholder" id="placeholder-${cam.camera_id}">Connecting…</div>
+      <div class="feed-placeholder" id="placeholder-${cam.camera_id}"><span class="mac-loader" aria-hidden="true"></span><span class="feed-placeholder-label">Connecting…</span></div>
       <div class="violation-flash" id="flash-${cam.camera_id}"></div>
     </div>
     <div class="tile-footer">
@@ -670,7 +711,7 @@ function buildCameraTile(cam) {
           <span class="dot"></span><span>${cameraConnectionLabel(cam)}</span>
         </div>
         <button class="tile-edit-btn" data-edit-tile="${cam.camera_id}" title="Edit camera connection">EDIT</button>
-        <button class="tile-reconnect-btn" data-reconnect-tile="${cam.camera_id}" title="Reconnect this camera">↻</button>
+        <button class="tile-reconnect-btn" data-reconnect-tile="${cam.camera_id}" title="Reconnect this camera" aria-label="Reconnect this camera"><span class="reconnect-icon" aria-hidden="true">↻</span><span class="mac-loader mac-loader--small" aria-hidden="true"></span></button>
       </div>
     </div>
   `;
@@ -699,7 +740,11 @@ async function reconnectSingleCamera(cameraId) {
   if (btn) { btn.disabled = true; btn.classList.add("spinning"); }
   tile?.classList.add("reconnecting");
   const placeholder = document.getElementById(`placeholder-${cameraId}`);
-  if (placeholder) { placeholder.style.display = "block"; placeholder.textContent = "Reconnecting…"; }
+  if (placeholder) {
+    placeholder.style.display = "flex";
+    placeholder.querySelector(".mac-loader").hidden = false;
+    placeholder.querySelector(".feed-placeholder-label").textContent = "Reconnecting…";
+  }
   try {
     await fetch(`${API.cameras}/${cameraId}/refresh`, { method: "POST" });
     await new Promise((r) => setTimeout(r, 1000));
@@ -717,7 +762,7 @@ function setupReconnectAll() {
   document.getElementById("btnReconnectAll").addEventListener("click", async () => {
     const btn = document.getElementById("btnReconnectAll");
     btn.disabled = true;
-    btn.textContent = "Reconnecting all cameras…";
+    btn.innerHTML = buttonLoadingMarkup("Reconnecting all cameras…");
     try {
       for (const cam of state.cameras.filter((camera) => camera.enabled)) {
         fetch(`${API.cameras}/${cam.camera_id}/refresh`, { method: "POST" }).catch(() => {});
@@ -834,9 +879,12 @@ function connectVideoWall(replaceExisting = false) {
     state.wallVideoSocket = null;
     cameraIds.forEach((cameraId) => {
       const placeholder = document.getElementById(`placeholder-${cameraId}`);
+      const tile = document.getElementById(`tile-${cameraId}`);
+      tile?.classList.add("reconnecting");
       if (placeholder) {
-        placeholder.style.display = "block";
-        placeholder.textContent = "RECONNECTING…";
+        placeholder.style.display = "flex";
+        placeholder.querySelector(".mac-loader").hidden = false;
+        placeholder.querySelector(".feed-placeholder-label").textContent = "Reconnecting…";
       }
     });
     state.wallVideoReconnectTimer = setTimeout(() => {
@@ -875,6 +923,7 @@ async function renderWallFrames() {
       bitmap.close();
       const placeholder = document.getElementById(`placeholder-${cameraId}`);
       if (placeholder) placeholder.style.display = "none";
+      document.getElementById(`tile-${cameraId}`)?.classList.remove("reconnecting");
     } catch (error) {
       console.warn("Could not decode a live wall frame:", error);
     }
@@ -914,7 +963,7 @@ function renderCamerasTable() {
     try {
       const tr = document.createElement("tr");
       const ppeTags = (cam.required_ppe || []).map(p => `<span class="ppe-tag">${escapeHtml(p)}</span>`).join("");
-      tr.innerHTML = `<td><code>${escapeHtml(cam.camera_id)}</code></td><td><button class="camera-name-link" data-view-cam="${cam.camera_id}">${escapeHtml(cam.name)}</button></td><td>${cam.area_group_name ? escapeHtml(cam.area_group_name) : "<span style='color:var(--text-dim)'>Unassigned</span>"}</td><td><div class="ppe-tag-list">${ppeTags}</div></td><td><span class="tile-status ${cam.connected ? "online" : "offline"}"><span class="dot"></span>${cam.connected ? "ONLINE" : "OFFLINE"}</span></td><td><span class="state-pill ${cam.worker_running ? "running" : "stopped"}">${cam.worker_running ? "RUNNING" : "STOPPED"}</span></td><td><button class="icon-btn" data-refresh-cam="${cam.camera_id}">↻ Refresh</button><button class="icon-btn" data-edit-cam="${cam.camera_id}">Edit</button><button class="icon-btn danger" data-delete-cam="${cam.camera_id}">Delete</button></td>`;
+      tr.innerHTML = `<td><code>${escapeHtml(cam.camera_id)}</code></td><td><button class="camera-name-link" data-view-cam="${escapeHtml(cam.camera_id)}">${escapeHtml(cam.name)}</button></td><td>${cam.area_group_name ? escapeHtml(cam.area_group_name) : "<span style='color:var(--text-dim)'>Unassigned</span>"}</td><td><div class="ppe-tag-list">${ppeTags}</div></td><td><span class="tile-status ${cam.connected ? "online" : "offline"}"><span class="dot"></span>${cam.connected ? "ONLINE" : "OFFLINE"}</span></td><td><span class="state-pill ${cam.worker_running ? "running" : "stopped"}">${cam.worker_running ? "RUNNING" : "STOPPED"}</span></td><td><button class="icon-btn camera-speed-action" data-speed-cam="${escapeHtml(cam.camera_id)}"${cam.enabled ? "" : " disabled"} title="${cam.enabled ? `Configure speed tracking for ${escapeHtml(cam.camera_id)}` : "Enable this camera to configure speed tracking"}">Speed setup</button><button class="icon-btn" data-refresh-cam="${escapeHtml(cam.camera_id)}">↻ Refresh</button><button class="icon-btn" data-edit-cam="${escapeHtml(cam.camera_id)}">Edit</button><button class="icon-btn danger" data-delete-cam="${escapeHtml(cam.camera_id)}">Delete</button></td>`;
       tbody.appendChild(tr);
     } catch (err) {
       console.error(`Failed to render camera table row for ${cam && cam.camera_id}:`, err);
@@ -924,11 +973,15 @@ function renderCamerasTable() {
   tbody.querySelectorAll("[data-view-cam]").forEach(btn => btn.addEventListener("click", () => openCameraViewer(btn.dataset.viewCam)));
   tbody.querySelectorAll("[data-edit-cam]").forEach(btn => btn.addEventListener("click", () => openCameraModal(btn.dataset.editCam)));
   tbody.querySelectorAll("[data-delete-cam]").forEach(btn => btn.addEventListener("click", () => deleteCamera(btn.dataset.deleteCam)));
+  tbody.querySelectorAll("[data-speed-cam]").forEach(btn => btn.addEventListener("click", () => {
+    selectSpeedCamera(btn.dataset.speedCam);
+    openSpeedCalibration();
+  }));
 }
 
 async function refreshCameraConnection(cameraId) {
   const btn = document.querySelector(`[data-refresh-cam="${cameraId}"]`);
-  if (btn) { btn.textContent = "Refreshing…"; btn.disabled = true; }
+  if (btn) { btn.innerHTML = buttonLoadingMarkup("Refreshing…"); btn.disabled = true; }
   try {
     const response = await fetch(`${API.cameras}/${cameraId}/refresh`, { method: "POST" });
     if (!response.ok) {
@@ -943,20 +996,315 @@ async function refreshCameraConnection(cameraId) {
 
 async function deleteCamera(cameraId) {
   if (!confirm(`Delete camera ${cameraId}? This stops its stream and removes it permanently.`)) return;
-  await fetch(`${API.cameras}/${cameraId}`, { method: "DELETE" });
-  await loadCameras();
+  try {
+    const response = await fetch(`${API.cameras}/${cameraId}`, {
+      method: "DELETE",
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(
+        () => ({ detail: `HTTP ${response.status}` }),
+      );
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    await loadCameras();
+  } catch (error) {
+    window.alert(`Could not delete camera ${cameraId}: ${error.message}`);
+  }
 }
 
 // ---------------------------------------------------------------
 // Camera Add/Edit Modal
 // ---------------------------------------------------------------
+function setArcFlashSuitDefault() {
+  const areaGroup = document.getElementById("camAreaGroup");
+  const selectedGroup = areaGroup.selectedOptions[0]?.textContent.trim();
+  document.getElementById("ppeArcFlashSuit").checked = selectedGroup === "MCC";
+}
+
+async function loadSpeedTracking() {
+  const status = document.getElementById("speedTrackingStatus");
+  const measurementsBody = document.getElementById("speedMeasurementsBody");
+  const cameraId = state.speedCameraId;
+  updateSpeedTrackingHeading();
+  status.innerHTML = loadingMarkup(`Loading ${cameraId} speed tracking…`);
+  measurementsBody.innerHTML = `<tr><td colspan="7">${loadingMarkup("Loading speed measurements…")}</td></tr>`;
+  try {
+    const [settingsResponse, measurementsResponse] = await Promise.all([
+      fetch(`${API.cameras}/${cameraId}/speed-settings`),
+      fetch(`${API.cameras}/${cameraId}/speed-measurements?limit=50`),
+    ]);
+    for (const response of [settingsResponse, measurementsResponse]) {
+      if (!response.ok) {
+        const error = await response.json().catch(
+          () => ({ detail: `HTTP ${response.status}` }),
+        );
+        throw new Error(error.detail || `HTTP ${response.status}`);
+      }
+    }
+    if (cameraId !== state.speedCameraId) return;
+    state.speedSettings = await settingsResponse.json();
+    const measurements = await measurementsResponse.json();
+    if (state.speedSettings.calibration_error) {
+      status.textContent =
+        `Tracking paused: ${state.speedSettings.calibration_error} Recalibrate both gates to resume.`;
+    } else if (state.speedSettings.enabled) {
+      status.textContent = `Enabled · ${state.speedSettings.distance_m} m gates · ${state.speedSettings.speed_limit_kmh} km/h limit`;
+    } else {
+      status.textContent = "Not calibrated. Mark the two roadway gates before enabling speed tracking.";
+    }
+    renderSpeedMeasurements(measurements);
+  } catch (error) {
+    status.textContent = `Could not load speed tracking: ${error.message}`;
+    measurementsBody.innerHTML = `<tr><td colspan="7" class="error-state">Could not load speed measurements: ${escapeHtml(error.message)}</td></tr>`;
+    console.error("Could not load speed tracking:", error);
+  }
+}
+
+function updateSpeedTrackingHeading() {
+  document.getElementById("speedTrackingHeading").textContent =
+    `${state.speedCameraId} speed tracking`;
+  document.getElementById("btnConfigureSpeedTracking").textContent =
+    `CALIBRATE ${state.speedCameraId}`;
+}
+
+function selectSpeedCamera(cameraId) {
+  state.speedCameraId = cameraId;
+  updateSpeedTrackingHeading();
+  loadSpeedTracking();
+}
+
+function renderSpeedMeasurements(measurements) {
+  const body = document.getElementById("speedMeasurementsBody");
+  body.replaceChildren();
+  if (!measurements.length) {
+    body.innerHTML = '<tr><td colspan="7" class="empty-state">No speed measurements recorded.</td></tr>';
+    return;
+  }
+  measurements.forEach((measurement) => {
+    const row = document.createElement("tr");
+    const measuredAt = new Date(measurement.measured_at).toLocaleString();
+    const result = measurement.speeding ? "OVER LIMIT" : "WITHIN LIMIT";
+    const evidence = [
+      measurement.snapshot_url
+        ? `<a href="${escapeHtml(measurement.snapshot_url)}" target="_blank" rel="noopener">Snapshot</a>`
+        : "",
+      measurement.video_url
+        ? `<a href="${escapeHtml(measurement.video_url)}" target="_blank" rel="noopener">Clip</a>`
+        : "",
+    ].filter(Boolean).join(" · ") || "—";
+    row.innerHTML = `<td>${escapeHtml(measuredAt)}</td><td>${escapeHtml(measurement.vehicle_type)}</td><td>${Number(measurement.speed_kmh).toFixed(1)} km/h</td><td>${Number(measurement.speed_limit_kmh).toFixed(1)} km/h</td><td>${escapeHtml(measurement.direction)}</td><td><span class="speed-result ${measurement.speeding ? "over" : "within"}">${result}</span></td><td>${evidence}</td>`;
+    body.appendChild(row);
+  });
+}
+
+function setupSpeedTracking() {
+  const backdrop = document.getElementById("speedCalibrationBackdrop");
+  document.getElementById("btnConfigureSpeedTracking").addEventListener(
+    "click", () => openSpeedCalibration(),
+  );
+  document.getElementById("btnCancelSpeedCalibration").addEventListener(
+    "click", closeSpeedCalibration,
+  );
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) closeSpeedCalibration();
+  });
+  document.getElementById("btnPlaceSpeedGateA").addEventListener(
+    "click", () => beginSpeedGatePlacement("gate_a"),
+  );
+  document.getElementById("btnPlaceSpeedGateB").addEventListener(
+    "click", () => beginSpeedGatePlacement("gate_b"),
+  );
+  document.getElementById("speedCalibrationCanvas").addEventListener(
+    "click", placeSpeedGatePoint,
+  );
+  document.getElementById("speedCalibrationForm").addEventListener(
+    "submit", saveSpeedCalibration,
+  );
+  loadSpeedTracking();
+}
+
+async function openSpeedCalibration() {
+  const backdrop = document.getElementById("speedCalibrationBackdrop");
+  const message = document.getElementById("speedCalibrationMessage");
+  document.getElementById("speedCalibrationTitle").textContent =
+    `CALIBRATE ${state.speedCameraId} SPEED TRACKING`;
+  document.getElementById("speedCalibrationInstructions").textContent =
+    `Mark both ends of each roadway line on the live ${state.speedCameraId} image. Place the two gates across the same vehicle path and enter their measured distance.`;
+  try {
+    const response = await fetch(
+      `${API.cameras}/${state.speedCameraId}/speed-settings`,
+    );
+    if (!response.ok) {
+      const error = await response.json().catch(
+        () => ({ detail: `HTTP ${response.status}` }),
+      );
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    state.speedSettings = await response.json();
+    document.getElementById("speedDistanceMeters").value =
+      state.speedSettings.distance_m ?? 8;
+    document.getElementById("speedLimitKmh").value =
+      state.speedSettings.speed_limit_kmh ?? 15;
+    state.speedSettings.gate_a ??= [];
+    state.speedSettings.gate_b ??= [];
+    updateSpeedGateCounts();
+    state.speedGatePlacement = null;
+    message.textContent = state.speedSettings.calibration_error
+      ? "The saved gates cross. Redraw both gates on separate road markings."
+      : "Start with Gate A and click its two endpoints in the live image.";
+    backdrop.classList.add("open");
+    drawSpeedCalibrationPreview();
+  } catch (error) {
+    message.textContent = `Could not load calibration: ${error.message}`;
+    backdrop.classList.add("open");
+  }
+}
+
+function closeSpeedCalibration() {
+  document.getElementById("speedCalibrationBackdrop").classList.remove("open");
+  state.speedGatePlacement = null;
+  if (state.speedPreviewAnimationFrame != null) {
+    cancelAnimationFrame(state.speedPreviewAnimationFrame);
+    state.speedPreviewAnimationFrame = null;
+  }
+}
+
+function beginSpeedGatePlacement(gateName) {
+  state.speedGatePlacement = { gateName, points: [] };
+  state.speedSettings[gateName] = [];
+  document.getElementById("speedCalibrationMessage").textContent =
+    `Click the two endpoints of Gate ${gateName.slice(-1).toUpperCase()} on the live CAM12 image.`;
+  updateSpeedGateCounts();
+}
+
+function placeSpeedGatePoint(event) {
+  if (!state.speedGatePlacement) return;
+  const canvas = event.currentTarget;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height || !canvas.width || !canvas.height) return;
+  const point = [
+    Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+    Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+  ];
+  state.speedGatePlacement.points.push(point);
+  if (state.speedGatePlacement.points.length === 2) {
+    state.speedSettings[state.speedGatePlacement.gateName] =
+      state.speedGatePlacement.points;
+    state.speedGatePlacement = null;
+    document.getElementById("speedCalibrationMessage").textContent =
+      "Gate marked. Place the other gate, then save to enable tracking.";
+  }
+  updateSpeedGateCounts();
+}
+
+function updateSpeedGateCounts() {
+  for (const gateName of ["gate_a", "gate_b"]) {
+    const count = (state.speedSettings?.[gateName] || []).length;
+    const suffix = gateName.slice(-1).toUpperCase();
+    document.getElementById(`speedGate${suffix}Count`).textContent =
+      count === 2 ? "Placed" : count ? "1 of 2 points" : "Not placed";
+  }
+}
+
+function drawSpeedCalibrationPreview() {
+  const target = document.getElementById("speedCalibrationCanvas");
+  const context = target.getContext("2d");
+  const source = document.getElementById(`canvas-${state.speedCameraId}`);
+  if (source?.width && source?.height) {
+    if (target.width !== source.width || target.height !== source.height) {
+      target.width = source.width;
+      target.height = source.height;
+    }
+    context.drawImage(source, 0, 0, target.width, target.height);
+    drawSpeedGate(context, target, state.speedSettings?.gate_a, "A");
+    drawSpeedGate(context, target, state.speedSettings?.gate_b, "B");
+    const active = state.speedGatePlacement;
+    if (active) {
+      active.points.forEach((point) => {
+        context.beginPath();
+        context.arc(point[0] * target.width, point[1] * target.height, 7, 0, 2 * Math.PI);
+        context.fillStyle = "#e1e1e1";
+        context.fill();
+      });
+    }
+  } else {
+    context.fillStyle = "#111";
+    context.fillRect(0, 0, target.width, target.height);
+    context.fillStyle = "#ddd";
+    context.font = "16px sans-serif";
+    context.fillText("Waiting for a live CAM12 frame…", 20, 35);
+  }
+  if (document.getElementById("speedCalibrationBackdrop").classList.contains("open")) {
+    state.speedPreviewAnimationFrame = requestAnimationFrame(
+      drawSpeedCalibrationPreview,
+    );
+  }
+}
+
+function drawSpeedGate(context, canvas, points, label) {
+  if (!Array.isArray(points) || points.length !== 2) return;
+  const start = [points[0][0] * canvas.width, points[0][1] * canvas.height];
+  const end = [points[1][0] * canvas.width, points[1][1] * canvas.height];
+  context.beginPath();
+  context.moveTo(...start);
+  context.lineTo(...end);
+  context.strokeStyle = label === "A" ? "#e1e1e1" : "#a8a8a8";
+  context.lineWidth = Math.max(2, canvas.width / 500);
+  context.stroke();
+  for (const point of [start, end]) {
+    context.beginPath();
+    context.arc(point[0], point[1], Math.max(4, canvas.width / 250), 0, 2 * Math.PI);
+    context.fillStyle = context.strokeStyle;
+    context.fill();
+  }
+  context.fillStyle = context.strokeStyle;
+  context.font = `bold ${Math.max(14, canvas.width / 60)}px sans-serif`;
+  context.fillText(label, start[0] + 8, start[1] - 8);
+}
+
+async function saveSpeedCalibration(event) {
+  event.preventDefault();
+  const message = document.getElementById("speedCalibrationMessage");
+  const gateA = state.speedSettings?.gate_a || [];
+  const gateB = state.speedSettings?.gate_b || [];
+  if (gateA.length !== 2 || gateB.length !== 2) {
+    message.textContent = "Place both endpoints for Gate A and Gate B before saving.";
+    return;
+  }
+  const button = document.getElementById("btnSaveSpeedCalibration");
+  button.disabled = true;
+  try {
+    const response = await fetch(
+      `${API.cameras}/${state.speedCameraId}/speed-settings`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          distance_m: Number(document.getElementById("speedDistanceMeters").value),
+          speed_limit_kmh: Number(document.getElementById("speedLimitKmh").value),
+          gate_a: gateA,
+          gate_b: gateB,
+        }),
+      },
+    );
+    if (!response.ok) {
+      const error = await response.json().catch(
+        () => ({ detail: `HTTP ${response.status}` }),
+      );
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    closeSpeedCalibration();
+    await loadSpeedTracking();
+  } catch (error) {
+    message.textContent = `Could not save speed calibration: ${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function setupCameraModal() {
   const backdrop = document.getElementById("cameraModalBackdrop");
   const areaGroup = document.getElementById("camAreaGroup");
-  const setArcFlashSuitDefault = () => {
-    const selectedGroup = areaGroup.selectedOptions[0]?.textContent.trim();
-    document.getElementById("ppeArcFlashSuit").checked = selectedGroup === "MCC";
-  };
   document.getElementById("btnNewCamera").addEventListener("click", () => openCameraModal(null));
   document.getElementById("btnCancelCamera").addEventListener("click", () => backdrop.classList.remove("open"));
   backdrop.addEventListener("click", (e) => { if (e.target === backdrop) backdrop.classList.remove("open"); });
@@ -1133,6 +1481,16 @@ function connectEventStream() {
   ws.onmessage = (msg) => {
     const event = JSON.parse(msg.data);
     if (event.type === "violation") { renderViolationEvent(event); flashCameraTile(event.camera_id); bumpViolationCounter(); }
+    if (event.type === "speeding") {
+      renderSpeedingEvent(event);
+      flashCameraTile(event.camera_id);
+      if (state.speedCameraId === event.camera_id) {
+        loadSpeedTracking();
+        window.setTimeout(() => {
+          if (state.speedCameraId === event.camera_id) loadSpeedTracking();
+        }, 12000);
+      }
+    }
     if (event.type === "face_match_processed") {
       const status = document.getElementById("faceLiveStatus");
       if (status) status.textContent = `LIVE RESULT · ${event.status}`;
@@ -1170,6 +1528,25 @@ function renderViolationEvent(event) {
   const items = feed.querySelectorAll(".event-item"); if (items.length > 100) items[items.length - 1].remove();
 }
 
+function renderSpeedingEvent(event) {
+  const feed = document.getElementById("eventFeed");
+  feed.querySelector(".empty-state")?.remove();
+  const item = document.createElement("div");
+  item.className = "event-item speed-alert-event";
+  const speed = Number(event.speed_kmh);
+  const limit = Number(event.speed_limit_kmh);
+  item.innerHTML = `${event.snapshot_url ? `<img class="ev-thumb" src="${escapeHtml(event.snapshot_url)}" alt="Speeding evidence" loading="lazy" />` : `<div class="ev-thumb speed-alert-icon">!</div>`}<div class="ev-body"><div class="ev-top"><span class="ev-type">SPEED LIMIT EXCEEDED</span><span class="ev-time">${escapeHtml(event.timestamp || "")}</span></div><div class="ev-meta">${escapeHtml(event.camera_name || event.camera_id)} · ${escapeHtml(event.vehicle_type || "vehicle")}</div><div class="ev-rules">${speed.toFixed(1)} km/h · limit ${limit.toFixed(1)} km/h · ${escapeHtml(event.direction || "")}</div></div>`;
+  if (event.snapshot_url) {
+    item.addEventListener("click", () => openLightbox(
+      event.snapshot_url,
+      `${event.camera_name || event.camera_id} · ${speed.toFixed(1)} km/h`,
+    ));
+  }
+  feed.insertBefore(item, feed.firstChild);
+  const items = feed.querySelectorAll(".event-item");
+  if (items.length > 100) items[items.length - 1].remove();
+}
+
 function flashCameraTile(cameraId) {
   const flash = document.getElementById(`flash-${cameraId}`); if (!flash) return;
   flash.classList.remove("active"); void flash.offsetWidth; flash.classList.add("active");
@@ -1184,6 +1561,21 @@ function bumpViolationCounter() {
 // Violations Gallery Tab
 // ---------------------------------------------------------------
 function setupViolationsGallery() {
+  document.getElementById("btnIncidentPrevious")
+    .addEventListener("click", () => moveIncidentInspector(-1));
+  document.getElementById("btnIncidentNext")
+    .addEventListener("click", () => moveIncidentInspector(1));
+  document.addEventListener("keydown", (event) => {
+    if (document.getElementById("incidentInspector").hidden
+      || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      moveIncidentInspector(-1);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      moveIncidentInspector(1);
+    }
+  });
   document.getElementById("btnRefreshViolations").addEventListener("click", () => loadViolationsGallery());
   document.getElementById("btnLoadMoreViolations").addEventListener("click", () => loadViolationsGallery(true));
   document.getElementById("violationCameraFilter").addEventListener("change", () => loadViolationsGallery());
@@ -1191,7 +1583,56 @@ function setupViolationsGallery() {
   document.getElementById("violationTypeFilter").addEventListener("change", () => loadViolationsGallery());
   document.getElementById("violationAgeFilter").addEventListener("change", () => loadViolationsGallery());
   document.getElementById("btnCleanOldViolations").addEventListener("click", cleanOldViolations);
+  document.getElementById("incidentInspector").addEventListener("click", async (event) => {
+    const button = event.target.closest("button");
+    if (!button) return;
+    if (button.id === "btnIncidentBack") {
+      state.selectedIncidentId = null;
+      document.getElementById("incidentInspector").hidden = true;
+      document.getElementById("violationsGallery").hidden = false;
+      document.getElementById("btnLoadMoreViolations").hidden = !state.hasMoreViolations;
+      return;
+    }
+    if (button.hasAttribute("data-incident-delete")) {
+      await deleteIncident(Number(button.dataset.incidentDelete));
+      return;
+    }
+    if (button.hasAttribute("data-face-match-open")) {
+      const personTrackId = button.dataset.faceMatchScope === "person"
+        ? Number(button.dataset.facePersonTrack) : null;
+      await openFaceMatchFromIncident(
+        Number(button.dataset.faceMatchOpen), personTrackId,
+      );
+      return;
+    }
+    if (!button.hasAttribute("data-review")) return;
+    const incidentId = Number(button.dataset.review);
+    const incident = state.violationRecords.find((row) => row.id === incidentId);
+    const controls = document.getElementById("incidentDetails").querySelectorAll("button");
+    controls.forEach((item) => { item.disabled = true; });
+    try {
+      const response = await fetch(`/api/violations/${incidentId}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: button.dataset.reviewStatus }),
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
+        throw new Error(error.detail || `HTTP ${response.status}`);
+      }
+      if (incident) incident.review_status = button.dataset.reviewStatus;
+      renderIncidentInspector(incidentId);
+    } catch (error) {
+      alert(`Could not save review: ${error.message}`);
+      controls.forEach((item) => { item.disabled = false; });
+    }
+  });
   document.getElementById("violationsGallery").addEventListener("click", async (event) => {
+    const imageButton = event.target.closest("[data-incident-select]");
+    if (imageButton) {
+      renderIncidentInspector(Number(imageButton.dataset.incidentSelect));
+      return;
+    }
     const deleteButton = event.target.closest("[data-incident-delete]");
     if (deleteButton) {
       event.stopPropagation();
@@ -1201,7 +1642,12 @@ function setupViolationsGallery() {
     const faceButton = event.target.closest("[data-face-match-open]");
     if (faceButton) {
       event.stopPropagation();
-      await showFaceMatchDetail(Number(faceButton.dataset.faceMatchOpen));
+      const personTrackId = faceButton.dataset.faceMatchScope === "person"
+        ? Number(faceButton.dataset.facePersonTrack) : null;
+      await showFaceMatchDetail(
+        Number(faceButton.dataset.faceMatchOpen), false, false,
+        personTrackId,
+      );
       return;
     }
 
@@ -1280,13 +1726,27 @@ function setupViolationsGallery() {
   });
 }
 
+function moveIncidentInspector(direction) {
+  const currentIndex = state.violationRecords.findIndex(
+    (row) => Number(row.id) === Number(state.selectedIncidentId),
+  );
+  const next = state.violationRecords[currentIndex + direction];
+  if (next) renderIncidentInspector(next.id);
+}
+
 async function loadViolationsGallery(append = false) {
   const gallery = document.getElementById("violationsGallery");
+  const inspector = document.getElementById("incidentInspector");
   const loadMoreButton = document.getElementById("btnLoadMoreViolations");
   if (!append) {
     state.violationGalleryOffset = 0;
+    state.violationRecords = [];
+    state.hasMoreViolations = false;
+    state.selectedIncidentId = null;
+    inspector.hidden = true;
+    gallery.hidden = false;
     loadMoreButton.hidden = true;
-    gallery.innerHTML = `<div class="event-empty">Loading violations…</div>`;
+    gallery.innerHTML = loadingMarkup("Loading violations…");
   }
 
   const cameraId = document.getElementById("violationCameraFilter").value;
@@ -1332,6 +1792,7 @@ async function loadViolationsGallery(append = false) {
   gallery.querySelector(".gallery-page-error")?.remove();
   if (!append) {
     state.violationGallery = [];
+    state.violationRecords = [];
     gallery.innerHTML = "";
   }
   state.violationGallery = state.violationGallery.concat(rows
@@ -1346,47 +1807,28 @@ async function loadViolationsGallery(append = false) {
         caption: `${row.camera_name || row.camera_id} · ${row.area_group || row.zone || ""} · ${label} · ${detectedAt}`,
       };
     }));
+  state.violationRecords = state.violationRecords.concat(
+    rows.filter((row) => row.snapshot_url),
+  );
 
-  if (!rows.length && !append) {
+  state.hasMoreViolations = rows.length >= 60;
+  if (!state.violationRecords.length && !append) {
     gallery.innerHTML = `<div class="event-empty">No violations found for this filter.</div>`;
     return;
   }
 
   state.violationGalleryOffset = offset + rows.length;
-  loadMoreButton.hidden = rows.length < 60;
-  rows.forEach((row) => {
+  loadMoreButton.hidden = !state.hasMoreViolations;
+  rows.filter((row) => row.snapshot_url).forEach((row) => {
     try {
-      const card = document.createElement("div"); card.className = "violation-card";
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "violation-card";
+      card.dataset.incidentSelect = row.id;
+      card.setAttribute("aria-label", `Open ${formatViolationLabel(row.violation_type)} image from ${row.camera_name || row.camera_id}`);
       const label = formatViolationLabel(row.violation_type);
       const snapshotUrl = row.snapshot_url;
-      const detectedAt = row.detected_at ? new Date(row.detected_at).toLocaleString() : "";
-      const reviewStatus = row.review_status || "unreviewed";
-      const faceEligible = ["no_helmet", "no_arc_flash_suit", "phone_detected"].includes(row.violation_type);
-      const faceMatchStatus = faceEligible && row.face_recognition_enabled
-        ? (row.face_match_available
-          ? "Face match available"
-          : (state.canReviewFaceMatches ? "Face match queued" : ""))
-        : "";
-      const faceMatchAction = state.canReviewFaceMatches && faceEligible
-        ? `<button type="button" class="icon-btn" data-face-match-open="${row.id}">Open Face Match</button>`
-        : "";
-      card.innerHTML = `<div class="thumb-wrap">${snapshotUrl ? `<img src="${snapshotUrl}" alt="${escapeHtml(label)}" loading="lazy" />` : `<div class="thumb-placeholder">No image</div>`}<span class="thumb-badge">${label.toUpperCase()}</span><button type="button" class="gallery-delete" data-incident-delete="${row.id}" title="Permanently delete incident and evidence" aria-label="Delete incident">×</button></div><div class="card-meta"><div class="card-cam">${escapeHtml(row.camera_name || row.camera_id)}</div><div class="card-time">${escapeHtml(row.area_group || row.zone || "")} · ${detectedAt}</div><div class="review-status">${escapeHtml(reviewStatus.replace("_", " "))}</div>${faceMatchStatus ? `<div class="face-match-availability">${faceMatchStatus}${state.canReviewFaceMatches ? ` <button type="button" class="icon-btn" data-face-match-open="${row.id}">View face match</button>` : ""}</div>` : ""}<div class="face-match-panel" data-face-match-panel hidden></div><div class="review-actions">${faceMatchAction}<button type="button" class="icon-btn" data-review="${row.id}" data-review-status="confirmed">Confirm</button><button type="button" class="icon-btn danger" data-review="${row.id}" data-review-status="false_positive">False positive</button>${row.clean_snapshot_url ? `<a class="icon-btn" href="${row.clean_snapshot_url}" target="_blank" rel="noopener">Clean</a>` : ""}${row.video_url ? `<a class="icon-btn" href="${row.video_url}" target="_blank" rel="noopener">Clip</a>` : ""}</div></div>`;
-      if (snapshotUrl) {
-        card.setAttribute("role", "button");
-        card.tabIndex = 0;
-        card.addEventListener("click", (event) => {
-          if (!event.target.closest("button, a, select")) {
-            openViolationLightbox(snapshotUrl);
-          }
-        });
-        card.addEventListener("keydown", (event) => {
-          if (event.target.closest("button, a, select")) return;
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            openViolationLightbox(snapshotUrl);
-          }
-        });
-      }
+      card.innerHTML = `<img src="${escapeHtml(snapshotUrl)}" alt="${escapeHtml(label)}" loading="lazy" /><span class="thumb-badge" aria-hidden="true">${escapeHtml(label.toUpperCase())}</span>`;
       gallery.appendChild(card);
     } catch (err) {
       console.error("Failed to render a violation card:", err);
@@ -1394,8 +1836,75 @@ async function loadViolationsGallery(append = false) {
   });
 }
 
+function renderIncidentInspector(incidentId) {
+  const incident = state.violationRecords.find(
+    (row) => Number(row.id) === Number(incidentId),
+  );
+  if (!incident) return;
+  state.selectedIncidentId = incidentId;
+  const gallery = document.getElementById("violationsGallery");
+  const inspector = document.getElementById("incidentInspector");
+  const itemIndex = state.violationRecords.findIndex(
+    (row) => Number(row.id) === Number(incidentId),
+  );
+  const label = formatViolationLabel(incident.violation_type);
+  const detectedAt = incident.detected_at
+    ? new Date(incident.detected_at).toLocaleString() : "Time unavailable";
+  const cameraName = incident.camera_name || incident.camera_id || "Camera unavailable";
+  const reviewStatus = (incident.review_status || "unreviewed").replace(/_/g, " ");
+  const faceEligible = ["no_helmet", "no_arc_flash_suit", "phone_detected"]
+    .includes(incident.violation_type);
+  const people = Array.isArray(incident.detected_people) ? incident.detected_people : [];
+  const faceActions = state.canReviewFaceMatches && faceEligible
+    ? `<div class="incident-detail-group"><h4>FACE MATCH REVIEW</h4>
+      <button type="button" class="ops-btn-sec" data-face-match-open="${incident.id}">Open face match</button>
+      ${people.map((person, index) => `<button type="button" class="ops-btn-sec" data-face-match-open="${incident.id}" data-face-match-scope="person" data-face-person-track="${Number(person.person_track_id)}">Person ${index + 1} · ${escapeHtml(person.face_quality?.quality_status || (person.face_crop_available ? "Face available" : "Face not clearly visible"))}</button>`).join("")}
+    </div>` : "";
+  const personCount = Number(incident.detected_person_count || 0);
+  document.getElementById("incidentPreviewImage").src = incident.snapshot_url;
+  document.getElementById("incidentPreviewImage").alt = `${label} · ${cameraName}`;
+  document.getElementById("incidentPosition").textContent =
+    `${itemIndex + 1} of ${state.violationRecords.length}`;
+  document.getElementById("btnIncidentPrevious").disabled = itemIndex === 0;
+  document.getElementById("btnIncidentNext").disabled =
+    itemIndex === state.violationRecords.length - 1;
+  document.getElementById("incidentDetails").innerHTML = `
+    <div class="incident-detail-heading">
+      <span class="incident-detail-kicker">INCIDENT ${String(incident.id).padStart(5, "0")}</span>
+      <h3>${escapeHtml(label)}</h3>
+      <span class="incident-review-status">${escapeHtml(reviewStatus)}</span>
+    </div>
+    <div class="incident-detail-group">
+      <h4>DETAILS</h4>
+      <dl class="incident-metadata">
+        <div><dt>Camera</dt><dd>${escapeHtml(cameraName)}</dd></div>
+        <div><dt>Area</dt><dd>${escapeHtml(incident.area_group || incident.zone || "Unassigned")}</dd></div>
+        <div><dt>Detected</dt><dd>${escapeHtml(detectedAt)}</dd></div>
+        <div><dt>People detected</dt><dd>${personCount}</dd></div>
+        <div><dt>Face crops</dt><dd>${Number(incident.face_crops_available || 0)}</dd></div>
+      </dl>
+    </div>
+    <div class="incident-detail-group">
+      <h4>REVIEW</h4>
+      <div class="incident-action-row">
+        <button type="button" class="ops-btn" data-review="${incident.id}" data-review-status="confirmed">Confirm</button>
+        <button type="button" class="ops-btn-sec" data-review="${incident.id}" data-review-status="false_positive">False positive</button>
+      </div>
+      ${incident.clean_snapshot_url ? `<a class="ops-btn-sec incident-action-link" href="${escapeHtml(incident.clean_snapshot_url)}" target="_blank" rel="noopener">Open clean image</a>` : ""}
+      ${incident.video_url ? `<a class="ops-btn-sec incident-action-link" href="${escapeHtml(incident.video_url)}" target="_blank" rel="noopener">Open video clip</a>` : ""}
+      <a class="ops-btn-sec incident-action-link" href="${escapeHtml(incident.snapshot_url)}" download>Download image</a>
+    </div>
+    ${faceActions}
+    <div class="incident-detail-group incident-destructive-action">
+      <button type="button" class="ops-btn-sec" data-incident-delete="${incident.id}">Delete incident…</button>
+    </div>`;
+  gallery.hidden = true;
+  inspector.hidden = false;
+  document.getElementById("btnLoadMoreViolations").hidden = true;
+}
+
 async function loadFaceMatchPanel(incidentId, panel) {
-  panel.innerHTML = `<p class="face-match-status">Loading face-match details…</p>`;
+  panel.innerHTML = loadingMarkup("Loading face-match details…");
   try {
     const response = await fetch(`/api/violations/${incidentId}/face-match`);
     if (!response.ok) {
@@ -1451,14 +1960,32 @@ async function loadFaceMatchPanel(incidentId, panel) {
   }
 }
 
+const FACE_MATCH_FILTER_IDS = [
+  "faceViolationTypeFilter", "faceFromFilter", "faceToFilter",
+  "faceCameraFilter", "faceStatusFilter", "faceEmployeeFilter",
+  "faceDepartmentFilter", "faceScoreMin", "faceScoreMax",
+  "faceSearchFilter", "faceSourceFilter",
+];
+
+function clearFaceMatchFilters() {
+  FACE_MATCH_FILTER_IDS.forEach((id) => {
+    document.getElementById(id).value = "";
+  });
+  document.querySelectorAll("[data-face-preset]").forEach(
+    (item) => item.classList.remove("active"),
+  );
+  document.querySelector("[data-face-preset='']").classList.add("active");
+}
+
+async function openFaceMatchFromIncident(incidentId, personTrackId = null) {
+  activateDashboardTab("face-matches", false);
+  window.clearTimeout(state.faceFilterTimer);
+  clearFaceMatchFilters();
+  await loadFaceMatches({ incidentId, personTrackId });
+}
+
 function setupFaceMatches() {
-  const filterIds = [
-    "faceViolationTypeFilter", "faceFromFilter", "faceToFilter",
-    "faceCameraFilter", "faceStatusFilter", "faceEmployeeFilter",
-    "faceDepartmentFilter", "faceScoreMin", "faceScoreMax",
-    "faceSearchFilter", "faceSourceFilter",
-  ];
-  filterIds.forEach((id) => {
+  FACE_MATCH_FILTER_IDS.forEach((id) => {
     const element = document.getElementById(id);
     element.addEventListener(
       element.type === "search" ? "input" : "change",
@@ -1489,12 +2016,7 @@ function setupFaceMatches() {
     "click", () => window.print(),
   );
   document.getElementById("btnClearFaceFilters").addEventListener("click", () => {
-    filterIds.forEach((id) => {
-      const element = document.getElementById(id);
-      element.value = "";
-    });
-    document.querySelectorAll("[data-face-preset]").forEach((item) => item.classList.remove("active"));
-    document.querySelector("[data-face-preset='']").classList.add("active");
+    clearFaceMatchFilters();
     loadFaceMatches();
   });
   document.getElementById("faceMatchesBody").addEventListener("click", (event) => {
@@ -1505,24 +2027,36 @@ function setupFaceMatches() {
       return;
     }
     const row = event.target.closest("[data-face-match-id]");
-    if (row) showFaceMatchDetail(Number(row.dataset.faceMatchId));
+    if (row) showFaceMatchDetail(
+      Number(row.dataset.faceMatchId), false, false,
+      row.dataset.faceMatchScope === "person"
+        ? Number(row.dataset.facePersonTrack) : null,
+    );
   });
   document.getElementById("faceMatchesBody").addEventListener("keydown", (event) => {
     const row = event.target.closest("[data-face-match-id]");
     if (row && ["Enter", " "].includes(event.key)) {
       event.preventDefault();
-      showFaceMatchDetail(Number(row.dataset.faceMatchId));
+      showFaceMatchDetail(
+        Number(row.dataset.faceMatchId), false, false,
+        row.dataset.faceMatchScope === "person"
+          ? Number(row.dataset.facePersonTrack) : null,
+      );
     }
   });
   document.getElementById("btnFaceRerun").addEventListener(
     "click", () => {
-      if (state.faceSelectedIncident) showFaceMatchDetail(state.faceSelectedIncident, false, true);
+      if (state.faceSelectedIncident) showFaceMatchDetail(
+        state.faceSelectedIncident, false, true, state.faceSelectedTrack,
+      );
     },
   );
   document.getElementById("faceMatchDrawer").addEventListener("click", async (event) => {
     const button = event.target.closest("[data-face-drawer-action]");
     if (!button) return;
     const incidentId = Number(button.dataset.incidentId);
+    const personTrackId = button.dataset.personTrackId == null
+      ? null : Number(button.dataset.personTrackId);
     const action = button.dataset.faceDrawerAction;
     button.disabled = true;
     try {
@@ -1537,6 +2071,7 @@ function setupFaceMatches() {
         return;
       } else {
         const payload = { decision: action };
+        if (personTrackId != null) payload.person_track_id = personTrackId;
         if (action === "Reassigned") {
           payload.person_id = Number(
             document.getElementById("faceDrawerReassign").value,
@@ -1554,7 +2089,10 @@ function setupFaceMatches() {
         );
         throw new Error(error.detail || `HTTP ${response.status}`);
       }
-      await Promise.all([showFaceMatchDetail(incidentId), loadFaceMatches()]);
+      await Promise.all([
+        showFaceMatchDetail(incidentId, false, false, personTrackId),
+        loadFaceMatches(),
+      ]);
     } catch (error) {
       document.getElementById("faceMatchDrawerContent").insertAdjacentHTML(
         "afterbegin",
@@ -1716,9 +2254,9 @@ function installFaceImageFallbacks(container) {
   });
 }
 
-async function loadFaceMatches() {
+async function loadFaceMatches(selection = null) {
   const body = document.getElementById("faceMatchesBody");
-  body.innerHTML = `<div class="empty-state">Synchronizing recognition index…</div>`;
+  body.innerHTML = loadingMarkup("Synchronizing recognition index…");
   document.getElementById("faceNeedsReviewInsight").textContent = "—";
   document.getElementById("faceConfirmedInsight").textContent = "—";
   const params = new URLSearchParams({ limit: "100" });
@@ -1767,34 +2305,66 @@ async function loadFaceMatches() {
     document.getElementById("faceFilterInsight").textContent = Object.values(values).filter(Boolean).length;
     if (!matches.length) {
       body.innerHTML = `<div class="empty-state">No face matches for this filter.</div>`;
-      return;
     }
     matches.forEach((match) => {
       const card = document.createElement("button");
       card.type = "button";
       card.className = "face-result-card";
       card.dataset.faceMatchId = match.incident_id;
+      card.dataset.faceMatchScope = match.person_match
+        && match.person_track_id != null ? "person" : "incident";
+      if (card.dataset.faceMatchScope === "person") {
+        card.dataset.facePersonTrack = match.person_track_id;
+      }
       const score = match.similarity == null ? null : Math.max(0, Math.min(100, Number(match.similarity) * 100));
       const statusClass = match.status === "MATCHED" ? "matched"
         : ["UNKNOWN", "FACE_NOT_VISIBLE", "Error"].includes(match.status) ? "unknown" : "review";
       const statusLabel = match.status === "FACE_NOT_VISIBLE" ? "NO FACE"
         : match.status === "NEEDS_REVIEW" ? "REVIEW" : match.status || "QUEUED";
+      const qualityLabel = match.face_quality?.quality_status
+        || (match.face_crop_available ? "Face crop available"
+          : match.status === "FACE_NOT_VISIBLE"
+            ? "Face Not Clearly Visible" : "Face crop unavailable");
+      const humanReviewLabel = match.review_decision
+        ? `Human review: ${match.review_decision}`
+        : "Human review pending";
       card.innerHTML = `${match.snapshot_url
         ? `<img class="face-result-thumb" src="${escapeHtml(match.snapshot_url)}" alt="Incident ${match.incident_id}" loading="lazy" />`
         : `<span class="face-result-thumb face-list-placeholder">NO IMAGE</span>`}
         <span class="face-result-main"><span class="face-result-name">${escapeHtml(match.full_name || statusLabel)}</span>
-        <span class="face-result-meta">#${match.incident_id} · ${escapeHtml(formatViolationLabel(match.violation_type))}<br />${escapeHtml(match.camera_name || match.camera_id || "CAMERA UNKNOWN")} · ${match.epoch_time ? new Date(Number(match.epoch_time) * 1000).toLocaleString() : "TIME UNKNOWN"}</span>
+        <span class="face-result-meta">#${match.incident_id} · Person ${escapeHtml(String(match.person_number ?? 1))} · ${escapeHtml(formatViolationLabel(match.violation_type))}<br />${escapeHtml(qualityLabel)} · ${escapeHtml(humanReviewLabel)}<br />${escapeHtml(match.camera_name || match.camera_id || "CAMERA UNKNOWN")} · ${match.epoch_time ? new Date(Number(match.epoch_time) * 1000).toLocaleString() : "TIME UNKNOWN"}</span>
         <span class="face-result-status"><span class="face-status-badge ${statusClass}">${statusLabel}</span><span class="face-result-score">${score == null ? "—" : `${score.toFixed(1)}%`}</span></span>
         <span class="face-confidence" aria-label="${score == null ? "No score available" : `${score.toFixed(1)} percent confidence`}"><i style="width:${score || 0}%"></i></span>
         <span class="gallery-delete" role="button" tabindex="0" data-face-delete="${match.incident_id}" title="Permanently delete incident image and record" aria-label="Delete incident">⌫</span></span>`;
       body.appendChild(card);
     });
     installFaceImageFallbacks(body);
-    if (!state.faceSelectedIncident || !matches.some((item) => Number(item.incident_id) === state.faceSelectedIncident)) {
-      showFaceMatchDetail(Number(matches[0].incident_id), true);
+    if (selection) {
+      await showFaceMatchDetail(
+        selection.incidentId, false, false, selection.personTrackId,
+      );
+      return;
+    }
+    if (!matches.length) return;
+    if (!matches.some((item) =>
+      Number(item.incident_id) === state.faceSelectedIncident
+      && (item.person_match && item.person_track_id != null
+        ? Number(item.person_track_id) : null)
+        === state.faceSelectedTrack,
+    )) {
+      showFaceMatchDetail(
+        Number(matches[0].incident_id), true, false,
+        !matches[0].person_match || matches[0].person_track_id == null
+          ? null : Number(matches[0].person_track_id),
+      );
     }
   } catch (error) {
     body.innerHTML = `<div class="face-match-error">Could not load face matches: ${escapeHtml(error.message)}</div>`;
+    if (selection) {
+      await showFaceMatchDetail(
+        selection.incidentId, false, false, selection.personTrackId,
+      );
+    }
   }
 }
 
@@ -1821,7 +2391,59 @@ function faceBoxStyle(box, frameWidth, frameHeight) {
   if (!Array.isArray(box) || box.length !== 4 || !frameWidth || !frameHeight) return "";
   const [x1, y1, x2, y2] = box.map(Number);
   if (![x1, y1, x2, y2].every(Number.isFinite) || x2 <= x1 || y2 <= y1) return "";
-  return `left:${Math.max(0, x1 / frameWidth * 100)}%;top:${Math.max(0, y1 / frameHeight * 100)}%;width:${Math.min(100, (x2 - x1) / frameWidth * 100)}%;height:${Math.min(100, (y2 - y1) / frameHeight * 100)}%`;
+  const left = Math.max(0, Math.min(frameWidth, x1));
+  const top = Math.max(0, Math.min(frameHeight, y1));
+  const right = Math.max(left, Math.min(frameWidth, x2));
+  const bottom = Math.max(top, Math.min(frameHeight, y2));
+  if (right <= left || bottom <= top) return "";
+  return `left:${left / frameWidth * 100}%;top:${top / frameHeight * 100}%;width:${(right - left) / frameWidth * 100}%;height:${(bottom - top) / frameHeight * 100}%`;
+}
+
+function setupFacePersonCrop(
+  container, imageUrl, box, frameWidth, frameHeight,
+) {
+  const preview = container.querySelector("[data-face-person-crop]");
+  const status = container.querySelector("[data-face-person-crop-status]");
+  if (!preview || !status) return;
+  if (!Array.isArray(box) || box.length !== 4
+    || !box.map(Number).every(Number.isFinite)) {
+    status.textContent = "Person crop unavailable: no valid person box was saved.";
+    return;
+  }
+  const source = new Image();
+  source.addEventListener("load", () => {
+    try {
+      const scaleX = source.naturalWidth / (Number(frameWidth) || source.naturalWidth);
+      const scaleY = source.naturalHeight / (Number(frameHeight) || source.naturalHeight);
+      const [rawX1, rawY1, rawX2, rawY2] = box.map(Number);
+      const padX = Math.round((rawX2 - rawX1) * 0.06);
+      const padY = Math.round((rawY2 - rawY1) * 0.06);
+      const x1 = Math.max(0, Math.floor((rawX1 - padX) * scaleX));
+      const y1 = Math.max(0, Math.floor((rawY1 - padY) * scaleY));
+      const x2 = Math.min(source.naturalWidth, Math.ceil((rawX2 + padX) * scaleX));
+      const y2 = Math.min(source.naturalHeight, Math.ceil((rawY2 + padY) * scaleY));
+      if (x2 <= x1 || y2 <= y1) {
+        status.textContent = "Person crop unavailable: the saved box is outside the frame.";
+        return;
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = x2 - x1;
+      canvas.height = y2 - y1;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Image canvas is unavailable.");
+      context.drawImage(source, x1, y1, canvas.width, canvas.height,
+        0, 0, canvas.width, canvas.height);
+      preview.src = canvas.toDataURL("image/jpeg", 0.92);
+      preview.hidden = false;
+      status.textContent = `${canvas.width} × ${canvas.height}px · PERSON BOX`;
+    } catch (error) {
+      status.textContent = `Person crop unavailable: ${error.message}`;
+    }
+  }, { once: true });
+  source.addEventListener("error", () => {
+    status.textContent = "Person crop unavailable: the incident image could not be loaded.";
+  }, { once: true });
+  source.src = imageUrl;
 }
 
 function playFaceScan(match) {
@@ -1855,32 +2477,70 @@ function playFaceScan(match) {
   };
 }
 
-async function showFaceMatchDetail(incidentId, autoRun = false, forceRun = false) {
+async function showFaceMatchDetail(
+  incidentId, autoRun = false, forceRun = false, personTrackId = null,
+) {
   state.faceSelectedIncident = incidentId;
+  state.faceSelectedTrack = personTrackId;
   document.querySelectorAll(".face-result-card").forEach((card) => {
-    card.classList.toggle("active", Number(card.dataset.faceMatchId) === incidentId);
+    card.classList.toggle(
+      "active",
+      Number(card.dataset.faceMatchId) === incidentId
+      && (card.dataset.faceMatchScope === "person"
+        ? Number(card.dataset.facePersonTrack) : null) === personTrackId,
+    );
   });
   const content = document.getElementById("faceMatchDrawerContent");
-  document.getElementById("faceMatchDrawerTitle").textContent = `FACE MATCH · INCIDENT #${incidentId}`;
+  document.getElementById("faceMatchDrawerTitle").textContent =
+    `FACE MATCH · INCIDENT #${incidentId}${personTrackId == null ? "" : ` · TRACK ${personTrackId}`}`;
   document.getElementById("btnFaceRerun").hidden = false;
-  content.innerHTML = `<p class="face-match-status">Loading face-match details…</p>`;
+  content.innerHTML = loadingMarkup("Loading face-match details…");
   try {
-    const response = await fetch(`/api/face-matches/${incidentId}`);
+    const personQuery = personTrackId == null
+      ? "" : `?person_track_id=${encodeURIComponent(personTrackId)}`;
+    const response = await fetch(`/api/face-matches/${incidentId}${personQuery}`);
     if (!response.ok) {
       const error = await response.json().catch(() => ({ detail: `HTTP ${response.status}` }));
       throw new Error(error.detail || `HTTP ${response.status}`);
     }
     const match = await response.json();
+    const personLabel = match.person_number ?? (
+      personTrackId == null ? null : personTrackId
+    );
+    const faceCropParams = new URLSearchParams();
+    if (personTrackId != null) {
+      faceCropParams.set("person_track_id", String(personTrackId));
+    }
+    if (Array.isArray(match.face_bbox)) {
+      faceCropParams.set("v", match.face_bbox.join("-"));
+    }
+    const faceCropQuery = faceCropParams.toString();
+    const faceCropUrl = `/api/violations/${incidentId}/face-crop${
+      faceCropQuery ? `?${faceCropQuery}` : ""
+    }`;
+    document.getElementById("faceMatchDrawerTitle").textContent =
+      `FACE MATCH · INCIDENT #${incidentId}${personLabel == null ? "" : ` · PERSON ${personLabel}`}`;
     const candidates = Array.isArray(match.top5_candidates)
       ? match.top5_candidates
       : (Array.isArray(match.top3_candidates) ? match.top3_candidates : []);
     const metadata = match.detection_metadata || {};
     const frameWidth = Number(metadata.frame_width);
     const frameHeight = Number(metadata.frame_height);
-    const originalUrl = match.snapshot_url || match.clean_snapshot_url;
+    const annotatedUrl = match.snapshot_url || match.clean_snapshot_url;
+    const cleanUrl = match.clean_snapshot_url || "";
+    const originalUrl = annotatedUrl;
+    const showCleanFrame = Boolean(
+      cleanUrl && annotatedUrl && cleanUrl !== annotatedUrl,
+    );
     const original = originalUrl
-      ? `<button type="button" class="face-evidence-open" data-face-evidence-open="${incidentId}" aria-label="Open incident evidence gallery"><img class="face-detail-original" src="${escapeHtml(originalUrl)}" alt="Original incident image" /></button>`
+      ? `<button type="button" class="face-evidence-open" data-face-evidence-open="${incidentId}" aria-label="Open incident evidence gallery"><img class="face-detail-original" data-face-evidence-image src="${escapeHtml(originalUrl)}" alt="Annotated incident evidence" /></button>`
       : `<div class="thumb-placeholder">Original image unavailable</div>`;
+    const personBox = match.person_bbox || metadata.person_box
+      || (Array.isArray(metadata.detected_persons)
+        ? metadata.detected_persons.find(
+          (person) => Number(person.track_id) === Number(personTrackId),
+        )?.person_box
+        : null);
     const overlays = faceBoxOverlay(
       metadata.person_box, frameWidth, frameHeight, "person",
     ) + faceBoxOverlay(match.face_bbox, frameWidth, frameHeight, "face");
@@ -1902,7 +2562,14 @@ async function showFaceMatchDetail(incidentId, autoRun = false, forceRun = false
         ).join("");
       }
     }
-    const incidentFace = `<figure><img class="face-detail-crop" src="/api/violations/${incidentId}/face-crop" alt="Incident face crop" /><figcaption>INCIDENT FACE</figcaption></figure>`;
+    const incidentFace = `<figure class="face-incident-crop">
+      <img class="face-detail-crop" data-face-crop src="${escapeHtml(faceCropUrl)}" alt="Original incident face crop" />
+      <div class="face-crop-tools">
+        <button type="button" class="link-button" data-face-sharpen>SHARPEN PREVIEW</button>
+        <span data-face-sharpen-status>Display-only edge enhancement; it cannot restore lost detail. Original evidence is unchanged.</span>
+      </div>
+      <figcaption data-face-crop-caption>INCIDENT FACE · ORIGINAL</figcaption>
+    </figure>`;
     const comparison = match.face_crop_available
       ? `<div class="face-detail-photos face-detail-comparison">${incidentFace}${employeePhotos || `<div class="thumb-placeholder">No enrolled reference photo available</div>`}</div>`
       : `<div class="face-detail-photos"><div class="thumb-placeholder">No usable incident face crop</div>${employeePhotos}</div>`;
@@ -1915,7 +2582,7 @@ async function showFaceMatchDetail(incidentId, autoRun = false, forceRun = false
     const reassign = activeEmployees.length
       ? `<label>Reassign to <select id="faceDrawerReassign">${activeEmployees.map((person) =>
         `<option value="${person.person_id}">${escapeHtml(person.full_name)} (${escapeHtml(person.employee_code)})</option>`,
-      ).join("")}</select></label><button type="button" data-face-drawer-action="Reassigned" data-incident-id="${incidentId}">Reassign</button>`
+      ).join("")}</select></label><button type="button" data-face-drawer-action="Reassigned" data-incident-id="${incidentId}" ${personTrackId == null ? "" : `data-person-track-id="${personTrackId}"`}>Reassign</button>`
       : "";
     const status = match.status || "UNKNOWN";
     const score = match.similarity == null ? "—" : `${(Number(match.similarity) * 100).toFixed(1)}%`;
@@ -1928,7 +2595,7 @@ async function showFaceMatchDetail(incidentId, autoRun = false, forceRun = false
       ? ` · ${escapeHtml(quality.face_detector)}${quality.face_detector_confidence == null ? "" : ` ${(Number(quality.face_detector_confidence) * 100).toFixed(0)}%`}`
       : "";
     const processSteps = [
-      ["01", "PERSON ROI", metadata.person_box ? "Detector bounding box applied" : "Violation region unavailable"],
+      ["01", "PERSON ROI", metadata.person_box ? `Person ${personTrackId ?? "—"} bounding box applied` : "Violation region unavailable"],
       ["02", "FACE + QUALITY", match.face_crop_available
         ? `Face crop accepted · ${escapeHtml(cropSource)}${detectorDetails}${quality.quality_score == null ? "" : ` · quality ${(Number(quality.quality_score) * 100).toFixed(0)}%`}`
         : "No usable face detected"],
@@ -1936,10 +2603,17 @@ async function showFaceMatchDetail(incidentId, autoRun = false, forceRun = false
       ["04", "GALLERY SEARCH", candidates.length ? `${candidates.length} ranked candidate(s)` : "No gallery candidates"],
     ];
     content.innerHTML = `<p class="face-recognition-notice">Automated result only; a human reviewer must make the final identity decision. This result is not a disciplinary action.</p>
-      <div class="face-case-grid"><div><h4>CAPTURED FRAME · ${escapeHtml(formatViolationLabel(match.violation_type))}</h4>
-        <div class="face-evidence-frame">${original}${overlays}${faceBoxStyle(match.face_bbox, frameWidth, frameHeight) ? `<div class="face-scan-stage" data-face-scan style="${faceBoxStyle(match.face_bbox, frameWidth, frameHeight)}" hidden><div class="face-scan-line"></div><div class="face-scan-grid"></div><div class="face-scan-brackets"></div><div class="face-scan-copy">ANALYZING / EMBEDDING COMPARISON<div class="face-scan-progress"><i></i></div><span class="face-scan-data"></span></div></div>` : ""}</div>
-        <p>${escapeHtml(match.camera_name || match.camera_id || "Camera unavailable")} · ${escapeHtml(match.area_group_name || "Location unavailable")} · ${match.epoch_time ? new Date(Number(match.epoch_time) * 1000).toLocaleString() : "Time unavailable"}</p>
-        <p>Incident status: ${escapeHtml(match.violation_status || "—")} · Source: ${escapeHtml(match.source || "live")}</p></div>
+      <div class="face-case-grid"><div class="face-case-evidence">
+        <div class="face-evidence-heading"><h4>ANNOTATED INCIDENT · ${escapeHtml(formatViolationLabel(match.violation_type))}</h4>
+          ${showCleanFrame ? `<button type="button" class="ops-btn-sec face-frame-toggle" data-face-frame-toggle aria-pressed="false">SHOW CLEAN FRAME</button>` : ""}</div>
+        <div class="face-evidence-frame"><div class="face-evidence-stage">${original}${overlays}${faceBoxStyle(match.face_bbox, frameWidth, frameHeight) ? `<div class="face-scan-stage" data-face-scan style="${faceBoxStyle(match.face_bbox, frameWidth, frameHeight)}" hidden><div class="face-scan-line"></div><div class="face-scan-grid"></div><div class="face-scan-brackets"></div><div class="face-scan-copy">ANALYZING / EMBEDDING COMPARISON<div class="face-scan-progress"><i></i></div><span class="face-scan-data"></span></div></div>` : ""}</div></div>
+        <section class="face-person-context" aria-label="Detected person evidence">
+          <div><h4>PERSON / PPE CONTEXT</h4><span>Zoomed from the detected person box in the original frame.</span></div>
+          <img data-face-person-crop alt="Detected person and PPE context crop" hidden />
+          <p data-face-person-crop-status>${personBox ? "Preparing person crop…" : "Person region is unavailable because this incident has no person box."}</p>
+        </section>
+        <p class="face-evidence-meta">${escapeHtml(match.camera_name || match.camera_id || "Camera unavailable")} · ${escapeHtml(match.area_group_name || "Location unavailable")} · ${match.epoch_time ? new Date(Number(match.epoch_time) * 1000).toLocaleString() : "Time unavailable"}</p>
+        <p class="face-evidence-meta">Incident status: ${escapeHtml(match.violation_status || "—")} · Source: ${escapeHtml(match.source || "live")}</p></div>
         <div><h4>FACE COMPARISON</h4><div class="face-face-pair">${comparison}</div>${employee}</div></div>
       <section class="face-process"><h4>RECOGNITION PIPELINE</h4><ol>${processSteps.map(([step, title, detail]) =>
         `<li><span>${step}</span><strong>${title}</strong><small>${escapeHtml(detail)}</small></li>`,
@@ -1947,21 +2621,41 @@ async function showFaceMatchDetail(incidentId, autoRun = false, forceRun = false
       <p class="face-detail-result"><strong>${escapeHtml(status)}</strong> · Similarity ${escapeHtml(score)} · Model ${escapeHtml(match.model_version || "unavailable")} · thresholds ${(Number(thresholds.low_threshold) * 100 || 0).toFixed(0)}% / ${(Number(thresholds.high_threshold) * 100 || 0).toFixed(0)}%</p>
       <h4>TOP CANDIDATES</h4>${candidatesMarkup}
       <div class="face-detail-actions">
-        <button type="button" data-face-drawer-action="Confirmed" data-incident-id="${incidentId}">Confirm match</button>
-        <button type="button" data-face-drawer-action="Rejected" data-incident-id="${incidentId}">Reject match</button>
-        <button type="button" data-face-drawer-action="Unknown" data-incident-id="${incidentId}">Mark unknown</button>
+        <button type="button" data-face-drawer-action="Confirmed" data-incident-id="${incidentId}" ${personTrackId == null ? "" : `data-person-track-id="${personTrackId}"`}>Confirm match</button>
+        <button type="button" data-face-drawer-action="Rejected" data-incident-id="${incidentId}" ${personTrackId == null ? "" : `data-person-track-id="${personTrackId}"`}>Reject match</button>
+        <button type="button" data-face-drawer-action="Unknown" data-incident-id="${incidentId}" ${personTrackId == null ? "" : `data-person-track-id="${personTrackId}"`}>Mark unknown</button>
         ${reassign}
         <button type="button" data-face-drawer-action="rerun" data-incident-id="${incidentId}">Re-run matching</button>
         ${match.review_decision ? `<p>Reviewer decision: ${escapeHtml(match.review_decision)} · ${match.reviewed_at ? new Date(match.reviewed_at).toLocaleString() : ""}</p>` : ""}
       </div><div id="faceEmployeeHistory"></div>`;
+    setupFaceCropSharpening(content);
+    if (originalUrl) {
+      setupFacePersonCrop(
+        content, cleanUrl || originalUrl, personBox, frameWidth, frameHeight,
+      );
+    }
     installFaceImageFallbacks(content);
+    const frameToggle = content.querySelector("[data-face-frame-toggle]");
+    if (frameToggle) {
+      const evidenceImage = content.querySelector("[data-face-evidence-image]");
+      frameToggle.addEventListener("click", () => {
+        const showClean = frameToggle.getAttribute("aria-pressed") !== "true";
+        evidenceImage.src = showClean ? cleanUrl : annotatedUrl;
+        evidenceImage.alt = showClean
+          ? "Clean incident evidence" : "Annotated incident evidence";
+        frameToggle.setAttribute("aria-pressed", String(showClean));
+        frameToggle.textContent = showClean
+          ? "SHOW ANNOTATED FRAME" : "SHOW CLEAN FRAME";
+      });
+    }
     const evidenceButton = content.querySelector("[data-face-evidence-open]");
     if (evidenceButton) {
       evidenceButton.addEventListener("click", () => openFaceMatchGallery(incidentId, originalUrl));
     }
-    const shouldAnimate = forceRun || autoRun || !state.faceViewed.has(incidentId);
+    const viewedKey = `${incidentId}:${personTrackId ?? "legacy"}`;
+    const shouldAnimate = forceRun || autoRun || !state.faceViewed.has(viewedKey);
     if (shouldAnimate) {
-      state.faceViewed.add(incidentId);
+      state.faceViewed.add(viewedKey);
       playFaceScan(match);
     }
   } catch (error) {
@@ -1969,10 +2663,82 @@ async function showFaceMatchDetail(incidentId, autoRun = false, forceRun = false
   }
 }
 
+function setupFaceCropSharpening(container) {
+  const image = container.querySelector("[data-face-crop]");
+  const button = container.querySelector("[data-face-sharpen]");
+  const status = container.querySelector("[data-face-sharpen-status]");
+  const caption = container.querySelector("[data-face-crop-caption]");
+  if (!image || !button || !status || !caption) return;
+
+  const originalUrl = image.src;
+  let sharpenedUrl = "";
+  let isSharpened = false;
+  image.addEventListener("error", () => {
+    image.hidden = true;
+    button.hidden = true;
+    status.textContent = "Face crop unavailable from the saved evidence box.";
+    caption.textContent = "INCIDENT FACE · UNAVAILABLE";
+  });
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    try {
+      if (!sharpenedUrl) {
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        if (!context || !canvas.width || !canvas.height) {
+          throw new Error("The incident face preview could not be processed.");
+        }
+        context.drawImage(image, 0, 0);
+        const source = context.getImageData(0, 0, canvas.width, canvas.height);
+        const output = context.createImageData(canvas.width, canvas.height);
+        const { data: input } = source;
+        const { data } = output;
+        data.set(input);
+        for (let y = 1; y < canvas.height - 1; y += 1) {
+          for (let x = 1; x < canvas.width - 1; x += 1) {
+            const index = (y * canvas.width + x) * 4;
+            const neighbors = [
+              index - canvas.width * 4,
+              index - 4,
+              index + 4,
+              index + canvas.width * 4,
+            ];
+            for (let channel = 0; channel < 3; channel += 1) {
+              const sharpened = input[index + channel] * 1.8
+                - neighbors.reduce(
+                  (sum, offset) => sum + input[offset + channel] * 0.2,
+                  0,
+                );
+              data[index + channel] = Math.max(0, Math.min(255, sharpened));
+            }
+          }
+        }
+        context.putImageData(output, 0, 0);
+        sharpenedUrl = canvas.toDataURL("image/png");
+      }
+
+      isSharpened = !isSharpened;
+      image.src = isSharpened ? sharpenedUrl : originalUrl;
+      button.textContent = isSharpened ? "SHOW ORIGINAL" : "SHARPEN PREVIEW";
+      caption.textContent = isSharpened
+        ? "INCIDENT FACE · SHARPENED PREVIEW"
+        : "INCIDENT FACE · ORIGINAL";
+      status.textContent = "Display-only edge enhancement; it cannot restore lost detail. Original evidence is unchanged.";
+    } catch (error) {
+      status.textContent = error.message || "Could not create a sharpened preview.";
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
 async function showEmployeeHistory(personId) {
   const target = document.getElementById("faceEmployeeHistory");
   if (!target) return;
-  target.textContent = "Loading employee violation history…";
+  target.innerHTML = loadingMarkup("Loading employee violation history…");
   try {
     const response = await fetch(`/api/face/employees/${personId}/history`);
     if (!response.ok) {
@@ -2065,7 +2831,7 @@ async function loadFaceMatchSettings() {
 
 async function loadFaceAnalytics() {
   const body = document.getElementById("faceAnalyticsBody");
-  body.innerHTML = `<tr><td colspan="5" class="empty-state">Loading confirmed-match analytics…</td></tr>`;
+  body.innerHTML = `<tr><td colspan="5">${loadingMarkup("Loading confirmed-match analytics…")}</td></tr>`;
   const params = new URLSearchParams({
     window_hours: document.getElementById("faceAnalyticsWindow").value,
   });
@@ -2108,7 +2874,7 @@ async function loadFaceAnalytics() {
 
 async function loadFaceRecognitionStatus() {
   const container = document.getElementById("faceRecognitionStatus");
-  container.textContent = "Loading face-recognition status…";
+  container.innerHTML = loadingMarkup("Loading face-recognition status…");
   try {
     const response = await fetch("/api/face/status");
     if (!response.ok) {
@@ -2596,8 +3362,8 @@ async function loadCameraStatusReport() {
   if (cameraId) params.set("camera_id", cameraId);
   message.hidden = false;
   message.className = "camera-status-message loading";
-  message.textContent = "Loading camera status history…";
-  timeline.innerHTML = '<div class="empty-state">Loading camera status history…</div>';
+  message.innerHTML = loadingMarkup("Loading camera status history…");
+  timeline.innerHTML = loadingMarkup("Loading camera status history…");
   try {
     const response = await fetch(
       `/api/camera-status/history?${params.toString()}`,
@@ -2761,17 +3527,17 @@ function setupPowerAutomateTest() {
     .addEventListener("click", loadAlertViolationGallery);
   document.getElementById("btnSelectAllAlertEvidence")
     .addEventListener("click", () => {
-      document.querySelectorAll(".alert-select-card").forEach((card) =>
-        state.alertSelectedIds.add(Number(card.dataset.alertImage)),
-      );
+      state.alertVisibleRows.forEach((row) => state.alertSelectedIds.add(Number(row.id)));
       syncAlertCardSelection();
       updateAlertSelectionSummary();
+      if (state.selectedAlertImageId) renderAlertInspector(state.selectedAlertImageId);
     });
   document.getElementById("btnClearAlertEvidence")
     .addEventListener("click", () => {
       state.alertSelectedIds.clear();
       syncAlertCardSelection();
       updateAlertSelectionSummary();
+      if (state.selectedAlertImageId) renderAlertInspector(state.selectedAlertImageId);
     });
   document.getElementById("alertGalleryType")
     .addEventListener("change", loadAlertViolationGallery);
@@ -2782,12 +3548,50 @@ function setupPowerAutomateTest() {
   document.getElementById("alertGallerySort")
     .addEventListener("change", renderAlertViolationGallery);
   const gallery = document.getElementById("alertViolationGallery");
+  document.getElementById("btnAlertGalleryBack").addEventListener("click", () => {
+    state.selectedAlertImageId = null;
+    document.getElementById("alertIncidentInspector").hidden = true;
+    gallery.hidden = false;
+  });
+  gallery.addEventListener("click", (event) => {
+    const selectButton = event.target.closest("[data-alert-select]");
+    if (selectButton) {
+      toggleAlertImageSelection(Number(selectButton.dataset.alertSelect));
+      return;
+    }
+    const imageButton = event.target.closest("[data-alert-open]");
+    if (imageButton) renderAlertInspector(Number(imageButton.dataset.alertOpen));
+  });
+  document.getElementById("alertIncidentDetails").addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (!button) return;
+    if (button.hasAttribute("data-alert-select")) {
+      toggleAlertImageSelection(Number(button.dataset.alertSelect));
+    }
+  });
+  document.getElementById("btnAlertPrevious")
+    .addEventListener("click", () => moveAlertInspector(-1));
+  document.getElementById("btnAlertNext")
+    .addEventListener("click", () => moveAlertInspector(1));
+  document.addEventListener("keydown", (event) => {
+    if (document.getElementById("alertIncidentInspector").hidden
+      || !document.getElementById("tab-alert-delivery").classList.contains("active")
+      || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      moveAlertInspector(-1);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      moveAlertInspector(1);
+    }
+  });
   loadAlertViolationGallery();
 }
 
 async function loadAlertViolationGallery() {
   const gallery = document.getElementById("alertViolationGallery");
   gallery.setAttribute("aria-busy", "true");
+  gallery.innerHTML = loadingMarkup("Loading eligible evidence…");
   try {
     const type = document.getElementById("alertGalleryType").value;
     const age = document.getElementById("alertGalleryAge").value;
@@ -2799,32 +3603,10 @@ async function loadAlertViolationGallery() {
     const rows = await response.json();
     if (!response.ok) throw new Error(rows.detail || `HTTP ${response.status}`);
     state.alertGalleryRows = rows.filter((row) => row.snapshot_url);
-    state.violationGallery = state.alertGalleryRows.map((row) => ({
-      id: row.id,
-      url: row.snapshot_url,
-      title: `${formatViolationLabel(row.violation_type)} · ${row.camera_name || row.camera_id}`,
-      caption: `${row.camera_name || row.camera_id} · ${row.zone || ""} · ${new Date(row.detected_at).toLocaleString()}`,
-    }));
+    state.selectedAlertImageId = null;
+    document.getElementById("alertIncidentInspector").hidden = true;
+    gallery.hidden = false;
     renderAlertViolationGallery();
-    /* Card interactions are delegated after each render so search and sort stay lightweight. */
-    gallery.onclick = (event) => {
-      const card = event.target.closest(".alert-select-card");
-      if (!card) return;
-      const selectButton = event.target.closest("[data-alert-select]");
-      if (selectButton) {
-        const incidentId = Number(selectButton.dataset.alertSelect);
-        if (state.alertSelectedIds.has(incidentId)) state.alertSelectedIds.delete(incidentId);
-        else state.alertSelectedIds.add(incidentId);
-        syncAlertCardSelection();
-        updateAlertSelectionSummary();
-        return;
-      }
-      const image = card.querySelector("img");
-      if (event.target.closest("img")) {
-        if (image) openViolationLightbox(image.src);
-      }
-    };
-    gallery.onkeydown = null;
     updateAlertSelectionSummary();
   } catch (error) {
     gallery.innerHTML = `<div class="error-state">${escapeHtml(error.message)}</div>`;
@@ -2835,6 +3617,12 @@ async function loadAlertViolationGallery() {
 
 function renderAlertViolationGallery() {
   const gallery = document.getElementById("alertViolationGallery");
+  const inspector = document.getElementById("alertIncidentInspector");
+  if (!inspector.hidden) {
+    inspector.hidden = true;
+    state.selectedAlertImageId = null;
+  }
+  gallery.hidden = false;
   const search = (document.getElementById("alertGallerySearch")?.value || "").trim().toLowerCase();
   const sort = document.getElementById("alertGallerySort")?.value || "newest";
   const rows = [...(state.alertGalleryRows || [])]
@@ -2843,40 +3631,102 @@ function renderAlertViolationGallery() {
       const delta = new Date(a.detected_at) - new Date(b.detected_at);
       return sort === "oldest" ? delta : -delta;
     });
+  state.alertVisibleRows = rows;
   document.getElementById("alertGalleryCount").textContent =
     `${rows.length} evidence item${rows.length === 1 ? "" : "s"} · ${state.alertSelectedIds.size} selected`;
   gallery.innerHTML = rows.length ? rows.map((row) => {
+      const selected = state.alertSelectedIds.has(Number(row.id));
       const label = formatViolationLabel(row.violation_type);
-      return `<article class="violation-card alert-select-card${state.alertSelectedIds.has(Number(row.id)) ? " selected" : ""}" data-alert-image="${row.id}" role="group" aria-label="Evidence image ${row.id}">
-        <div class="thumb-wrap">
-          <img src="${row.snapshot_url}" alt="${escapeHtml(label)}" loading="lazy">
-          <span class="thumb-badge">${escapeHtml(label.toUpperCase())}</span>
-        </div>
-        <div class="card-meta">
-          <div class="card-cam">${escapeHtml(row.camera_name || row.camera_id)}</div>
-          <div class="card-time">${escapeHtml(row.zone || "Unassigned")} · ${escapeHtml(new Date(row.detected_at).toLocaleString())}</div>
-          <button type="button" class="alert-evidence-select${state.alertSelectedIds.has(Number(row.id)) ? " selected" : ""}" data-alert-select="${row.id}" aria-pressed="${state.alertSelectedIds.has(Number(row.id))}">
-            <span class="alert-select-indicator" aria-hidden="true">${state.alertSelectedIds.has(Number(row.id)) ? "✓" : "+"}</span>
-            <span>${state.alertSelectedIds.has(Number(row.id)) ? "SELECTED FOR DISPATCH" : "ADD TO DISPATCH"}</span>
-          </button>
-        </div>
-      </article>`;
+      return `<div class="alert-image-tile${selected ? " selected" : ""}" data-alert-image="${row.id}">
+        <button type="button" class="alert-image-open" data-alert-open="${row.id}" aria-label="Open ${escapeHtml(label)} evidence from ${escapeHtml(row.camera_name || row.camera_id)}">
+          <img src="${escapeHtml(row.snapshot_url)}" alt="${escapeHtml(label)}" loading="lazy">
+        </button>
+        <button type="button" class="alert-image-select${selected ? " selected" : ""}" data-alert-select="${row.id}" aria-label="${selected ? "Remove from" : "Add to"} dispatch selection" aria-pressed="${selected}">
+          <span aria-hidden="true">${selected ? "✓" : "+"}</span>
+        </button>
+      </div>`;
     }).join("") : '<div class="empty-state">No evidence matches the current filters.</div>';
   syncAlertCardSelection();
   updateAlertSelectionSummary();
 }
 
 function syncAlertCardSelection() {
-  document.querySelectorAll(".alert-select-card").forEach((card) => {
+  document.querySelectorAll(".alert-image-tile").forEach((card) => {
     const selected = state.alertSelectedIds.has(Number(card.dataset.alertImage));
     card.classList.toggle("selected", selected);
     const button = card.querySelector("[data-alert-select]");
-    if (!button) return;
-    button.classList.toggle("selected", selected);
-    button.setAttribute("aria-pressed", String(selected));
-    button.querySelector(".alert-select-indicator").textContent = selected ? "✓" : "+";
-    button.lastElementChild.textContent = selected ? "SELECTED FOR DISPATCH" : "ADD TO DISPATCH";
+    if (button) {
+      button.classList.toggle("selected", selected);
+      button.setAttribute("aria-pressed", String(selected));
+      button.setAttribute("aria-label", `${selected ? "Remove from" : "Add to"} dispatch selection`);
+      button.firstElementChild.textContent = selected ? "✓" : "+";
+    }
   });
+}
+
+function toggleAlertImageSelection(imageId) {
+  if (state.alertSelectedIds.has(imageId)) state.alertSelectedIds.delete(imageId);
+  else state.alertSelectedIds.add(imageId);
+  syncAlertCardSelection();
+  updateAlertSelectionSummary();
+  if (Number(state.selectedAlertImageId) === imageId) renderAlertInspector(imageId);
+}
+
+function moveAlertInspector(direction) {
+  const index = state.alertVisibleRows.findIndex(
+    (row) => Number(row.id) === Number(state.selectedAlertImageId),
+  );
+  const next = state.alertVisibleRows[index + direction];
+  if (next) renderAlertInspector(next.id);
+}
+
+function renderAlertInspector(imageId) {
+  const row = state.alertGalleryRows.find(
+    (item) => Number(item.id) === Number(imageId),
+  );
+  if (!row) return;
+  const rows = state.alertVisibleRows;
+  const index = rows.findIndex((item) => Number(item.id) === Number(imageId));
+  state.selectedAlertImageId = Number(row.id);
+  const label = formatViolationLabel(row.violation_type);
+  const camera = row.camera_name || row.camera_id || "Camera unavailable";
+  const detectedAt = row.detected_at
+    ? new Date(row.detected_at).toLocaleString() : "Time unavailable";
+  const selected = state.alertSelectedIds.has(Number(row.id));
+  document.getElementById("alertPreviewImage").src = row.snapshot_url;
+  document.getElementById("alertPreviewImage").alt = `${label} · ${camera}`;
+  document.getElementById("alertPosition").textContent =
+    `${index + 1} of ${rows.length}`;
+  document.getElementById("btnAlertPrevious").disabled = index <= 0;
+  document.getElementById("btnAlertNext").disabled = index < 0 || index >= rows.length - 1;
+  document.getElementById("alertIncidentDetails").innerHTML = `
+    <div class="incident-detail-heading">
+      <span class="incident-detail-kicker">EVIDENCE ${String(row.id).padStart(5, "0")}</span>
+      <h3>${escapeHtml(label)}</h3>
+      <span class="incident-review-status">Ready for dispatch</span>
+    </div>
+    <div class="incident-detail-group">
+      <h4>DETAILS</h4>
+      <dl class="incident-metadata">
+        <div><dt>Camera</dt><dd>${escapeHtml(camera)}</dd></div>
+        <div><dt>Area</dt><dd>${escapeHtml(row.zone || "Unassigned")}</dd></div>
+        <div><dt>Detected</dt><dd>${escapeHtml(detectedAt)}</dd></div>
+      </dl>
+    </div>
+    <div class="incident-detail-group">
+      <h4>DISPATCH SELECTION</h4>
+      <button type="button" class="ops-btn-sec alert-inspector-select${selected ? " selected" : ""}" data-alert-select="${row.id}" aria-pressed="${selected}">
+        ${selected ? "✓ Selected for dispatch" : "+ Add to dispatch"}
+      </button>
+      <p>Selected images are sent as individual email attachments to the configured operations recipients.</p>
+    </div>
+    <div class="incident-detail-group">
+      <h4>RECIPIENTS</h4>
+      <p>nikita.gosavi@adityabirla.com</p>
+      <p>gowtham.isakapatla@adityabirla.com</p>
+    </div>`;
+  document.getElementById("alertViolationGallery").hidden = true;
+  document.getElementById("alertIncidentInspector").hidden = false;
 }
 
 function setupAlertDeliveryDashboard() {
@@ -2922,7 +3772,7 @@ async function sendPowerAutomateTest() {
     return;
   }
   button.disabled = true;
-  status.textContent = `Sending ${selectedIds.length} selected helmet/phone image${selectedIds.length === 1 ? "" : "s"}…`;
+  status.innerHTML = loadingMarkup(`Sending ${selectedIds.length} selected helmet/phone image${selectedIds.length === 1 ? "" : "s"}…`);
   status.className = "loading";
   try {
     const response = await fetch("/api/alerts/power-automate/test", {
@@ -2947,7 +3797,7 @@ async function sendPowerAutomateTest() {
 
 function updateAlertSelectionSummary() {
   const selectedCount = state.alertSelectedIds.size;
-  const totalCount = document.querySelectorAll(".alert-select-card").length;
+  const totalCount = state.alertVisibleRows.length;
   const button = document.getElementById("btnTestPowerAutomate");
   if (button) {
     button.textContent = selectedCount ? `SEND ${selectedCount} SELECTED` : "SEND SELECTED";
@@ -2964,37 +3814,231 @@ function updateAlertSelectionSummary() {
 // ---------------------------------------------------------------
 // Tabs
 // ---------------------------------------------------------------
+function activateDashboardTab(tabName, loadFaceMatchesAfterActivation = true) {
+  const button = document.querySelector(`.mode-btn[data-tab="${tabName}"]`);
+  const pane = document.getElementById(`tab-${tabName}`);
+  if (!button || !pane || button.hidden) return false;
+  document.querySelectorAll(".mode-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn === button);
+  });
+  document.querySelectorAll(".tab-pane").forEach((item) => {
+    item.classList.toggle("active", item === pane);
+  });
+  const isLiveWall = tabName === "feeds";
+  document.querySelector(".ops-grid").classList.toggle("live-wall-mode", isLiveWall);
+  if (!isLiveWall) setWallFocus(false);
+  if (tabName !== "playback" && state.playbackActive) {
+    document.getElementById("btnStopPlayback").click();
+  }
+  if (tabName === "analytics") refreshStats();
+  if (tabName === "rules") refreshRules();
+  if (tabName === "violations") loadViolationsGallery();
+  if (tabName === "cameras") {
+    renderCamerasTable();
+    loadCameraStatusReport();
+    loadSpeedTracking();
+  }
+  if (tabName === "face-matches" && loadFaceMatchesAfterActivation) {
+    loadFaceMatches();
+  }
+  if (tabName === "playback") populatePlaybackCameraSelect();
+  if (tabName === "settings") {
+    loadApplicationSettings();
+    loadGitStatus();
+  }
+  return true;
+}
+
 function setupTabs() {
   document.querySelector(".ops-grid").classList.add("live-wall-mode");
-  document.querySelectorAll(".mode-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      document.querySelectorAll(".mode-btn").forEach(b => b.classList.remove("active"));
-      document.querySelectorAll(".tab-pane").forEach(c => c.classList.remove("active"));
-      btn.classList.add("active");
-      document.getElementById(`tab-${btn.dataset.tab}`).classList.add("active");
-      const isLiveWall = btn.dataset.tab === "feeds";
-      document.querySelector(".ops-grid").classList.toggle("live-wall-mode", isLiveWall);
-      if (!isLiveWall) setWallFocus(false);
-      if (btn.dataset.tab !== "playback" && state.playbackActive) {
-        document.getElementById("btnStopPlayback").click();
-      }
-      if (btn.dataset.tab === "analytics") refreshStats();
-      if (btn.dataset.tab === "rules") refreshRules();
-      if (btn.dataset.tab === "violations") loadViolationsGallery();
-      if (btn.dataset.tab === "cameras") {
-        renderCamerasTable();
-        loadCameraStatusReport();
-      }
-      if (btn.dataset.tab === "face-matches") loadFaceMatches();
-      if (btn.dataset.tab === "playback") populatePlaybackCameraSelect();
+  document.querySelectorAll(".mode-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      activateDashboardTab(button.dataset.tab);
     });
   });
+}
+
+function setupApplicationSettings() {
+  if (!state.canManageApplicationSettings) return;
+  document.getElementById("btnReloadApplicationSettings").addEventListener("click", loadApplicationSettings);
+  document.getElementById("applicationSettingsForm").addEventListener("submit", saveApplicationSettings);
+  document.getElementById("btnRefreshGitStatus").addEventListener("click", loadGitStatus);
+  document.getElementById("gitCommitForm").addEventListener("submit", commitGitChanges);
+  document.getElementById("gitPushForm").addEventListener("submit", pushGitChanges);
+}
+
+async function loadApplicationSettings() {
+  const groups = document.getElementById("applicationSettingsGroups");
+  const status = document.getElementById("applicationSettingsStatus");
+  groups.innerHTML = loadingMarkup("Loading application settings…");
+  status.textContent = "";
+  try {
+    const response = await fetch("/api/app-settings");
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+    groups.innerHTML = result.groups.map((group) => `
+      <section class="application-settings-card">
+        <div class="settings-section-heading"><div><span class="tab-eyebrow">CONFIGURATION</span><h3>${escapeHtml(group.category)}</h3></div></div>
+        <div class="application-settings-grid">
+          ${group.settings.map(renderApplicationSetting).join("")}
+        </div>
+      </section>
+    `).join("");
+  } catch (error) {
+    groups.innerHTML = `<p class="settings-error" role="alert">${escapeHtml(error.message)}</p>`;
+  }
+}
+
+function renderApplicationSetting(setting) {
+  const key = escapeHtmlAttribute(setting.key);
+  const label = escapeHtml(setting.label);
+  const description = escapeHtml(setting.description);
+  let control;
+  if (setting.value_type === "boolean") {
+    control = `<input id="appSetting-${key}" data-setting-key="${key}" data-setting-type="boolean" type="checkbox"${setting.value ? " checked" : ""} />`;
+  } else if (setting.value_type === "choice") {
+    const options = setting.choices.map((choice) =>
+      `<option value="${escapeHtmlAttribute(choice)}"${choice === setting.value ? " selected" : ""}>${escapeHtml(choice)}</option>`
+    ).join("");
+    control = `<select id="appSetting-${key}" data-setting-key="${key}" data-setting-type="choice">${options}</select>`;
+  } else {
+    const isNumber = setting.value_type === "integer" || setting.value_type === "number";
+    const min = setting.minimum === null ? "" : ` min="${setting.minimum}"`;
+    const max = setting.maximum === null ? "" : ` max="${setting.maximum}"`;
+    const step = setting.value_type === "integer" ? "1" : "any";
+    const value = escapeHtmlAttribute(String(setting.value));
+    control = `<input id="appSetting-${key}" data-setting-key="${key}" data-setting-type="${setting.value_type}" type="${isNumber ? "number" : "text"}"${isNumber ? `${min}${max} step="${step}"` : ' maxlength="500"'} value="${value}" />`;
+  }
+  return `<label class="application-setting-field" for="appSetting-${key}"><span>${label}</span>${control}<small>${description}</small></label>`;
+}
+
+async function saveApplicationSettings(event) {
+  event.preventDefault();
+  const status = document.getElementById("applicationSettingsStatus");
+  const button = document.getElementById("btnSaveApplicationSettings");
+  const values = {};
+  document.querySelectorAll("#applicationSettingsGroups [data-setting-key]").forEach((input) => {
+    const type = input.dataset.settingType;
+    if (type === "boolean") values[input.dataset.settingKey] = input.checked;
+    else if (type === "integer") values[input.dataset.settingKey] = Number.parseInt(input.value, 10);
+    else if (type === "number") values[input.dataset.settingKey] = Number.parseFloat(input.value);
+    else values[input.dataset.settingKey] = input.value;
+  });
+  button.disabled = true;
+  status.textContent = "Saving settings…";
+  status.className = "loading";
+  try {
+    const response = await fetch("/api/app-settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ values }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+    status.textContent = result.message;
+    status.className = "success";
+    if (result.restart_required && window.confirm("Settings are saved. Restart the application now to apply them?")) {
+      window.alert("Stop the server in its terminal (Ctrl+C), then start it again with .\\run_server.bat. Saved settings will be loaded automatically.");
+    }
+  } catch (error) {
+    status.textContent = `Could not save settings: ${error.message}`;
+    status.className = "error";
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function loadGitStatus() {
+  const summary = document.getElementById("gitStatusSummary");
+  const list = document.getElementById("gitChangeList");
+  const pushButton = document.getElementById("btnGitPush");
+  summary.textContent = "Checking Git status…";
+  try {
+    const response = await fetch("/api/git/status");
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+    summary.textContent = `Branch: ${result.branch} · Remote: ${result.remote}${result.clean ? " · Working tree clean" : ` · ${result.changes.length} changed path(s)`}`;
+    list.innerHTML = result.changes.length
+      ? result.changes.map((item) => `<li><code>${escapeHtml(item)}</code></li>`).join("")
+      : '<li class="empty-state">No uncommitted changes.</li>';
+    document.getElementById("btnGitCommit").disabled = result.clean;
+    pushButton.disabled = !result.clean;
+  } catch (error) {
+    summary.textContent = `Could not load Git status: ${error.message}`;
+    list.innerHTML = '<li class="settings-error">Git actions are unavailable until status can be read.</li>';
+    document.getElementById("btnGitCommit").disabled = true;
+    pushButton.disabled = true;
+  }
+}
+
+async function commitGitChanges(event) {
+  event.preventDefault();
+  const status = document.getElementById("gitActionStatus");
+  const button = document.getElementById("btnGitCommit");
+  if (!window.confirm("Review the complete Git change list above. Commit every non-ignored change in this repository?")) return;
+  button.disabled = true;
+  status.textContent = "Committing changes…";
+  status.className = "loading";
+  try {
+    const response = await fetch("/api/git/commit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: document.getElementById("gitCommitMessage").value,
+        confirmation: document.getElementById("gitCommitConfirmation").value,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+    status.textContent = result.result;
+    status.className = "success";
+    document.getElementById("gitCommitMessage").value = "";
+    document.getElementById("gitCommitConfirmation").value = "";
+    await loadGitStatus();
+  } catch (error) {
+    status.textContent = `Commit failed: ${error.message}`;
+    status.className = "error";
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function pushGitChanges(event) {
+  event.preventDefault();
+  const status = document.getElementById("gitActionStatus");
+  const button = document.getElementById("btnGitPush");
+  if (!window.confirm("Push the current branch to the configured origin remote?")) return;
+  button.disabled = true;
+  status.textContent = "Pushing current branch…";
+  status.className = "loading";
+  try {
+    const response = await fetch("/api/git/push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        confirmation: document.getElementById("gitPushConfirmation").value,
+      }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+    status.textContent = result.result;
+    status.className = "success";
+    document.getElementById("gitPushConfirmation").value = "";
+    await loadGitStatus();
+  } catch (error) {
+    status.textContent = `Push failed: ${error.message}`;
+    status.className = "error";
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // ---------------------------------------------------------------
 // Alert Rules CRUD
 // ---------------------------------------------------------------
 async function refreshRules() {
+  const tbody = document.getElementById("rulesTableBody");
+  tbody.innerHTML = `<tr><td colspan="8">${loadingMarkup("Loading alert rules…")}</td></tr>`;
   try {
     const res = await fetch(API.rules);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -3003,7 +4047,7 @@ async function refreshRules() {
 
   document.getElementById("statActiveRules").textContent = state.rules.filter(r => r.enabled).length;
   updateCameraFleetSummary();
-  const tbody = document.getElementById("rulesTableBody"); tbody.innerHTML = "";
+  tbody.innerHTML = "";
   state.rules.forEach((rule) => {
     const tr = document.createElement("tr");
     const channels = (rule.channels || []).map(c => `<span class="chan-pill">${escapeHtml(c)}</span>`).join("");

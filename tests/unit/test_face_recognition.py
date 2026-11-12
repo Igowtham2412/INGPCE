@@ -8,12 +8,17 @@ import cv2
 import numpy as np
 
 from app import config
-from app.faces.face_dataset import ImageRejected, decrypt_face_crop, encrypt_embedding
+from app.faces.face_dataset import (
+    ImageRejected,
+    _read_face_bbox_crop,
+    decrypt_face_crop,
+    encrypt_embedding,
+)
 from app.faces.face_recognition import (
     FaceRecognitionWorker,
     _best_face_from_crops,
-    _include_helmet_head_regions,
     _include_face_focus_regions,
+    _include_helmet_head_regions,
     decide_face_match,
     rank_person_scores,
     violation_requires_face_recognition,
@@ -21,6 +26,25 @@ from app.faces.face_recognition import (
 
 
 class FaceMatchTests(unittest.TestCase):
+    def test_face_preview_is_cropped_from_the_saved_face_box(self):
+        image = np.full((80, 100, 3), (12, 12, 12), dtype=np.uint8)
+        image[20:40, 40:60] = (220, 40, 10)
+        with patch("app.faces.face_dataset.cv2.imread", return_value=image):
+            encoded = _read_face_bbox_crop("incident.jpg", [40, 20, 60, 40])
+
+        if encoded is None:
+            self.fail("Face box did not produce an evidence crop")
+        crop = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
+        self.assertEqual(crop.shape[:2], (26, 26))
+        np.testing.assert_allclose(crop[13, 13], (220, 40, 10), atol=2)
+
+    def test_face_preview_rejects_missing_or_invalid_face_box(self):
+        with patch("app.faces.face_dataset.cv2.imread") as read_image:
+            self.assertIsNone(_read_face_bbox_crop("incident.jpg", None))
+            self.assertIsNone(_read_face_bbox_crop("incident.jpg", [10, 10, 5, 20]))
+
+        read_image.assert_not_called()
+
     def test_only_supported_violation_types_are_eligible_by_default(self):
         self.assertTrue(violation_requires_face_recognition("no_helmet"))
         self.assertTrue(violation_requires_face_recognition("phone_detected"))
@@ -117,21 +141,26 @@ class FaceMatchTests(unittest.TestCase):
         self.assertEqual(best["absolute_bbox"], [110, 220, 150, 260])
         self.assertEqual(best["face_crop"].shape, (52, 52, 3))
 
-    def test_best_face_crop_uses_input_scale_bbox(self):
+    def test_best_face_crop_uses_source_frame_bbox_not_enhanced_bbox(self):
         class _Analyzer:
             def analyze(self, _image):
                 return np.asarray([1.0, 0.0]), {
                     "quality_score": 0.95,
-                    "bbox": [10, 20, 50, 60],
-                    "bbox_input": [20, 40, 100, 120],
+                    "bbox": [50, 70, 90, 110],
+                    "bbox_input": [20, 40, 60, 80],
                 }
 
         image = np.zeros((150, 140, 3), dtype=np.uint8)
+        image[34:86, 14:66] = (220, 40, 10)
+        image[64:116, 44:96] = (20, 120, 220)
         best, _rejected = _best_face_from_crops(
             _Analyzer(), [(image, "face_focus", None)],
         )
 
-        self.assertEqual(best["face_crop"].shape, (104, 104, 3))
+        self.assertEqual(best["face_crop"].shape, (52, 52, 3))
+        np.testing.assert_array_equal(
+            best["face_crop"][26, 26], np.asarray((20, 120, 220)),
+        )
 
     def test_helmet_violation_analyzes_upper_person_roi_with_frame_coordinates(self):
         image = np.zeros((100, 80, 3), dtype=np.uint8)
@@ -461,6 +490,81 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(complete.await_args.args[1], "FACE_NOT_VISIBLE")
         self.assertEqual(complete.await_args.args[7], [])
 
+    async def test_incident_people_are_processed_and_persisted_independently(self):
+        class _Analyzer:
+            model_name = "test-model"
+            model_version = "test-version"
+            runtime_provider = "CPUExecutionProvider"
+
+            def analyze(self, image):
+                return np.asarray([1.0, 0.0], dtype=np.float32), {
+                    "quality_score": 0.95,
+                    "bbox": [5, 5, 25, 25],
+                }
+
+        worker = FaceRecognitionWorker(analyzer_factory=_Analyzer)
+        worker._analyzer = _Analyzer()
+
+        def _person_crop(job):
+            marker = int(job["person_box"][0])
+            return np.full((64, 64, 3), marker, dtype=np.uint8), job["person_box"]
+
+        with patch(
+            "app.faces.face_recognition.db.get_face_match_settings",
+            new=AsyncMock(return_value={
+                "high_threshold": 0.8, "low_threshold": 0.7,
+                "minimum_margin": 0.1, "quality_min_by_violation": {},
+            }),
+        ), patch(
+            "app.faces.face_recognition._read_person_crop",
+            side_effect=_person_crop,
+        ), patch(
+            "app.faces.face_recognition._encryption_key",
+            return_value=b"k" * 32,
+        ), patch(
+            "app.faces.face_recognition._encrypt_recognized_face_crop",
+            side_effect=lambda face, _key: bytes([
+                int(face["face_crop"][0, 0, 0]),
+            ]),
+        ), patch(
+            "app.faces.face_recognition.db.list_face_enrollments",
+            new=AsyncMock(return_value=[]),
+        ), patch(
+            "app.faces.face_recognition.db.list_face_embeddings",
+            new=AsyncMock(return_value=[]),
+        ), patch(
+            "app.faces.face_recognition.db.complete_face_recognition_job",
+            new=AsyncMock(),
+        ) as complete_legacy, patch(
+            "app.faces.face_recognition.db.complete_face_person_match",
+            new=AsyncMock(),
+        ) as complete_person, patch(
+            "app.faces.face_recognition.db.write_audit_log",
+            new=AsyncMock(),
+        ):
+            await worker._process_job({
+                "incident_id": 110,
+                "camera_id": "CAM01",
+                "track_id": 11,
+                "violation_type": "no_helmet",
+                "detection_metadata": {
+                    "detected_persons": [
+                        {"track_id": 11, "person_box": [11, 0, 64, 64]},
+                        {"track_id": 22, "person_box": [22, 0, 64, 64]},
+                    ],
+                },
+            })
+
+        self.assertEqual(complete_person.await_count, 2)
+        by_track = {
+            call.args[1]: call.args for call in complete_person.await_args_list
+        }
+        self.assertEqual(by_track[11][2], [11, 0, 64, 64])
+        self.assertEqual(by_track[22][2], [22, 0, 64, 64])
+        self.assertEqual(by_track[11][12], b"\x0b")
+        self.assertEqual(by_track[22][12], b"\x16")
+        complete_legacy.assert_awaited_once()
+
     async def test_track_frames_are_analyzed_for_each_new_violation(self):
         class _Analyzer:
             model_name = "test-model"
@@ -480,7 +584,9 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
         image = np.zeros((64, 64, 3), dtype=np.uint8)
         encoded_ok, encoded = cv2.imencode(".jpg", image)
         self.assertTrue(encoded_ok)
-        worker._pending_crops[101] = [(encoded.tobytes(), [0, 0, 64, 64])]
+        worker._pending_crops[101] = {
+            7: [(encoded.tobytes(), [0, 0, 64, 64])],
+        }
         with patch(
             "app.faces.face_recognition.db.get_face_match_settings",
             new=AsyncMock(return_value={
@@ -506,7 +612,7 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
                 "violation_type": "no_helmet",
             })
 
-        self.assertEqual(analyzer.calls, 2)
+        self.assertEqual(analyzer.calls, 3)
         self.assertEqual(complete.await_args.args[1], "FACE_NOT_VISIBLE")
         reuse.assert_not_awaited()
 

@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,7 +8,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 from app import config
-from app.detection.detector import PPEDetector
+from app.detection.detector import Detection, PPEDetector, filter_detections
 
 
 class Value:
@@ -31,6 +32,21 @@ class FakeBox:
 
 
 class PhoneDetectorTests(unittest.TestCase):
+    def test_vehicle_boxes_ignore_person_rois_and_duplicate_predictions_collapse(self):
+        detections = [
+            Detection("vehicle", "vehicle", 0.9, 20, 20, 80, 80),
+            Detection("car", "car", 0.8, 21, 21, 79, 79),
+        ]
+
+        filtered = filter_detections(
+            detections,
+            (100, 100, 3),
+            camera_rois=[[[0, 0], [0.1, 0], [0.1, 0.1], [0, 0.1]]],
+        )
+
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0].cls_norm, "vehicle")
+
     def test_phone_model_predictions_are_added_and_confidence_filtered(self):
         ppe_model = SimpleNamespace(
             names={0: "Person", 2: "NO-Hardhat"},
@@ -76,6 +92,42 @@ class PhoneDetectorTests(unittest.TestCase):
         self.assertEqual(ppe_model.predict.call_args.kwargs["device"], "cpu")
         self.assertEqual(phone_model.predict.call_args.kwargs["device"], "cpu")
         set_num_threads.assert_called_once_with(config.CPU_INFERENCE_THREADS)
+
+    def test_vehicle_classes_are_requested_only_when_speed_tracking_is_enabled(self):
+        ppe_model = SimpleNamespace(
+            names={0: "Person"},
+            predict=Mock(return_value=[SimpleNamespace(boxes=[])]),
+        )
+        phone_model = SimpleNamespace(
+            names={67: "cell phone", 2: "car", 5: "bus"},
+            predict=Mock(return_value=[SimpleNamespace(boxes=[
+                FakeBox(2, 0.9, [20, 20, 80, 80]),
+                FakeBox(67, 0.9, [90, 90, 100, 100]),
+            ])]),
+        )
+        detector = PPEDetector.__new__(PPEDetector)
+        detector.device = "cpu"
+        detector.half = False
+        detector._inference_lock = threading.Lock()
+        detector.model = ppe_model
+        detector.names = ppe_model.names
+        detector.phone_model = phone_model
+        detector.phone_names = phone_model.names
+        detector.phone_class_ids = [67]
+
+        detections = detector.infer(
+            np.zeros((200, 200, 3), dtype="uint8"),
+            include_vehicles=True,
+        )
+
+        self.assertEqual(
+            [detection.cls_norm for detection in detections],
+            ["car", "phone"],
+        )
+        self.assertEqual(
+            phone_model.predict.call_args.kwargs["classes"],
+            [67, 2, 5],
+        )
 
     def test_cuda_failure_retries_in_fp32_on_cpu(self):
         model = SimpleNamespace(

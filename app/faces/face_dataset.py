@@ -47,6 +47,8 @@ class ImageRejected(ValueError):
 
 
 class FaceAnalyzer(Protocol):
+    """Analyze one source image; returned ``bbox`` values use its coordinates."""
+
     model_name: str
     model_version: str
 
@@ -141,7 +143,9 @@ def _inside_root(root: Path, candidate: Path) -> Path:
     return resolved
 
 
-def _resolve_dataset_image(root: Path, image_reference: str) -> Path:
+def _resolve_dataset_image(
+        root: Path, image_reference: str,
+        allow_missing: bool = False) -> Path:
     relative = Path(image_reference)
     root = root.resolve(strict=True)
     if (
@@ -203,6 +207,24 @@ def _resolve_dataset_image(root: Path, image_reference: str) -> Path:
             "Manifest image_path matches multiple employee photos; specify "
             "a unique relative path"
         )
+    if allow_missing:
+        if (
+            relative.is_absolute()
+            or PureWindowsPath(image_reference).is_absolute()
+            or ".." in relative.parts
+            or ".." in PureWindowsPath(image_reference).parts
+        ):
+            raise ValueError(
+                "Manifest image_path must refer to a file inside the dataset root"
+            )
+        missing_path = (root / relative).resolve()
+        try:
+            missing_path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(
+                "Manifest image_path must refer to a file inside the dataset root"
+            ) from exc
+        return missing_path
     raise ValueError(
         "Manifest image_path does not match an image inside the dataset root"
     )
@@ -229,10 +251,12 @@ def _add_person_image(
 def discover_dataset(
         dataset_path: Path, consent_name: str | None = None,
         consent_date: str | None = None,
-        consent_reference: str | None = None) -> dict[str, PersonImport]:
+        consent_reference: str | None = None,
+        employee_code: str | None = None) -> dict[str, PersonImport]:
     """Read employee folders or a CSV/Excel manifest."""
     root = dataset_path.resolve()
     bulk = _bulk_consent(consent_name, consent_date, consent_reference)
+    selected_employee_code = employee_code.strip() if employee_code else None
     if root.is_file() and root.suffix.lower() in {".csv", ".xlsx"}:
         manifest_path = root
         dataset_root = root.parent.resolve()
@@ -262,15 +286,18 @@ def discover_dataset(
             manifest_path = manifests[0]
             dataset_root = root
         else:
-            return _discover_folders(root, bulk)
+            return _discover_folders(root, bulk, selected_employee_code)
     else:
         raise ValueError("Dataset path must be a directory or CSV/Excel manifest")
 
-    return _discover_manifest(manifest_path, dataset_root, bulk)
+    return _discover_manifest(
+        manifest_path, dataset_root, bulk, selected_employee_code,
+    )
 
 
 def _discover_folders(
-        root: Path, bulk_consent: tuple[str, date] | None) -> dict[str, PersonImport]:
+        root: Path, bulk_consent: tuple[str, date] | None,
+        employee_code: str | None = None) -> dict[str, PersonImport]:
     candidates = [
         folder for folder in root.iterdir()
         if (
@@ -289,29 +316,34 @@ def _discover_folders(
     consent_basis, consent_day = bulk_consent
     people: dict[str, PersonImport] = {}
     for folder in sorted(candidates):
-        employee_code, full_name = folder.name.split("_", 1)
-        employee_code, full_name = employee_code.strip(), full_name.replace("_", " ").strip()
-        if not employee_code or not full_name:
+        folder_code, full_name = folder.name.split("_", 1)
+        folder_code = folder_code.strip()
+        if employee_code and folder_code != employee_code:
+            continue
+        full_name = full_name.replace("_", " ").strip()
+        if not folder_code or not full_name:
             raise ValueError("Folder names must use <employee_code>_<full_name>")
-        person = PersonImport(employee_code, full_name, None, consent_basis, consent_day)
+        person = PersonImport(folder_code, full_name, None, consent_basis, consent_day)
         person.images.extend(
             EmployeeImage(
-                employee_code, full_name, None, path, True,
+                folder_code, full_name, None, path, True,
                 consent_basis, consent_day,
             )
             for path in sorted(folder.iterdir())
             if path.is_file() and path.suffix.lower() in _IMAGE_SUFFIXES
         )
-        if employee_code in people:
+        if folder_code in people:
             raise ValueError("Employee codes must be unique across dataset folders")
-        people[employee_code] = person
+        people[folder_code] = person
     return people
 
 
 def _discover_manifest(
         manifest_path: Path, root: Path,
-        bulk_consent: tuple[str, date] | None) -> dict[str, PersonImport]:
+        bulk_consent: tuple[str, date] | None,
+        employee_code: str | None = None) -> dict[str, PersonImport]:
     people: dict[str, PersonImport] = {}
+    selected_employee_code = employee_code.strip() if employee_code else None
     headers, rows = read_face_manifest(manifest_path)
     required = {"employee_code", "full_name", "department", "image_path"}
     if not required.issubset(headers):
@@ -325,6 +357,11 @@ def _discover_manifest(
             "a bulk consent basis"
         )
     for row in rows:
+        if (
+            selected_employee_code
+            and row.get("employee_code", "").strip() != selected_employee_code
+        ):
+            continue
         employee_code = row.get("employee_code", "").strip()
         full_name = row.get("full_name", "").strip()
         department = row.get("department", "").strip() or None
@@ -351,7 +388,9 @@ def _discover_manifest(
                 or "Manifest consent_recorded=true"
             )
             consent_day = row_date
-        resolved_path = _resolve_dataset_image(root, image_path)
+        resolved_path = _resolve_dataset_image(
+            root, image_path, allow_missing=selected_employee_code is not None,
+        )
         _add_person_image(people, EmployeeImage(
             employee_code, full_name, department, resolved_path, True,
             consent_basis, consent_day, designation,
@@ -429,6 +468,44 @@ def decrypt_face_crop(encrypted: bytes, key: bytes) -> bytes:
         )
     except InvalidTag as exc:
         raise ValueError("Stored face crop could not be authenticated") from exc
+
+
+def _normalize_face_bbox(bbox: Any) -> tuple[int, int, int, int] | None:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+    try:
+        coordinates = np.asarray(bbox, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(coordinates).all():
+        return None
+    x1, y1, x2, y2 = (int(round(value)) for value in coordinates)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return x1, y1, x2, y2
+
+
+def _read_face_bbox_crop(
+        image_path: str | Path, bbox: Any) -> bytes | None:
+    face_bbox = _normalize_face_bbox(bbox)
+    if face_bbox is None:
+        return None
+    image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    if image is None or image.size == 0:
+        return None
+    height, width = image.shape[:2]
+    x1, y1, x2, y2 = face_bbox
+    pad_x = max(2, int(round((x2 - x1) * 0.15)))
+    pad_y = max(2, int(round((y2 - y1) * 0.15)))
+    x1, x2 = max(0, x1 - pad_x), min(width, x2 + pad_x)
+    y1, y2 = max(0, y1 - pad_y), min(height, y2 + pad_y)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    ok, encoded = cv2.imencode(
+        ".jpg", image[y1:y2, x1:x2],
+        [cv2.IMWRITE_JPEG_QUALITY, 95],
+    )
+    return encoded.tobytes() if ok else None
 
 
 def read_face_image(path: Path) -> bytes:
@@ -1224,11 +1301,13 @@ async def import_face_dataset(
         actor_user_id: int | None = None,
         actor_email: str | None = None,
         analyzer: FaceAnalyzer | None = None,
-        dry_run: bool = False) -> dict[str, Any]:
+        dry_run: bool = False,
+        employee_code: str | None = None) -> dict[str, Any]:
     """Import a consented folder/CSV dataset with encrypted embeddings."""
     people = discover_dataset(
         Path(dataset_path or config.FACE_DATASET_PATH),
         consent_name, consent_date, consent_reference,
+        employee_code,
     )
     if dry_run:
         return await _dry_run_import(people, analyzer)

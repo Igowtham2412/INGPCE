@@ -13,6 +13,9 @@ from .. import config
 
 logger = logging.getLogger("ppe.detector")
 _FALLBACK_INFERENCE_LOCK = threading.Lock()
+VEHICLE_CLASS_NAMES = frozenset({
+    "bicycle", "bus", "car", "motorcycle", "train", "truck", "vehicle",
+})
 
 
 def _resolve_device(device: str) -> str:
@@ -56,6 +59,17 @@ def _point_in_polygon(point, polygon) -> bool:
         previous = current
     return inside
 
+
+def _vehicle_overlap(first: Detection, second: Detection) -> float:
+    x1, y1 = max(first.x1, second.x1), max(first.y1, second.y1)
+    x2, y2 = min(first.x2, second.x2), min(first.y2, second.y2)
+    intersection = max(0, x2 - x1) * max(0, y2 - y1)
+    first_area = max(0, first.x2 - first.x1) * max(0, first.y2 - first.y1)
+    second_area = max(0, second.x2 - second.x1) * max(0, second.y2 - second.y1)
+    union = first_area + second_area - intersection
+    return intersection / union if union else 0
+
+
 def filter_detections(detections: list[Detection], frame_shape, camera_id: str = None,
                       camera_rois=None) -> list[Detection]:
     frame_height, frame_width = frame_shape[:2]
@@ -90,13 +104,30 @@ def filter_detections(detections: list[Detection], frame_shape, camera_id: str =
         if aspect_ratio > box_filter.get("max_aspect_ratio", float("inf")):
             continue
 
-        if roi_polygons:
+        if roi_polygons and detection.cls_norm not in VEHICLE_CLASS_NAMES:
             center = ((detection.x1 + detection.x2) / (2 * frame_width),
                       (detection.y1 + detection.y2) / (2 * frame_height))
             if not any(_point_in_polygon(center, polygon) for polygon in roi_polygons):
                 continue
         filtered.append(detection)
-    return filtered
+
+    kept_vehicles = []
+    seen_vehicles = []
+    for detection in sorted(
+        (item for item in filtered if item.cls_norm in VEHICLE_CLASS_NAMES),
+        key=lambda item: item.confidence,
+        reverse=True,
+    ):
+        if any(_vehicle_overlap(detection, seen) >= 0.65 for seen in seen_vehicles):
+            continue
+        seen_vehicles.append(detection)
+        kept_vehicles.append(detection)
+    kept_vehicle_ids = {id(detection) for detection in kept_vehicles}
+    return [
+        detection for detection in filtered
+        if detection.cls_norm not in VEHICLE_CLASS_NAMES
+        or id(detection) in kept_vehicle_ids
+    ]
 
 
 class PPEDetector:
@@ -160,12 +191,18 @@ class PPEDetector:
             options["half"] = self.half
             return model.predict(**options)
 
-    def infer(self, frame, camera_id: str = None, camera_rois=None) -> list[Detection]:
+    def infer(
+        self, frame, camera_id: str = None, camera_rois=None,
+        include_vehicles: bool = False,
+    ) -> list[Detection]:
         with getattr(self, "_inference_lock", _FALLBACK_INFERENCE_LOCK):
-            return self._infer_locked(frame, camera_id, camera_rois)
+            return self._infer_locked(
+                frame, camera_id, camera_rois, include_vehicles,
+            )
 
     def _infer_locked(self, frame, camera_id: str = None,
-                      camera_rois=None) -> list[Detection]:
+                      camera_rois=None,
+                      include_vehicles: bool = False) -> list[Detection]:
         confidence = min(
             config.CONFIDENCE_THRESHOLD,
             config.TRACK_LOW_THRESHOLD,
@@ -186,12 +223,20 @@ class PPEDetector:
         if phone_model is None:
             logger.warning("Phone model is not initialized; running PPE inference only")
         else:
+            phone_and_vehicle_classes = list(self.phone_class_ids)
+            if include_vehicles:
+                phone_and_vehicle_classes.extend(
+                    int(class_id)
+                    for class_id, name in self.phone_names.items()
+                    if name.lower() in VEHICLE_CLASS_NAMES
+                    and int(class_id) not in self.phone_class_ids
+                )
             model_predictions.append((
                 phone_model,
                 self.phone_names,
                 {
                     "conf": config.PHONE_CONFIDENCE_THRESHOLD,
-                    "classes": self.phone_class_ids,
+                    "classes": phone_and_vehicle_classes,
                     "imgsz": config.INFERENCE_IMG_SIZE,
                 },
             ))
@@ -206,6 +251,8 @@ class PPEDetector:
                 cls_id = int(box.cls[0].item())
                 raw_name = names.get(cls_id, str(cls_id))
                 norm_name = config.CLASS_MAP.get(raw_name, raw_name.lower())
+                if norm_name in VEHICLE_CLASS_NAMES and not include_vehicles:
+                    continue
                 conf = float(box.conf[0].item())
                 x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
                 detections.append(Detection(

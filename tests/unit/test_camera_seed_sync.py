@@ -26,6 +26,7 @@ class CameraSeedSyncTests(unittest.IsolatedAsyncioTestCase):
             patch.object(db.config, "SEED_CAMERAS", []),
             patch.object(db.config, "RETIRED_SEED_CAMERA_IDS", ["D1"]),
             patch.object(db, "list_area_groups", new_callable=AsyncMock, return_value=[]),
+            patch.object(db, "list_camera_seed_exclusions", new_callable=AsyncMock, return_value=set()),
             patch.object(
                 db, "list_cameras", new_callable=AsyncMock,
                 return_value=[{"camera_id": "D1", "enabled": True}],
@@ -63,6 +64,7 @@ class CameraSeedSyncTests(unittest.IsolatedAsyncioTestCase):
             patch.object(db.config, "SEED_CAMERAS", [seed]),
             patch.object(db.config, "RETIRED_SEED_CAMERA_IDS", []),
             patch.object(db, "list_area_groups", new_callable=AsyncMock, return_value=[]),
+            patch.object(db, "list_camera_seed_exclusions", new_callable=AsyncMock, return_value=set()),
             patch.object(db, "list_cameras", new_callable=AsyncMock, return_value=[existing]),
             patch.object(db, "update_camera", update_camera),
             patch.object(db, "create_camera", new_callable=AsyncMock),
@@ -102,6 +104,7 @@ class CameraSeedSyncTests(unittest.IsolatedAsyncioTestCase):
             patch.object(db.config, "SEED_CAMERAS", [seed]),
             patch.object(db.config, "RETIRED_SEED_CAMERA_IDS", []),
             patch.object(db, "list_area_groups", new_callable=AsyncMock, return_value=[]),
+            patch.object(db, "list_camera_seed_exclusions", new_callable=AsyncMock, return_value=set()),
             patch.object(db, "list_cameras", new_callable=AsyncMock, return_value=[existing]),
             patch.object(db, "update_camera", update_camera),
             patch.object(db, "create_camera", new_callable=AsyncMock),
@@ -134,6 +137,7 @@ class CameraSeedSyncTests(unittest.IsolatedAsyncioTestCase):
             patch.object(db.config, "SEED_CAMERAS", [seed]),
             patch.object(db.config, "RETIRED_SEED_CAMERA_IDS", []),
             patch.object(db, "list_area_groups", new_callable=AsyncMock, return_value=[]),
+            patch.object(db, "list_camera_seed_exclusions", new_callable=AsyncMock, return_value=set()),
             patch.object(db, "list_cameras", new_callable=AsyncMock, return_value=[existing]),
             patch.object(db, "update_camera", new_callable=AsyncMock) as update_camera,
             patch.object(db, "create_camera", new_callable=AsyncMock) as create_camera,
@@ -163,6 +167,7 @@ class CameraSeedSyncTests(unittest.IsolatedAsyncioTestCase):
             patch.object(db.config, "SEED_CAMERAS", [seed]),
             patch.object(db.config, "RETIRED_SEED_CAMERA_IDS", []),
             patch.object(db, "list_area_groups", new_callable=AsyncMock, return_value=[]),
+            patch.object(db, "list_camera_seed_exclusions", new_callable=AsyncMock, return_value=set()),
             patch.object(db, "list_cameras", new_callable=AsyncMock, return_value=[]),
             patch.object(db, "update_camera", new_callable=AsyncMock),
             patch.object(db, "create_camera", create_camera),
@@ -201,6 +206,7 @@ class CameraSeedSyncTests(unittest.IsolatedAsyncioTestCase):
             patch.object(db.config, "SEED_CAMERAS", [seed]),
             patch.object(db.config, "RETIRED_SEED_CAMERA_IDS", []),
             patch.object(db, "list_area_groups", new_callable=AsyncMock, return_value=[]),
+            patch.object(db, "list_camera_seed_exclusions", new_callable=AsyncMock, return_value=set()),
             patch.object(db, "list_cameras", new_callable=AsyncMock, return_value=[existing]),
             patch.object(db, "update_camera", update_camera),
             patch.object(db, "create_camera", new_callable=AsyncMock),
@@ -209,6 +215,34 @@ class CameraSeedSyncTests(unittest.IsolatedAsyncioTestCase):
 
         update_camera.assert_not_awaited()
         self.assertEqual(result["cameras_updated"], 0)
+
+    async def test_deleted_seed_camera_is_not_recreated(self):
+        seed = {
+            "camera_id": "CAM07",
+            "name": "CAM07",
+            "rtsp_url": "rtsp://camera-host/Streaming/Channels/701",
+            "required_ppe": ["helmet", "vest"],
+        }
+        create_camera = AsyncMock()
+
+        with (
+            patch.object(db.config, "SEED_AREA_GROUPS", []),
+            patch.object(db.config, "SEED_CAMERAS", [seed]),
+            patch.object(db.config, "RETIRED_SEED_CAMERA_IDS", []),
+            patch.object(db, "list_area_groups", new_callable=AsyncMock, return_value=[]),
+            patch.object(
+                db, "list_camera_seed_exclusions", new_callable=AsyncMock,
+                return_value={"CAM07"},
+            ),
+            patch.object(db, "list_cameras", new_callable=AsyncMock, return_value=[]),
+            patch.object(db, "update_camera", new_callable=AsyncMock),
+            patch.object(db, "create_camera", create_camera),
+        ):
+            result = await db.sync_seed_data()
+
+        create_camera.assert_not_awaited()
+        self.assertEqual(result["cameras_created"], 0)
+        self.assertEqual(result["suppressed_camera_ids"], ["CAM07"])
 
 
 if __name__ == "__main__":

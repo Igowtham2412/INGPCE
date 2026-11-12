@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import cv2
 import numpy as np
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
 from app.faces.face_dataset import ImageRejected, discover_dataset
 from app.faces.face_enrollment_upload import (
@@ -93,6 +93,79 @@ class FaceEnrollmentUploadTests(unittest.TestCase):
         self.assertEqual(
             len({image.consent_date for image in people["E001"].images}), 1,
         )
+
+    def test_enrollment_ignores_unrelated_roster_rows_with_missing_photos(self):
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "app.faces.face_enrollment_upload.config.FACE_DATASET_PATH",
+            directory,
+        ):
+            root = Path(directory)
+            workbook_path = root / "employees.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append([
+                "employee_code", "full_name", "department", "designation",
+                "image_path", "consent_recorded", "consent_reference",
+                "consent_date", "consent_basis",
+            ])
+            sheet.append([
+                "OLD001", "Existing Employee", "Operations", "",
+                "missing-photo.jpg", True, "CONSENT-OLD", "2026-10-01",
+                "Existing consent record",
+            ])
+            workbook.save(workbook_path)
+            workbook.close()
+
+            store_face_enrollment(
+                employee_code="E002",
+                full_name="New Employee",
+                department="Operations",
+                image_bytes=_encoded_image(),
+                actor_user_id=17,
+                analyzer=_AcceptingAnalyzer(),
+            )
+
+            selected = discover_dataset(root, employee_code="E002")
+
+            self.assertEqual(list(selected), ["E002"])
+            self.assertEqual(len(selected["E002"].images), 1)
+            with self.assertRaisesRegex(ValueError, "does not match an image"):
+                discover_dataset(root)
+
+    def test_scoped_enrollment_keeps_missing_same_employee_photos_as_rejections(self):
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "app.faces.face_enrollment_upload.config.FACE_DATASET_PATH",
+            directory,
+        ):
+            root = Path(directory)
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append([
+                "employee_code", "full_name", "department", "designation",
+                "image_path", "consent_recorded", "consent_reference",
+                "consent_date", "consent_basis",
+            ])
+            sheet.append([
+                "E003", "Existing Employee", "Operations", "",
+                "missing-photo.jpg", True, "CONSENT-003", "2026-10-01",
+                "Existing consent record",
+            ])
+            workbook.save(root / "employees.xlsx")
+            workbook.close()
+
+            store_face_enrollment(
+                employee_code="E003",
+                full_name="Existing Employee",
+                department="Operations",
+                image_bytes=_encoded_image(),
+                actor_user_id=17,
+                analyzer=_AcceptingAnalyzer(),
+            )
+
+            selected = discover_dataset(root, employee_code="E003")
+            self.assertEqual(len(selected["E003"].images), 2)
+            self.assertFalse(selected["E003"].images[0].path.exists())
+            self.assertTrue(selected["E003"].images[1].path.is_file())
 
     def test_existing_employee_id_cannot_be_reassigned_to_other_details(self):
         with tempfile.TemporaryDirectory() as directory, patch(

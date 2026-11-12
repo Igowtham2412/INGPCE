@@ -17,7 +17,6 @@ from .face_dataset import (
     FaceModelUnavailable,
     ImageRejected,
     create_face_analyzer,
-    discover_dataset,
     encrypt_face_crop,
     _encryption_key,
 )
@@ -219,26 +218,23 @@ def _validate_existing_employee(
     if not path.exists():
         return None
     try:
-        people = discover_dataset(path)
+        rows = read_face_manifest(path)[1]
     except (OSError, RuntimeError, ValueError) as exc:
         raise FaceEnrollmentUploadError(
-            "The existing employee workbook has invalid enrollment records"
+            "The existing employee workbook could not be validated"
         ) from exc
-    existing = people.get(employee_code)
-    if existing is None:
-        return None
-    if (
-        existing.full_name != full_name
-        or (existing.department or "") != department
-        or (existing.designation or "") != designation
-    ):
-        raise FaceEnrollmentConflict(
-            "That employee ID already exists with different details"
-        )
-    rows = read_face_manifest(path)[1]
+    consent: dict[str, str] | None = None
     for row in rows:
         if row.get("employee_code", "").strip() != employee_code:
             continue
+        if (
+            row.get("full_name", "").strip() != full_name
+            or row.get("department", "").strip() != department
+            or row.get("designation", "").strip() != designation
+        ):
+            raise FaceEnrollmentConflict(
+                "That employee ID already exists with different details"
+            )
         if (
             row.get("consent_recorded", "").strip().lower()
             not in {"1", "true", "yes"}
@@ -254,9 +250,15 @@ def _validate_existing_employee(
             raise FaceEnrollmentUploadError(
                 "Existing employee record has an invalid consent date"
             ) from exc
-        return {
+        row_consent = {
             "reference": row["consent_reference"].strip(),
-            "date": existing.consent_date.isoformat() if existing.consent_date else consent_date,
-            "basis": existing.consent_basis,
+            "date": consent_date,
+            "basis": row.get("consent_basis", "").strip()
+            or row["consent_reference"].strip(),
         }
-    return None
+        if consent is not None and row_consent != consent:
+            raise FaceEnrollmentUploadError(
+                "Existing employee records have inconsistent consent details"
+            )
+        consent = row_consent
+    return consent

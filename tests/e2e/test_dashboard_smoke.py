@@ -45,6 +45,18 @@ class DashboardUnauthenticatedSmokeTests(unittest.TestCase):
         self.assertIn('id="faceAnalyticsBody"', markup)
         self.assertIn('id="faceRecognitionStatus"', markup)
 
+    def test_admin_settings_and_guarded_git_controls_are_present(self):
+        markup = (PROJECT_ROOT / "dashboard" / "index.html").read_text(encoding="utf-8")
+        script = (PROJECT_ROOT / "dashboard" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('data-tab="settings" id="applicationSettingsTab" hidden', markup)
+        self.assertIn('id="applicationSettingsForm"', markup)
+        self.assertIn('id="gitCommitConfirmation"', markup)
+        self.assertIn('id="gitPushConfirmation"', markup)
+        self.assertIn(".app_settings.json", markup)
+        self.assertIn("/api/app-settings", script)
+        self.assertIn("/api/git/commit", script)
+        self.assertIn("/api/git/push", script)
+
 
 if __name__ == "__main__":
     unittest.main()

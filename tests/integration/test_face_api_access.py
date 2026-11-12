@@ -58,6 +58,7 @@ class FaceApiAccessTests(unittest.TestCase):
                 "incident_id": 21, "violation_type": "no_helmet",
                 "status": "Suggested", "full_name": "Example Person",
                 "snapshot_available": True, "face_crop_available": True,
+                "person_match": True, "person_track_id": 72,
                 "person_id": 5, "gallery_photo_person_id": 5,
                 "gallery_photo_id": 12,
             }]),
@@ -71,7 +72,7 @@ class FaceApiAccessTests(unittest.TestCase):
         self.assertEqual(response.json()[0]["snapshot_url"], "/api/snapshot/21")
         self.assertEqual(
             response.json()[0]["face_crop_url"],
-            "/api/violations/21/face-crop",
+            "/api/violations/21/face-crop?person_track_id=72",
         )
         self.assertEqual(
             response.json()[0]["gallery_photo_url"],
@@ -113,7 +114,7 @@ class FaceApiAccessTests(unittest.TestCase):
                 "incident_id": 21, "status": "NEEDS_REVIEW",
                 "face_crop": b"private-face-crop",
                 "top5_candidates": [], "top3_candidates": [],
-                "face_quality": {}, "face_bbox": None, "thresholds": {},
+                "face_quality": {}, "face_bbox": [1, 2, 3, 4], "thresholds": {},
                 "detection_metadata": {},
             }),
         ), patch(
@@ -125,6 +126,115 @@ class FaceApiAccessTests(unittest.TestCase):
         self.assertTrue(response.json()["face_crop_available"])
         self.assertNotIn("face_crop", response.json())
         self.assertEqual(response.json()["snapshot_url"], "/api/snapshot/21")
+
+    def test_person_match_detail_and_crop_use_person_track_id(self):
+        client = self._client_as("manager")
+        person_match = {
+            "incident_id": 21, "person_track_id": 72, "person_number": 2,
+            "status": "NEEDS_REVIEW", "face_crop": b"private-face-crop",
+            "person_bbox": [20, 30, 80, 120],
+            "top5_candidates": [], "top3_candidates": [],
+            "face_quality": {}, "face_bbox": [40, 50, 60, 70], "thresholds": {},
+            "detection_metadata": {"frame_width": 200, "frame_height": 150},
+        }
+        with patch(
+            "app.main.db.get_violation_by_id",
+            new=AsyncMock(return_value={
+                "id": 21, "snapshot_path": "private-snapshot.jpg",
+                "clean_snapshot_path": None,
+            }),
+        ), patch(
+            "app.main.db.get_face_person_match",
+            new=AsyncMock(side_effect=lambda *_args: dict(person_match)),
+        ) as get_person, patch(
+            "app.main.db.write_audit_log", new=AsyncMock(),
+        ), patch(
+            "app.faces.face_dataset._read_face_bbox_crop",
+            return_value=b"face-jpeg",
+        ) as crop_from_evidence:
+            detail = client.get(
+                "/api/face-matches/21?person_track_id=72",
+            )
+            crop = client.get(
+                "/api/violations/21/face-crop?person_track_id=72",
+            )
+
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["person_track_id"], 72)
+        self.assertEqual(detail.json()["person_number"], 2)
+        self.assertEqual(
+            detail.json()["detection_metadata"]["person_box"],
+            [20, 30, 80, 120],
+        )
+        self.assertNotIn("face_crop", detail.json())
+        self.assertEqual(crop.content, b"face-jpeg")
+        self.assertEqual(
+            crop_from_evidence.call_args.args,
+            ("private-snapshot.jpg", (40, 50, 60, 70)),
+        )
+        self.assertEqual(
+            [call.args for call in get_person.await_args_list],
+            [(21, 72), (21, 72)],
+        )
+
+    def test_person_detail_supports_legacy_incident_match(self):
+        client = self._client_as("manager")
+        with patch(
+            "app.main.db.get_violation_by_id",
+            new=AsyncMock(return_value={
+                "id": 21, "snapshot_path": "private-snapshot.jpg",
+                "clean_snapshot_path": None,
+            }),
+        ), patch(
+            "app.main.db.get_face_person_match",
+            new=AsyncMock(return_value={
+                "incident_id": 21, "person_track_id": 72,
+                "person_number": 1, "person_bbox": [1, 2, 30, 40],
+                "status": "FACE_NOT_VISIBLE", "face_crop": b"old-person-crop",
+                "top5_candidates": [], "top3_candidates": [],
+                "face_quality": {}, "face_bbox": None, "thresholds": {},
+                "detection_metadata": {},
+            }),
+        ), patch(
+            "app.main.db.write_audit_log", new=AsyncMock(),
+        ):
+            response = client.get(
+                "/api/face-matches/21?person_track_id=72",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["person_number"], 1)
+        self.assertEqual(
+            response.json()["detection_metadata"]["person_box"],
+            [1, 2, 30, 40],
+        )
+        self.assertFalse(response.json()["face_crop_available"])
+        self.assertNotIn("face_crop", response.json())
+
+    def test_face_review_targets_only_selected_person(self):
+        client = self._client_as("manager")
+        with patch(
+            "app.main.db.review_face_match",
+            new=AsyncMock(return_value={
+                "incident_id": 21, "status": "UNKNOWN",
+            }),
+        ) as review, patch(
+            "app.main.db.write_audit_log", new=AsyncMock(),
+        ):
+            response = client.post(
+                "/api/face-matches/21/review",
+                headers={"X-CSRF-Token": "csrf-test-token"},
+                json={
+                    "decision": "Unknown",
+                    "person_track_id": 72,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            review.await_args.args,
+            (21, "Unknown", 17, None, None, 72),
+        )
 
     def test_face_analytics_accepts_violation_type_filter(self):
         client = self._client_as("manager")
@@ -269,6 +379,9 @@ class FaceApiAccessTests(unittest.TestCase):
         ), patch(
             "app.main.db.get_face_match_availability",
             new=AsyncMock(return_value={7}),
+        ), patch(
+            "app.main.db.get_face_person_summaries",
+            new=AsyncMock(return_value={}),
         ):
             response = client.get("/api/violations")
 
@@ -278,6 +391,43 @@ class FaceApiAccessTests(unittest.TestCase):
         self.assertTrue(item["face_match_available"])
         self.assertNotIn("matched_full_name", item)
         self.assertNotIn("top3_candidates", item)
+
+    def test_incident_list_exposes_person_and_face_crop_counts(self):
+        client = self._client_as("operator")
+        with patch.object(config, "FACE_ENABLED", True), patch(
+            "app.main.db.get_recent_violations",
+            new=AsyncMock(return_value=[{
+                "id": 7, "snapshot_path": "incident.jpg",
+                "detection_metadata": {
+                    "detected_persons": [
+                        {"track_id": 11, "person_box": [0, 0, 10, 10]},
+                        {"track_id": 22, "person_box": [10, 0, 20, 10]},
+                    ],
+                },
+            }]),
+        ), patch(
+            "app.main.db.get_face_match_availability",
+            new=AsyncMock(return_value={7}),
+        ), patch(
+            "app.main.db.get_face_person_summaries",
+            new=AsyncMock(return_value={
+                7: {
+                    "detected_person_count": 2,
+                    "face_crops_available": 1,
+                    "people": [{
+                        "person_track_id": 11, "face_crop_available": True,
+                        "status": "NEEDS_REVIEW",
+                    }],
+                },
+            }),
+        ):
+            response = client.get("/api/violations")
+
+        self.assertEqual(response.status_code, 200)
+        item = response.json()[0]
+        self.assertEqual(item["detected_person_count"], 2)
+        self.assertEqual(item["face_crops_available"], 1)
+        self.assertEqual(item["detected_people"][0]["person_track_id"], 11)
 
     def test_manager_cannot_permanently_delete_enrollment(self):
         client = self._client_as("manager")
@@ -340,7 +490,9 @@ class FaceApiAccessTests(unittest.TestCase):
         client = self._client_as("manager")
         with patch(
             "app.main.db.get_violation_by_id",
-            new=AsyncMock(return_value={"id": 7}),
+            new=AsyncMock(return_value={
+                "id": 7, "snapshot_path": "private-snapshot.jpg",
+            }),
         ), patch(
             "app.main.db.get_face_match",
             new=AsyncMock(return_value={
@@ -361,14 +513,19 @@ class FaceApiAccessTests(unittest.TestCase):
     def test_manager_can_view_crop_and_view_is_audited(self):
         client = self._client_as("manager")
         with patch(
+            "app.main.db.get_violation_by_id",
+            new=AsyncMock(return_value={
+                "id": 7, "snapshot_path": "private-snapshot.jpg",
+            }),
+        ), patch(
             "app.main.db.get_face_match",
             new=AsyncMock(return_value={
                 "status": "Identified", "face_crop": b"encrypted-private-crop",
+                "face_bbox": [10, 20, 30, 40],
             }),
         ), patch(
-            "app.faces.face_dataset._encryption_key", return_value=b"k" * 32,
-        ), patch(
-            "app.faces.face_dataset.decrypt_face_crop", return_value=b"face crop jpeg",
+            "app.faces.face_dataset._read_face_bbox_crop",
+            return_value=b"face crop jpeg",
         ), patch(
             "app.main.db.write_audit_log", new=AsyncMock(),
         ) as audit:
@@ -376,7 +533,29 @@ class FaceApiAccessTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, b"face crop jpeg")
+        self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertEqual(audit.await_args.args[0], "face_identity_viewed")
+
+    def test_manager_cannot_view_crop_without_a_saved_face_box(self):
+        client = self._client_as("manager")
+        with patch(
+            "app.main.db.get_violation_by_id",
+            new=AsyncMock(return_value={
+                "id": 7, "snapshot_path": "private-snapshot.jpg",
+            }),
+        ), patch(
+            "app.main.db.get_face_match",
+            new=AsyncMock(return_value={
+                "status": "Identified", "face_crop": b"old-person-crop",
+                "face_bbox": None,
+            }),
+        ), patch(
+            "app.faces.face_dataset._read_face_bbox_crop",
+        ) as crop:
+            response = client.get("/api/violations/7/face-crop")
+
+        self.assertEqual(response.status_code, 404)
+        crop.assert_not_called()
 
     def test_rejected_match_cannot_add_incident_crop_embedding(self):
         client = self._client_as("admin")
@@ -452,6 +631,7 @@ class FaceApiAccessTests(unittest.TestCase):
         self.assertEqual(response.json()["accepted"], 1)
         self.assertEqual(store.call_args.kwargs["actor_user_id"], 17)
         import_dataset.assert_awaited_once()
+        self.assertEqual(import_dataset.await_args.kwargs["employee_code"], "E001")
         self.assertEqual(audit.await_args.args[0], "face_enrollment_image_uploaded")
 
     def test_enrollment_upload_requires_explicit_consent_confirmation(self):

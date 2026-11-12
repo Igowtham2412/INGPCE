@@ -479,6 +479,7 @@ EVIDENCE_CATEGORY_BY_VIOLATION = {
     "helmet": "helmet_violations",
     "no_helmet": "helmet_violations",
     "phone_detected": "phone_detected",
+    "speeding": "speeding",
 }
 
 
@@ -551,3 +552,7 @@ if (CAMERA_RECONNECT_INITIAL_SECONDS <= 0
 # ---------------------------------------------------------------------------
 OUTPUT_WIDTH: int = 1920
 OUTPUT_HEIGHT: int = 1080
+
+from .settings_store import load_overrides as _load_dashboard_settings
+
+_load_dashboard_settings(globals())
