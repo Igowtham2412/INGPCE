@@ -30,6 +30,16 @@ class DashboardUnauthenticatedSmokeTests(unittest.TestCase):
         self.assertIn('value="all">ALL HISTORY', markup)
         self.assertIn("CLEAN OLDER THAN 2 DAYS", markup)
 
+    def test_related_dashboard_sections_share_primary_tabs(self):
+        markup = (PROJECT_ROOT / "dashboard" / "index.html").read_text(encoding="utf-8")
+        for primary_tab in ("surveillance", "operations", "alerts"):
+            self.assertIn(f'data-tab="{primary_tab}"', markup)
+            self.assertIn(f'data-section-group="{primary_tab}"', markup)
+        self.assertIn('data-section-group="surveillance" data-tab="playback"', markup)
+        self.assertIn('data-section-group="operations" data-tab="cameras"', markup)
+        self.assertIn('data-section-group="alerts" data-tab="alert-delivery"', markup)
+        self.assertIn('data-section-group="alerts" data-tab="rules"', markup)
+
     def test_incidents_expose_event_triggered_face_match_ui(self):
         markup = (PROJECT_ROOT / "dashboard" / "index.html").read_text(encoding="utf-8")
         script = (PROJECT_ROOT / "dashboard" / "app.js").read_text(encoding="utf-8")
@@ -56,7 +66,10 @@ class DashboardUnauthenticatedSmokeTests(unittest.TestCase):
         self.assertIn('id="gitIdentityForm"', markup)
         self.assertIn('id="gitAuthGuidance"', markup)
         self.assertIn(".app_settings.json", markup)
+        self.assertIn("Secret values are masked", markup)
         self.assertIn("/api/app-settings", script)
+        self.assertIn('setting.secret ? "password"', script)
+        self.assertIn("setting.configured", script)
         self.assertIn("github_cli_account", script)
         self.assertIn("/api/git/commit", script)
         self.assertIn("/api/git/push", script)

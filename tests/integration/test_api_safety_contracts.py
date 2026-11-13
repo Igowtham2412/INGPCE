@@ -166,6 +166,7 @@ class ApiSafetyContractsTests(unittest.TestCase):
         self.assertEqual(_minimum_role("/api/violations/cleanup", "POST"), "admin")
         self.assertEqual(_minimum_role("/api/auth/users/4", "DELETE"), "admin")
         self.assertEqual(_minimum_role("/api/app-settings", "GET"), "admin")
+        self.assertEqual(_minimum_role("/api/app-settings", "PUT"), "admin")
         self.assertEqual(_minimum_role("/api/git/status", "GET"), "admin")
         self.assertEqual(_minimum_role("/api/git/identity", "PUT"), "admin")
 
@@ -216,7 +217,14 @@ class ApiSafetyContractsTests(unittest.TestCase):
             updated = self.client.put(
                 "/api/app-settings",
                 headers={"X-CSRF-Token": "test-csrf"},
-                json={"values": {"FRAME_SKIP": 4}},
+                json={
+                    "values": {
+                        "FRAME_SKIP": 4,
+                        "POWER_AUTOMATE_WEBHOOK_URL": (
+                            "https://hooks.example/private-test-token"
+                        ),
+                    },
+                },
             )
             identity = self.client.put(
                 "/api/git/identity",
@@ -228,12 +236,30 @@ class ApiSafetyContractsTests(unittest.TestCase):
             )
 
         self.assertEqual(settings.status_code, 200)
-        self.assertNotIn("PG_PASSWORD", settings.text)
-        self.assertNotIn("FACE_ENCRYPTION_KEY", settings.text)
+        settings_by_key = {
+            setting["key"]: setting
+            for group in settings.json()["groups"]
+            for setting in group["settings"]
+        }
+        for secret_key in (
+            "PG_PASSWORD", "POWER_AUTOMATE_WEBHOOK_URL",
+            "AUTH_SESSION_SECRET", "FACE_ENCRYPTION_KEY",
+        ):
+            self.assertTrue(settings_by_key[secret_key]["secret"])
+            self.assertEqual(settings_by_key[secret_key]["value"], "")
+        self.assertNotIn("private-test-token", updated.text)
         self.assertTrue(settings.json()["restart_required"])
         self.assertEqual(updated.status_code, 200)
         self.assertTrue(updated.json()["restart_required"])
-        save_settings.assert_called_once()
+        save_settings.assert_called_once_with(
+            {
+                "FRAME_SKIP": 4,
+                "POWER_AUTOMATE_WEBHOOK_URL": (
+                    "https://hooks.example/private-test-token"
+                ),
+            },
+            vars(config),
+        )
         self.assertEqual(identity.status_code, 200)
         self.assertTrue(identity.json()["updated"])
         set_identity.assert_called_once_with(

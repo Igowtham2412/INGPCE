@@ -123,7 +123,7 @@ the application or its Git controls to an untrusted network.
 | Cameras & Health | Camera inventory, speed calibration, availability history, and health |
 | Alert Delivery | Review evidence, queue and dispatch status, and delivery history |
 | Alert Rules | Configure camera, violation, cooldown, and recipient policies |
-| Settings | Admin-only non-secret application settings and Git operations |
+| Settings | Admin-only application and credential settings plus Git operations |
 
 ### Settings and restart behavior
 
@@ -140,18 +140,23 @@ server in its terminal with Ctrl+C and run `.\run_server.bat` again. Saved
 values are loaded at startup.
 
 Dashboard values are stored in the repository-root `.app_settings.json` file.
-It is ignored by Git and takes precedence over corresponding non-secret `.env`
-values after restart. Back it up separately if the configuration must survive
-host replacement. Remove that local file to return to environment/default
-values.
+It is ignored by Git and takes precedence over corresponding `.env` values
+after restart. This file includes credentials configured in Settings and is
+stored as local plaintext, not encrypted. Restrict access to the application
+host, do not commit or share it, and back it up separately only if the
+configuration must survive host replacement. Remove that local file to return
+to environment/default values.
 
-Passwords and other secrets are deliberately excluded from the Settings API
-and browser UI. This includes database passwords, camera credentials,
-Power Automate webhook URLs, the session secret, and the face encryption key.
-Keep and rotate those values in `.env` or an approved secret manager. Model
-paths and other non-secret deployment settings can be edited in the dashboard.
-Enabling face matching still requires license acceptance and encryption
-configuration outside the dashboard.
+Settings can configure the database password, Power Automate webhook URL,
+session signing secret, face encryption key, and default or seeded-NVR camera
+credentials. Secret fields are write-only: the API returns only whether a
+value is configured, never the value itself. Leave a field blank to keep its
+current value; use its clear option to remove a saved value when available.
+Custom camera stream URLs and their credentials remain managed in Cameras.
+Changing the session secret signs users out after restart. Changing the face
+encryption key can make existing encrypted face data unreadable; preserve the
+original key if that data must remain accessible. Face matching still
+requires license acceptance in the deployment configuration.
 
 ### Git controls
 
@@ -191,8 +196,8 @@ dashboard.
 ## Application configuration
 
 `app/config.py` reads deployment variables from `.env`. Dashboard-saved
-non-secret values override those variables at startup. Common environment
-variables include:
+settings override those variables at startup. Common environment variables
+include:
 
 | Area | Variables |
 |---|---|
@@ -202,12 +207,14 @@ variables include:
 | Cameras and evidence | `PPE_SNAPSHOT_DIR`, `PPE_EVIDENCE_CLIP_DIR`, `PPE_TILE_WIDTH`, reconnect and timeout variables |
 | Alerts | `PPE_POWER_AUTOMATE_WEBHOOK_URL`, `PPE_ALERTS_ENABLED`, outbox and shift-report variables |
 | Authentication | `PPE_AUTH_ENABLED`, `PPE_SESSION_SECRET`, `PPE_COOKIE_SECURE`, `PPE_SESSION_HOURS` |
+| Camera credentials | `PPE_CAMERA_USERNAME`, `PPE_CAMERA_PASSWORD`, optional host-specific `PPE_NVR_<HOST>_USERNAME` and `PPE_NVR_<HOST>_PASSWORD` |
 | Face matching | `PPE_FACE_ENABLED`, `PPE_FACE_ENCRYPTION_KEY`, model, quality, and retention variables |
 
 Use `.env.example` as the safe template. Never put secrets in source code,
-dashboard settings, Git, screenshots, logs, or issue reports. New settings
-should be parsed and validated centrally in `app/config.py`; do not read
-environment variables ad hoc in workers or routes.
+Git, screenshots, logs, or issue reports. Dashboard secrets are stored as
+plaintext in the local ignored settings file; keep that file on a trusted host.
+New settings should be parsed and validated centrally in `app/config.py`; do
+not read environment variables ad hoc in workers or routes.
 
 ## API and persistence
 
@@ -220,7 +227,7 @@ The settings and Git endpoints are administrative and require authentication:
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `GET` / `PUT` | `/api/app-settings` | Read or persist supported non-secret settings |
+| `GET` / `PUT` | `/api/app-settings` | Read or persist supported settings; secret values are write-only |
 | `GET` | `/api/git/status` | Read current branch and changed paths |
 | `PUT` | `/api/git/identity` | Update repository-local commit author name/email |
 | `POST` | `/api/git/commit` | Commit all non-ignored repository changes after confirmation |

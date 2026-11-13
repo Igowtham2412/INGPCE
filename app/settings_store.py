@@ -1,4 +1,4 @@
-"""Validated, non-secret application settings persisted outside source control."""
+"""Validated application settings persisted outside source control."""
 from __future__ import annotations
 
 import json
@@ -23,16 +23,21 @@ class Setting:
     minimum: int | float | None = None
     maximum: int | float | None = None
     choices: tuple[str, ...] = ()
+    secret: bool = False
+    max_length: int = 500
+    clearable: bool = True
 
 
 def _setting(
     key: str, category: str, label: str, description: str,
     value_type: str, minimum: float | None = None,
     maximum: float | None = None, choices: tuple[str, ...] = (),
+    *, secret: bool = False, max_length: int = 500,
+    clearable: bool = True,
 ) -> Setting:
     return Setting(
         key, category, label, description, value_type,
-        minimum, maximum, choices,
+        minimum, maximum, choices, secret, max_length, clearable,
     )
 
 
@@ -87,7 +92,8 @@ SETTINGS = (
     _setting("PG_HOST", "Database pool", "Database host", "PostgreSQL server hostname.", "string"),
     _setting("PG_PORT", "Database pool", "Database port", "PostgreSQL server port.", "integer", 1, 65535),
     _setting("PG_DB", "Database pool", "Database name", "PostgreSQL database name.", "string"),
-    _setting("PG_USER", "Database pool", "Database user", "PostgreSQL username. Passwords remain in .env.", "string"),
+    _setting("PG_USER", "Database pool", "Database user", "PostgreSQL username.", "string"),
+    _setting("PG_PASSWORD", "Database pool", "Database password", "PostgreSQL password.", "string", secret=True, max_length=500),
     _setting("PG_POOL_MIN", "Database pool", "Minimum connections", "Minimum PostgreSQL pool size.", "integer", 1, 100),
     _setting("PG_POOL_MAX", "Database pool", "Maximum connections", "Maximum PostgreSQL pool size.", "integer", 1, 500),
     _setting("PG_CONNECT_RETRY_SECONDS", "Database pool", "Connection retry interval", "Seconds between PostgreSQL startup retries.", "integer", 1, 3600),
@@ -110,6 +116,15 @@ SETTINGS = (
     _setting("CAMERA_WATCHDOG_INTERVAL_SECONDS", "Camera streaming", "Watchdog interval", "Seconds between camera worker watchdog checks.", "number", 0.1, 120),
     _setting("CAMERA_FRAME_TIMEOUT_SECONDS", "Camera streaming", "Frame timeout", "Seconds before a stream is considered stale.", "number", 0.1, 600),
     _setting("CAMERA_MAX_SIMULTANEOUS_RECONNECTS", "Camera streaming", "Concurrent reconnect limit", "Maximum cameras reconnected at the same time.", "integer", 1, 100),
+    _setting("CAMERA_USERNAME", "Camera credentials", "Default camera username", "Default username for seeded NVR camera feeds unless a host-specific username is set.", "string", secret=True, max_length=256, clearable=False),
+    _setting("CAMERA_PASSWORD", "Camera credentials", "Default camera password", "Default password for seeded NVR camera feeds unless a host-specific password is set.", "string", secret=True, max_length=256, clearable=False),
+    _setting("NVR_192_169_0_65_USERNAME", "Camera credentials", "NVR 192.169.0.65 username", "Optional username override for this seeded NVR.", "string", secret=True, max_length=256, clearable=False),
+    _setting("NVR_192_169_0_65_PASSWORD", "Camera credentials", "NVR 192.169.0.65 password", "Optional password override for this seeded NVR.", "string", secret=True, max_length=256, clearable=False),
+    _setting("NVR_192_168_100_65_USERNAME", "Camera credentials", "NVR 192.168.100.65 username", "Optional username override for this seeded NVR.", "string", secret=True, max_length=256, clearable=False),
+    _setting("NVR_192_168_100_65_PASSWORD", "Camera credentials", "NVR 192.168.100.65 password", "Optional password override for this seeded NVR.", "string", secret=True, max_length=256, clearable=False),
+    _setting("POWER_AUTOMATE_WEBHOOK_URL", "Alert delivery", "Power Automate webhook URL", "Webhook destination used for alert delivery.", "string", secret=True, max_length=2048),
+    _setting("AUTH_SESSION_SECRET", "Authentication", "Session signing secret", "Changing this signs out active users after restart. Use a unique value of at least 32 bytes.", "string", secret=True, max_length=500),
+    _setting("FACE_ENCRYPTION_KEY", "Face matching", "Face encryption key", "URL-safe base64 key decoding to exactly 32 bytes. Changing it can make previously encrypted face data unreadable.", "string", secret=True, max_length=128),
 )
 
 SETTINGS_BY_KEY = {setting.key: setting for setting in SETTINGS}
@@ -138,13 +153,16 @@ def _validate_type_and_range(setting: Setting, value: Any) -> Any:
             raise ValueError(f"{setting.label} has an unsupported value")
         return value
     elif setting.value_type == "string":
-        if not isinstance(value, str) or len(value) > 500:
-            raise ValueError(f"{setting.label} must be a string of at most 500 characters")
+        if not isinstance(value, str) or len(value) > setting.max_length:
+            raise ValueError(
+                f"{setting.label} must be a string of at most "
+                f"{setting.max_length} characters"
+            )
         if "\x00" in value or any(ord(character) < 32 for character in value):
             raise ValueError(f"{setting.label} contains unsupported characters")
         if value != value.strip():
             raise ValueError(f"{setting.label} must not start or end with whitespace")
-        if not value and setting.key != "SHIFT_REPORT_TIMEZONE":
+        if not value and setting.key != "SHIFT_REPORT_TIMEZONE" and not setting.secret:
             raise ValueError(f"{setting.label} must not be empty")
         return value
     else:
@@ -186,11 +204,31 @@ def validate_values(
         raise ValueError("Initial camera reconnect delay must not exceed the maximum")
     if effective["FULLSCREEN_WIDTH"] < effective["LIVE_TILE_WIDTH"]:
         raise ValueError("Fullscreen width must not be smaller than live tile width")
+    session_secret = effective["AUTH_SESSION_SECRET"]
+    if current.get("AUTH_ENABLED") and len(session_secret.encode("utf-8")) < 32:
+        raise ValueError(
+            "Session signing secret must contain at least 32 bytes when authentication is enabled"
+        )
+    face_key = effective["FACE_ENCRYPTION_KEY"]
+    if face_key:
+        import base64
+        import binascii
+
+        try:
+            decoded_face_key = base64.b64decode(
+                face_key.encode("ascii"), altchars=b"-_", validate=True,
+            )
+        except (binascii.Error, UnicodeEncodeError) as error:
+            raise ValueError(
+                "Face encryption key must be URL-safe base64"
+            ) from error
+        if len(decoded_face_key) != 32:
+            raise ValueError("Face encryption key must decode to exactly 32 bytes")
     if effective["FACE_ENABLED"] and not (
-        current.get("FACE_LICENSE_ACCEPTED") and current.get("FACE_ENCRYPTION_KEY")
+        current.get("FACE_LICENSE_ACCEPTED") and face_key
     ):
         raise ValueError(
-            "Face matching requires license acceptance and an encryption key configured in .env"
+            "Face matching requires license acceptance and a valid encryption key"
         )
     return validated
 
@@ -234,16 +272,20 @@ def get_settings(
     for category, items in _SETTINGS_BY_CATEGORY.items():
         groups.append({
             "category": category,
-            "settings": [
-                {
-                    **asdict(item),
-                    "choices": list(item.choices),
-                    "value": effective[item.key],
-                }
-                for item in items
-            ],
+            "settings":             [_setting_response(item, effective[item.key]) for item in items],
         })
     return groups
+
+
+def _setting_response(setting: Setting, value: Any) -> dict[str, Any]:
+    result = {
+        **asdict(setting),
+        "choices": list(setting.choices),
+        "value": "" if setting.secret else value,
+    }
+    if setting.secret:
+        result["configured"] = bool(value)
+    return result
 
 
 def save_settings(

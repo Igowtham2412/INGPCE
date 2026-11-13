@@ -275,7 +275,8 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 ).query)
                 self.assertEqual(playback_query["start"], ["2026-10-13T14:00"])
                 self.assertEqual(playback_query["duration_minutes"], ["10"])
-                await page.get_by_role("button", name="ANALYTICS").click()
+                await page.locator('[data-tab="operations"]').click()
+                await page.locator('[data-tab="analytics"]').click()
                 async with page.expect_response(
                     lambda response: "/api/stats?window_hours=24" in response.url,
                 ):
@@ -314,7 +315,8 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertFalse(mobile_overflow)
                 await page.set_viewport_size({"width": 1280, "height": 900})
-                await page.get_by_role("button", name="CAMERAS & HEALTH").click()
+                await page.locator('[data-tab="operations"]').click()
+                await page.locator('[data-section-group="operations"][data-tab="cameras"]').click()
 
                 async with page.expect_response(
                     lambda response: "/api/camera-status/history?" in response.url
@@ -358,14 +360,16 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 async with page.expect_response(
                     lambda response: "/api/camera-status/history?" in response.url,
                 ):
-                    await page.get_by_role("button", name="CAMERAS & HEALTH").click()
+                    await page.locator('[data-tab="operations"]').click()
+                    await page.locator('[data-section-group="operations"][data-tab="cameras"]').click()
                 await page.get_by_text(
                     "Unexpected camera status response format.",
                     exact=True,
                 ).wait_for()
 
                 return_invalid_status_shape = False
-                await page.get_by_role("button", name="ALERT DELIVERY").click()
+                await page.locator('[data-tab="alerts"]').click()
+                await page.locator('[data-section-group="alerts"][data-tab="alert-delivery"]').click()
                 await page.locator('[data-alert-open="101"]').wait_for()
                 await page.locator('[data-alert-open="101"]').click()
                 self.assertEqual(await page.locator("#alertPosition").inner_text(), "1 of 2")
@@ -409,7 +413,7 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("0 selected", await page.locator("#alertGalleryCount").inner_text())
                 self.assertTrue(await page.locator("#btnTestPowerAutomate").is_disabled())
 
-                await page.get_by_role("button", name="ALERT RULES").click()
+                await page.locator('[data-section-group="alerts"][data-tab="rules"]').click()
                 await page.get_by_role("button", name="+ NEW RULE").click()
                 await page.locator("#ruleName").fill("Power Automate test rule")
                 await page.locator('#ruleCameraOptions input[value="CAM01"]').check()
@@ -709,6 +713,7 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                     "document.createElement('video').canPlayType('video/webm; codecs=\"vp8\"') !== ''",
                 ))
 
+                await page.locator('[data-tab="operations"]').click()
                 await page.locator('[data-tab="cameras"]').click()
                 await page.locator(
                     '#speedMeasurementsBody a[href$="/evidence"]',

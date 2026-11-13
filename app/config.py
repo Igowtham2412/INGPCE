@@ -91,10 +91,41 @@ def _camera_rois() -> dict[str, list[list[float]]]:
     return validated
 
 def _rtsp_url(host: str, channel: int) -> str:
-    nvr_prefix = f"PPE_NVR_{host.replace('.', '_')}"
-    username = quote(_env(f"{nvr_prefix}_USERNAME", _env("PPE_CAMERA_USERNAME", "admin")), safe="")
-    password = quote(_env(f"{nvr_prefix}_PASSWORD", _env("PPE_CAMERA_PASSWORD")), safe="")
-    return f"rtsp://{username}:{password}@{host}:554/Streaming/Channels/{channel}"
+    username, password = _camera_credentials(host)
+    return (
+        f"rtsp://{quote(username, safe='')}:{quote(password, safe='')}"
+        f"@{host}:554/Streaming/Channels/{channel}"
+    )
+
+
+CAMERA_USERNAME: str = _env("PPE_CAMERA_USERNAME", "admin")
+CAMERA_PASSWORD: str = _env("PPE_CAMERA_PASSWORD")
+NVR_192_169_0_65_USERNAME: str = _env("PPE_NVR_192_169_0_65_USERNAME")
+NVR_192_169_0_65_PASSWORD: str = _env("PPE_NVR_192_169_0_65_PASSWORD")
+NVR_192_168_100_65_USERNAME: str = _env("PPE_NVR_192_168_100_65_USERNAME")
+NVR_192_168_100_65_PASSWORD: str = _env("PPE_NVR_192_168_100_65_PASSWORD")
+
+
+def _camera_credentials(host: str) -> tuple[str, str]:
+    prefix = f"NVR_{host.replace('.', '_')}"
+    username = globals().get(f"{prefix}_USERNAME") or CAMERA_USERNAME
+    password = globals().get(f"{prefix}_PASSWORD") or CAMERA_PASSWORD
+    return username, password
+
+
+def _apply_camera_credentials(rtsp_url: str) -> str:
+    parsed = urlsplit(rtsp_url)
+    host = parsed.hostname
+    if not host:
+        return rtsp_url
+    username, password = _camera_credentials(host)
+    host_literal = f"[{host}]" if ":" in host else host
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    netloc = (
+        f"{quote(username, safe='')}:{quote(password, safe='')}"
+        f"@{host_literal}{port}"
+    )
+    return urlunsplit(parsed._replace(netloc=netloc))
 
 def sub_stream_url_for(main_url: str) -> str:
     parsed = urlsplit(main_url)
@@ -556,3 +587,10 @@ OUTPUT_HEIGHT: int = 1080
 from .settings_store import load_overrides as _load_dashboard_settings
 
 _load_dashboard_settings(globals())
+
+for _camera in SEED_CAMERAS:
+    _camera["rtsp_url"] = _apply_camera_credentials(_camera["rtsp_url"])
+    (
+        _camera["main_stream_url"],
+        _camera["sub_stream_url"],
+    ) = camera_stream_urls_for(_camera["rtsp_url"])

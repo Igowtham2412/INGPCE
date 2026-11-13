@@ -67,7 +67,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   setInterval(refreshStats, 15000);
   setInterval(refreshCameraStatuses, 8000);
   setInterval(() => {
-    if (document.getElementById("tab-cameras").classList.contains("active")) {
+    if (document.getElementById("tab-operations").classList.contains("active")
+      && document.getElementById("tab-cameras").classList.contains("active")) {
       loadCameraStatusReport();
       loadSpeedTracking();
     }
@@ -3575,6 +3576,7 @@ function setupPowerAutomateTest() {
     .addEventListener("click", () => moveAlertInspector(1));
   document.addEventListener("keydown", (event) => {
     if (document.getElementById("alertIncidentInspector").hidden
+      || !document.getElementById("tab-alerts").classList.contains("active")
       || !document.getElementById("tab-alert-delivery").classList.contains("active")
       || event.altKey || event.ctrlKey || event.metaKey) return;
     if (event.key === "ArrowLeft") {
@@ -3824,28 +3826,66 @@ function activateDashboardTab(tabName, loadFaceMatchesAfterActivation = true) {
   document.querySelectorAll(".tab-pane").forEach((item) => {
     item.classList.toggle("active", item === pane);
   });
-  const isLiveWall = tabName === "feeds";
-  document.querySelector(".ops-grid").classList.toggle("live-wall-mode", isLiveWall);
-  if (!isLiveWall) setWallFocus(false);
-  if (tabName !== "playback" && state.playbackActive) {
+  if (tabName === "surveillance" || tabName === "operations" || tabName === "alerts") {
+    const groupButtons = [...document.querySelectorAll(
+      `.section-btn[data-section-group="${tabName}"]`,
+    )];
+    const sectionButton = groupButtons.find((item) => item.classList.contains("active") && !item.hidden)
+      || groupButtons.find((item) => !item.hidden);
+    if (!sectionButton) return false;
+    if (tabName !== "surveillance" && state.playbackActive) {
+      document.getElementById("btnStopPlayback").click();
+    }
+    return activateDashboardSection(sectionButton.dataset.tab);
+  }
+  document.querySelector(".ops-grid").classList.remove("live-wall-mode");
+  setWallFocus(false);
+  if (state.playbackActive) {
     document.getElementById("btnStopPlayback").click();
   }
-  if (tabName === "analytics") refreshStats();
-  if (tabName === "rules") refreshRules();
   if (tabName === "violations") loadViolationsGallery();
-  if (tabName === "cameras") {
-    renderCamerasTable();
-    loadCameraStatusReport();
-    loadSpeedTracking();
-  }
   if (tabName === "face-matches" && loadFaceMatchesAfterActivation) {
     loadFaceMatches();
   }
-  if (tabName === "playback") populatePlaybackCameraSelect();
   if (tabName === "settings") {
     loadApplicationSettings();
     loadGitStatus();
   }
+  return true;
+}
+
+function activateDashboardSection(sectionName, loadData = true) {
+  const button = document.querySelector(`.section-btn[data-tab="${sectionName}"]`);
+  if (!button || button.hidden) return false;
+  const group = button.dataset.sectionGroup;
+  const groupButtons = document.querySelectorAll(`.section-btn[data-section-group="${group}"]`);
+  groupButtons.forEach((item) => {
+    const active = item === button;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-selected", String(active));
+  });
+  document.querySelectorAll(`#tab-${group} .section-pane`).forEach((item) => {
+    const active = item.id === `tab-${sectionName}`;
+    item.classList.toggle("active", active);
+    item.hidden = !active;
+  });
+
+  const isLiveWall = group === "surveillance" && sectionName === "feeds";
+  document.querySelector(".ops-grid").classList.toggle("live-wall-mode", isLiveWall);
+  if (!isLiveWall) setWallFocus(false);
+  if (sectionName !== "playback" && state.playbackActive) {
+    document.getElementById("btnStopPlayback").click();
+  }
+  if (!loadData) return true;
+  if (sectionName === "analytics") refreshStats();
+  if (sectionName === "cameras") {
+    renderCamerasTable();
+    loadCameraStatusReport();
+    loadSpeedTracking();
+  }
+  if (sectionName === "alert-delivery") loadAlertDeliveryStatus();
+  if (sectionName === "rules") refreshRules();
+  if (sectionName === "playback") populatePlaybackCameraSelect();
   return true;
 }
 
@@ -3855,6 +3895,20 @@ function setupTabs() {
     button.addEventListener("click", () => {
       activateDashboardTab(button.dataset.tab);
     });
+  });
+  const sectionGroups = new Set(
+    [...document.querySelectorAll(".section-btn")].map((button) => button.dataset.sectionGroup),
+  );
+  sectionGroups.forEach((group) => {
+    const buttons = [...document.querySelectorAll(
+      `.section-btn[data-section-group="${group}"]`,
+    )];
+    const activeButton = buttons.find((button) => button.classList.contains("active") && !button.hidden)
+      || buttons.find((button) => !button.hidden);
+    if (activeButton) activateDashboardSection(activeButton.dataset.tab, false);
+  });
+  document.querySelectorAll(".section-btn").forEach((button) => {
+    button.addEventListener("click", () => activateDashboardSection(button.dataset.tab));
   });
 }
 
@@ -3909,10 +3963,22 @@ function renderApplicationSetting(setting) {
     const min = setting.minimum === null ? "" : ` min="${setting.minimum}"`;
     const max = setting.maximum === null ? "" : ` max="${setting.maximum}"`;
     const step = setting.value_type === "integer" ? "1" : "any";
-    const value = escapeHtmlAttribute(String(setting.value));
-    control = `<input id="appSetting-${key}" data-setting-key="${key}" data-setting-type="${setting.value_type}" type="${isNumber ? "number" : "text"}"${isNumber ? `${min}${max} step="${step}"` : ' maxlength="500"'} value="${value}" />`;
+    const type = setting.secret ? "password" : isNumber ? "number" : "text";
+    const value = setting.secret ? "" : escapeHtmlAttribute(String(setting.value));
+    const maxLength = setting.max_length;
+    const placeholder = setting.secret
+      ? ` placeholder="${setting.configured ? "Saved; blank keeps current value" : "Not configured"}"`
+      : "";
+    const autocomplete = setting.secret ? ' autocomplete="new-password"' : "";
+    control = `<input id="appSetting-${key}" data-setting-key="${key}" data-setting-type="${setting.secret ? "secret" : setting.value_type}" type="${type}"${isNumber ? `${min}${max} step="${step}"` : ` maxlength="${maxLength}"`}${autocomplete}${placeholder} value="${value}" />`;
   }
-  return `<label class="application-setting-field" for="appSetting-${key}"><span>${label}</span>${control}<small>${description}</small></label>`;
+  const clearControl = setting.secret && setting.configured && setting.clearable
+    ? `<label class="application-setting-clear"><input id="appSettingClear-${key}" type="checkbox" /> Clear saved value</label>`
+    : "";
+  const secretStatus = setting.secret
+    ? `<small>${setting.configured ? "A value is saved. It will not be displayed here." : "No value is currently saved."}</small>`
+    : "";
+  return `<div class="application-setting-field"><label for="appSetting-${key}">${label}</label>${control}<small>${description}</small>${secretStatus}${clearControl}</div>`;
 }
 
 async function saveApplicationSettings(event) {
@@ -3922,7 +3988,11 @@ async function saveApplicationSettings(event) {
   const values = {};
   document.querySelectorAll("#applicationSettingsGroups [data-setting-key]").forEach((input) => {
     const type = input.dataset.settingType;
-    if (type === "boolean") values[input.dataset.settingKey] = input.checked;
+    if (type === "secret") {
+      const clear = document.getElementById(`appSettingClear-${input.dataset.settingKey}`);
+      if (input.value) values[input.dataset.settingKey] = input.value;
+      else if (clear && clear.checked) values[input.dataset.settingKey] = "";
+    } else if (type === "boolean") values[input.dataset.settingKey] = input.checked;
     else if (type === "integer") values[input.dataset.settingKey] = Number.parseInt(input.value, 10);
     else if (type === "number") values[input.dataset.settingKey] = Number.parseFloat(input.value);
     else values[input.dataset.settingKey] = input.value;

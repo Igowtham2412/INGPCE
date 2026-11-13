@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>INGPCE — SURVEILLANCE OPERATIONS CENTER</title>
-<link rel="stylesheet" href="/static/style.css?v=20261112-git-identity" />
+<link rel="stylesheet" href="/static/style.css?v=20261113-combined-tabs" />
 </head>
 <body>
 
@@ -32,19 +32,21 @@
       <div class="panel-hdr">
         <h2><span class="hdr-icon">◉</span> SURVEILLANCE FEEDS</h2>
         <div class="mode-selector">
-          <button class="mode-btn active" data-tab="feeds">LIVE WALL</button>
-          <button class="mode-btn" data-tab="playback">PLAYBACK</button>
+          <button class="mode-btn active" data-tab="surveillance">LIVE WALL / PLAYBACK</button>
           <button class="mode-btn" data-tab="violations">INCIDENTS</button>
           <button class="mode-btn" data-tab="face-matches" id="faceMatchesTab" hidden>FACE MATCHES</button>
-          <button class="mode-btn" data-tab="analytics">ANALYTICS</button>
-          <button class="mode-btn" data-tab="cameras">CAMERAS & HEALTH</button>
-          <button class="mode-btn" data-tab="alert-delivery" id="alertDeliveryTab" hidden>ALERT DELIVERY</button>
-          <button class="mode-btn" data-tab="rules">ALERT RULES</button>
+          <button class="mode-btn" data-tab="operations">ANALYTICS / CAMERA HEALTH</button>
+          <button class="mode-btn" data-tab="alerts">ALERT DELIVERY / RULES</button>
           <button class="mode-btn" data-tab="settings" id="applicationSettingsTab" hidden>SETTINGS</button>
         </div>
       </div>
 
-      <div id="tab-feeds" class="tab-pane active">
+      <div id="tab-surveillance" class="tab-pane active">
+        <div class="section-nav" role="tablist" aria-label="Surveillance views">
+          <button class="section-btn active" id="surveillance-feeds-tab" type="button" role="tab" aria-selected="true" aria-controls="tab-feeds" data-section-group="surveillance" data-tab="feeds">LIVE WALL</button>
+          <button class="section-btn" id="surveillance-playback-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-playback" data-section-group="surveillance" data-tab="playback">PLAYBACK</button>
+        </div>
+      <section id="tab-feeds" class="section-pane active" role="tabpanel" aria-labelledby="surveillance-feeds-tab">
         <div class="wall-toolbar">
           <div class="wall-controls">
             <label class="wall-filter">
@@ -68,9 +70,9 @@
           </div>
         </div>
         <div id="feedsByGroup"><span class="loading-state" role="status" aria-live="polite"><span class="mac-loader" aria-hidden="true"></span><span>Loading camera feeds…</span></span></div>
-      </div>
+      </section>
 
-      <div id="tab-playback" class="tab-pane">
+      <section id="tab-playback" class="section-pane" role="tabpanel" aria-labelledby="surveillance-playback-tab" hidden>
         <section class="playback-page">
           <div class="playback-heading">
             <div><span class="playback-eyebrow">RECORDED VIDEO</span><h2>Camera playback</h2>
@@ -104,6 +106,7 @@
             <img id="playbackImage" alt="Selected camera recording playback" hidden />
           </div>
         </section>
+      </section>
       </div>
 
       <div id="tab-violations" class="tab-pane">
@@ -309,7 +312,12 @@
         </section>
       </div>
 
-      <div id="tab-analytics" class="tab-pane">
+      <div id="tab-operations" class="tab-pane">
+        <div class="section-nav" role="tablist" aria-label="Operations views">
+          <button class="section-btn active" id="operations-analytics-tab" type="button" role="tab" aria-selected="true" aria-controls="tab-analytics" data-section-group="operations" data-tab="analytics">ANALYTICS</button>
+          <button class="section-btn" id="operations-cameras-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-cameras" data-section-group="operations" data-tab="cameras">CAMERA HEALTH</button>
+        </div>
+      <section id="tab-analytics" class="section-pane active" role="tabpanel" aria-labelledby="operations-analytics-tab">
         <div class="analytics-page">
           <div class="analytics-toolbar">
             <div class="analytics-title">
@@ -383,9 +391,9 @@
             </article>
           </section>
         </div>
-      </div>
+      </section>
 
-      <div id="tab-cameras" class="tab-pane">
+      <section id="tab-cameras" class="section-pane" role="tabpanel" aria-labelledby="operations-cameras-tab" hidden>
         <div class="tab-intro"><div><span class="tab-eyebrow">INFRASTRUCTURE / VIDEO SOURCES</span><h2>Camera command center</h2><p>Manage registered feeds, detection policy, and live connectivity from one workspace.</p></div><span class="tab-live-indicator">● STREAM CONTROL</span></div>
         <div class="camera-command-summary" aria-label="Camera fleet summary">
           <article><span class="camera-summary-kicker">ENABLED SOURCES</span><strong id="cameraFleetEnabled">—</strong><small>Registered camera feeds</small></article>
@@ -462,9 +470,15 @@
           </div>
         </section>
         </section>
+      </section>
       </div>
 
-      <div id="tab-alert-delivery" class="tab-pane">
+      <div id="tab-alerts" class="tab-pane">
+        <div class="section-nav" role="tablist" aria-label="Alert views">
+          <button class="section-btn active" id="alertDeliveryTab" data-section-group="alerts" data-tab="alert-delivery" type="button" role="tab" aria-selected="true" aria-controls="tab-alert-delivery" hidden>ALERT DELIVERY</button>
+          <button class="section-btn" id="alerts-rules-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-rules" data-section-group="alerts" data-tab="rules">ALERT RULES</button>
+        </div>
+      <section id="tab-alert-delivery" class="section-pane active" role="tabpanel" aria-labelledby="alertDeliveryTab">
         <section class="alert-delivery-panel">
           <div class="alert-delivery-header">
             <div class="alert-delivery-title">
@@ -574,9 +588,9 @@
             </div>
           </section>
         </section>
-      </div>
+      </section>
 
-      <div id="tab-rules" class="tab-pane">
+      <section id="tab-rules" class="section-pane" role="tabpanel" aria-labelledby="alerts-rules-tab" hidden>
         <div class="tab-intro"><div><span class="tab-eyebrow">AUTOMATION / ESCALATION LOGIC</span><h2>Alert rules</h2><p>Configure how verified incidents are routed to your response team.</p></div><span class="tab-live-indicator">● RULE ENGINE</span></div>
         <div class="rules-panel">
           <div class="rules-hdr"><h3>ALERT RULES</h3><button class="ops-btn" id="btnNewRule">+ NEW RULE</button></div>
@@ -585,6 +599,7 @@
             <tbody id="rulesTableBody"><tr><td colspan="8"><span class="loading-state"><span class="mac-loader" aria-hidden="true"></span><span>Loading alert rules…</span></span></td></tr></tbody>
           </table>
         </div>
+      </section>
       </div>
 
       <div id="tab-settings" class="tab-pane">
@@ -592,12 +607,12 @@
           <div>
             <span class="tab-eyebrow">ADMINISTRATION / APPLICATION CONFIGURATION</span>
             <h2>Application settings</h2>
-            <p>Edit supported non-secret settings for inference, cameras, alerts, storage, the database pool, and face matching. Changes are saved locally and take effect after a server restart.</p>
+            <p>Configure application behavior and connection credentials. Changes are saved locally and take effect after a server restart.</p>
           </div>
           <span class="tab-live-indicator">● ADMIN ONLY</span>
         </div>
         <div class="settings-security-note">
-          Passwords, session secrets, camera credentials, and webhook URLs are never shown or saved here. Configure secrets in <code>.env</code>. Settings saved here are stored in the ignored <code>.app_settings.json</code> file and override non-secret environment values at startup.
+          Configure database, alert webhook, session, face-encryption, and seeded NVR credentials below. Secret values are masked and never sent back to the browser: leave a secret field blank to keep its saved value, or use a clear option when available. Settings are stored in the ignored <code>.app_settings.json</code> file as local plaintext, so restrict access to this computer and never commit or share the file. Custom camera stream URLs and their credentials remain editable in Cameras.
         </div>
         <form id="applicationSettingsForm">
           <div id="applicationSettingsGroups" class="application-settings-groups">
@@ -809,6 +824,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20261112-git-identity"></script>
+<script src="/static/app.js?v=20261113-combined-tabs"></script>
 </body>
 </html>
