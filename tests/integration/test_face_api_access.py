@@ -1,9 +1,11 @@
+import base64
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
 from app import config
+from app.faces.face_dataset import encrypt_face_crop
 from app.main import app
 
 
@@ -129,12 +131,14 @@ class FaceApiAccessTests(unittest.TestCase):
 
     def test_person_match_detail_and_crop_use_person_track_id(self):
         client = self._client_as("manager")
+        key = b"k" * 32
+        encrypted_face_crop = encrypt_face_crop(b"face jpeg", key)
         person_match = {
             "incident_id": 21, "person_track_id": 72, "person_number": 2,
-            "status": "NEEDS_REVIEW", "face_crop": b"private-face-crop",
+            "status": "NEEDS_REVIEW", "face_crop": encrypted_face_crop,
             "person_bbox": [20, 30, 80, 120],
             "top5_candidates": [], "top3_candidates": [],
-            "face_quality": {}, "face_bbox": [40, 50, 60, 70], "thresholds": {},
+            "face_quality": {}, "face_bbox": None, "thresholds": {},
             "detection_metadata": {"frame_width": 200, "frame_height": 150},
         }
         with patch(
@@ -148,9 +152,11 @@ class FaceApiAccessTests(unittest.TestCase):
             new=AsyncMock(side_effect=lambda *_args: dict(person_match)),
         ) as get_person, patch(
             "app.main.db.write_audit_log", new=AsyncMock(),
+        ), patch.object(
+            config, "FACE_ENCRYPTION_KEY",
+            base64.urlsafe_b64encode(key).decode("ascii"),
         ), patch(
             "app.faces.face_dataset._read_face_bbox_crop",
-            return_value=b"face-jpeg",
         ) as crop_from_evidence:
             detail = client.get(
                 "/api/face-matches/21?person_track_id=72",
@@ -167,11 +173,9 @@ class FaceApiAccessTests(unittest.TestCase):
             [20, 30, 80, 120],
         )
         self.assertNotIn("face_crop", detail.json())
-        self.assertEqual(crop.content, b"face-jpeg")
-        self.assertEqual(
-            crop_from_evidence.call_args.args,
-            ("private-snapshot.jpg", (40, 50, 60, 70)),
-        )
+        self.assertTrue(detail.json()["face_crop_available"])
+        self.assertEqual(crop.content, b"face jpeg")
+        crop_from_evidence.assert_not_called()
         self.assertEqual(
             [call.args for call in get_person.await_args_list],
             [(21, 72), (21, 72)],
@@ -190,7 +194,7 @@ class FaceApiAccessTests(unittest.TestCase):
             new=AsyncMock(return_value={
                 "incident_id": 21, "person_track_id": 72,
                 "person_number": 1, "person_bbox": [1, 2, 30, 40],
-                "status": "FACE_NOT_VISIBLE", "face_crop": b"old-person-crop",
+                "status": "FACE_NOT_VISIBLE", "face_crop": None,
                 "top5_candidates": [], "top3_candidates": [],
                 "face_quality": {}, "face_bbox": None, "thresholds": {},
                 "detection_metadata": {},
@@ -512,6 +516,8 @@ class FaceApiAccessTests(unittest.TestCase):
 
     def test_manager_can_view_crop_and_view_is_audited(self):
         client = self._client_as("manager")
+        key = b"k" * 32
+        encrypted_face_crop = encrypt_face_crop(b"face crop jpeg", key)
         with patch(
             "app.main.db.get_violation_by_id",
             new=AsyncMock(return_value={
@@ -520,15 +526,15 @@ class FaceApiAccessTests(unittest.TestCase):
         ), patch(
             "app.main.db.get_face_match",
             new=AsyncMock(return_value={
-                "status": "Identified", "face_crop": b"encrypted-private-crop",
+                "status": "Identified", "face_crop": encrypted_face_crop,
                 "face_bbox": [10, 20, 30, 40],
             }),
         ), patch(
-            "app.faces.face_dataset._read_face_bbox_crop",
-            return_value=b"face crop jpeg",
-        ), patch(
             "app.main.db.write_audit_log", new=AsyncMock(),
-        ) as audit:
+        ) as audit, patch.object(
+            config, "FACE_ENCRYPTION_KEY",
+            base64.urlsafe_b64encode(key).decode("ascii"),
+        ):
             response = client.get("/api/violations/7/face-crop")
 
         self.assertEqual(response.status_code, 200)
@@ -536,7 +542,7 @@ class FaceApiAccessTests(unittest.TestCase):
         self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertEqual(audit.await_args.args[0], "face_identity_viewed")
 
-    def test_manager_cannot_view_crop_without_a_saved_face_box(self):
+    def test_manager_cannot_view_crop_without_a_saved_face_image(self):
         client = self._client_as("manager")
         with patch(
             "app.main.db.get_violation_by_id",
@@ -546,8 +552,8 @@ class FaceApiAccessTests(unittest.TestCase):
         ), patch(
             "app.main.db.get_face_match",
             new=AsyncMock(return_value={
-                "status": "Identified", "face_crop": b"old-person-crop",
-                "face_bbox": None,
+                "status": "Identified", "face_crop": None,
+                "face_bbox": [10, 20, 30, 40],
             }),
         ), patch(
             "app.faces.face_dataset._read_face_bbox_crop",

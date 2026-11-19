@@ -146,7 +146,7 @@ if os.path.isdir(DASHBOARD_DIR):
 
 
 def _minimum_role(path: str, method: str) -> str:
-    if path.startswith(("/api/app-settings", "/api/git/")):
+    if path.startswith(("/api/app-settings", "/api/git/", "/api/tunnel/")):
         return "admin"
     if path == "/api/alerts/power-automate/test":
         return "manager"
@@ -722,6 +722,70 @@ async def read_application_settings(request: Request):
     return {
         "groups": settings_store.get_settings(vars(config)),
         "restart_required": True,
+    }
+
+
+def _tunnel_status_path() -> Path | None:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        return None
+    return Path(local_app_data) / "INGPCE" / "logs" / "cloudflare-tunnel-status.json"
+
+
+@app.get("/api/tunnel/status")
+async def read_tunnel_status(request: Request):
+    _require_admin(request)
+    path = _tunnel_status_path()
+    if path is None:
+        return {"status": "unavailable", "url": None, "process_id": None}
+    try:
+        status = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {"status": "unavailable", "url": None, "process_id": None}
+    except (OSError, json.JSONDecodeError) as error:
+        logger.exception("Could not read Cloudflare tunnel status")
+        raise HTTPException(
+            status_code=503, detail="Could not read tunnel status",
+        ) from error
+
+    valid_states = {"connected", "starting", "disconnected", "not_running"}
+    if not isinstance(status, dict) or status.get("status") not in valid_states:
+        logger.error("Cloudflare tunnel status file has an invalid shape")
+        raise HTTPException(status_code=503, detail="Tunnel status is invalid")
+    updated_at = status.get("updated_at")
+    try:
+        timestamp = datetime.fromisoformat(updated_at)
+        if timestamp.tzinfo is None:
+            raise ValueError("Tunnel status timestamp must include a timezone")
+    except (AttributeError, TypeError, ValueError) as error:
+        logger.error("Cloudflare tunnel status timestamp is invalid")
+        raise HTTPException(status_code=503, detail="Tunnel status is invalid") from error
+
+    age_seconds = (datetime.now(UTC) - timestamp.astimezone(UTC)).total_seconds()
+    if age_seconds > 45 or age_seconds < -120:
+        return {
+            "status": "stale", "url": None, "process_id": None,
+            "updated_at": updated_at,
+        }
+
+    process_id = status.get("process_id")
+    url = status.get("url")
+    if process_id is not None and (
+        type(process_id) is not int or process_id < 1
+    ):
+        logger.error("Cloudflare tunnel status process ID is invalid")
+        raise HTTPException(status_code=503, detail="Tunnel status is invalid")
+    if url is not None and (
+        not isinstance(url, str)
+        or not re.fullmatch(
+            r"https://[a-z0-9-]+\.trycloudflare\.com", url, re.IGNORECASE,
+        )
+    ):
+        logger.error("Cloudflare tunnel status URL is invalid")
+        raise HTTPException(status_code=503, detail="Tunnel status is invalid")
+    return {
+        "status": status["status"], "url": url, "process_id": process_id,
+        "updated_at": updated_at,
     }
 
 
@@ -1841,6 +1905,7 @@ async def get_violation_face_match(
     )
     if match is None:
         return {"incident_id": violation_id, "status": "Queued"}
+    has_stored_face_crop = bool(match.get("face_crop"))
     match.pop("face_crop", None)
     for key in ("face_quality", "face_bbox", "top3_candidates", "top5_candidates", "thresholds"):
         if isinstance(match.get(key), str):
@@ -1852,10 +1917,7 @@ async def get_violation_face_match(
 
     face_bbox = _normalize_face_bbox(match.get("face_bbox"))
     match["face_bbox"] = list(face_bbox) if face_bbox else None
-    evidence_path = (
-        violation.get("clean_snapshot_path") or violation.get("snapshot_path")
-    )
-    match["face_crop_available"] = bool(face_bbox and evidence_path)
+    match["face_crop_available"] = has_stored_face_crop
     if person_track_id is not None:
         metadata = match.get("detection_metadata") or {}
         if isinstance(metadata, str):
@@ -1891,28 +1953,24 @@ async def get_violation_face_crop(
     )
     if match is None:
         raise HTTPException(status_code=404, detail="Face crop is not available")
-    face_bbox = match.get("face_bbox")
-    if isinstance(face_bbox, str):
-        try:
-            face_bbox = json.loads(face_bbox)
-        except json.JSONDecodeError:
-            face_bbox = None
-    from .faces.face_dataset import _normalize_face_bbox, _read_face_bbox_crop
-
-    normalized_bbox = _normalize_face_bbox(face_bbox)
-    image_path = (
-        violation.get("clean_snapshot_path") or violation.get("snapshot_path")
-    )
-    if normalized_bbox is None or not image_path:
-        raise HTTPException(status_code=404, detail="Face crop is not available")
-    face_crop = await asyncio.to_thread(
-        _read_face_bbox_crop, image_path, normalized_bbox,
-    )
-    if face_crop is None:
+    encrypted_face_crop = match.get("face_crop")
+    if not encrypted_face_crop:
         raise HTTPException(
-            status_code=404,
-            detail="Face crop could not be read from incident evidence",
+            status_code=404, detail="Stored face crop is not available",
         )
+    from .faces.face_dataset import _encryption_key, decrypt_face_crop
+
+    try:
+        face_crop = await asyncio.to_thread(
+            decrypt_face_crop, encrypted_face_crop, _encryption_key(),
+        )
+    except (RuntimeError, ValueError) as error:
+        logger.exception(
+            "Could not decrypt saved face crop for incident %s", violation_id,
+        )
+        raise HTTPException(
+            status_code=503, detail="Stored face crop is unavailable",
+        ) from error
     await db.write_audit_log(
         "face_identity_viewed", int(actor["user_id"]), actor["email"],
         target_type="incident_face_person" if person_track_id is not None else "incident",
@@ -2519,6 +2577,7 @@ async def get_face_match_detail(
             if person_track_id is not None else str(violation_id)
         ),
     )
+    has_stored_face_crop = bool(match.get("face_crop"))
     match.pop("face_crop", None)
     for key in (
         "face_quality", "face_bbox", "top3_candidates", "top5_candidates",
@@ -2533,10 +2592,7 @@ async def get_face_match_detail(
 
     face_bbox = _normalize_face_bbox(match.get("face_bbox"))
     match["face_bbox"] = list(face_bbox) if face_bbox else None
-    evidence_path = (
-        violation.get("clean_snapshot_path") or violation.get("snapshot_path")
-    )
-    match["face_crop_available"] = bool(face_bbox and evidence_path)
+    match["face_crop_available"] = has_stored_face_crop
     if person_track_id is not None:
         metadata = match.get("detection_metadata") or {}
         if not isinstance(metadata, dict):

@@ -1,5 +1,8 @@
+import json
+import tempfile
 import unittest
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
@@ -169,6 +172,7 @@ class ApiSafetyContractsTests(unittest.TestCase):
         self.assertEqual(_minimum_role("/api/app-settings", "PUT"), "admin")
         self.assertEqual(_minimum_role("/api/git/status", "GET"), "admin")
         self.assertEqual(_minimum_role("/api/git/identity", "PUT"), "admin")
+        self.assertEqual(_minimum_role("/api/tunnel/status", "GET"), "admin")
 
     def test_application_settings_and_git_are_blocked_without_authentication(self):
         settings = self.client.get("/api/app-settings")
@@ -183,9 +187,78 @@ class ApiSafetyContractsTests(unittest.TestCase):
         )
 
         self.assertEqual(settings.status_code, 403)
+        self.assertEqual(self.client.get("/api/tunnel/status").status_code, 403)
         self.assertEqual(git_status.status_code, 403)
         self.assertEqual(commit.status_code, 403)
         self.assertEqual(identity.status_code, 403)
+
+    def test_admin_can_read_current_tunnel_status(self):
+        admin_session = {
+            "user_id": 1,
+            "email": "admin@example.com",
+            "role": "admin",
+            "csrf_token": "test-csrf",
+        }
+        self.client.cookies.set("ppe_session", "test-session")
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / "tunnel-status.json"
+            status_path.write_text(json.dumps({
+                "status": "connected",
+                "url": "https://example.trycloudflare.com",
+                "process_id": 1234,
+                "updated_at": datetime.now(UTC).isoformat(),
+            }), encoding="utf-8")
+            with (
+                patch.object(config, "AUTH_ENABLED", True),
+                patch(
+                    "app.main.auth.authenticate_token",
+                    new=AsyncMock(return_value=admin_session),
+                ),
+                patch(
+                    "app.main._tunnel_status_path",
+                    return_value=status_path,
+                ),
+            ):
+                response = self.client.get("/api/tunnel/status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "connected")
+        self.assertEqual(response.json()["url"], "https://example.trycloudflare.com")
+        self.assertEqual(response.json()["process_id"], 1234)
+
+    def test_stale_tunnel_status_does_not_show_expired_url_or_process(self):
+        admin_session = {
+            "user_id": 1,
+            "email": "admin@example.com",
+            "role": "admin",
+            "csrf_token": "test-csrf",
+        }
+        self.client.cookies.set("ppe_session", "test-session")
+        with tempfile.TemporaryDirectory() as directory:
+            status_path = Path(directory) / "tunnel-status.json"
+            status_path.write_text(json.dumps({
+                "status": "connected",
+                "url": "https://old.trycloudflare.com",
+                "process_id": 1234,
+                "updated_at": "2020-01-01T00:00:00+00:00",
+            }), encoding="utf-8")
+            with (
+                patch.object(config, "AUTH_ENABLED", True),
+                patch(
+                    "app.main.auth.authenticate_token",
+                    new=AsyncMock(return_value=admin_session),
+                ),
+                patch(
+                    "app.main._tunnel_status_path",
+                    return_value=status_path,
+                ),
+            ):
+                response = self.client.get("/api/tunnel/status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "stale")
+        self.assertIsNone(response.json()["url"])
+        self.assertIsNone(response.json()["process_id"])
 
     def test_admin_can_load_safe_settings_and_persist_updates(self):
         admin_session = {

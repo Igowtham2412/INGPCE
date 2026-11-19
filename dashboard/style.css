@@ -2785,6 +2785,27 @@ select option { color: var(--text-primary); background: #222; }
   line-height: 1.6;
 }
 .settings-security-note code, .git-admin-panel code { color: #a9caff; }
+.tunnel-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0 0;
+}
+.tunnel-status-grid > div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--border-panel);
+  border-radius: 8px;
+  background: rgba(4, 8, 15, .55);
+}
+.tunnel-status-grid dt { color: var(--text-dim); font: 11px var(--font-tactical); }
+.tunnel-status-grid dd {
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+  font: 12px var(--font-mono);
+}
+.tunnel-status-grid a { color: #a9caff; }
 .application-settings-groups { display: grid; gap: 12px; }
 .application-settings-card { margin: 0; }
 .application-settings-grid {

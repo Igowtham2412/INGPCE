@@ -453,6 +453,70 @@ class FaceRecognitionWorkerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(decoded.shape[:2], (28, 28))
 
+    async def test_focus_only_face_crop_is_saved_without_frame_bbox(self):
+        key = b"k" * 32
+
+        class _Analyzer:
+            model_name = "test-model"
+            model_version = "test-version"
+            runtime_provider = "CPUExecutionProvider"
+
+            def analyze(self, image):
+                if image.shape[0] <= 160:
+                    raise ImageRejected("no_face")
+                return np.asarray([1.0, 0.0], dtype=np.float32), {
+                    "quality_score": 0.95,
+                    "bbox": [80, 80, 120, 120],
+                }
+
+        worker = FaceRecognitionWorker(analyzer_factory=_Analyzer)
+        worker._analyzer = _Analyzer()
+        with patch(
+            "app.faces.face_recognition.db.get_face_match_settings",
+            new=AsyncMock(return_value={
+                "high_threshold": 0.8, "low_threshold": 0.7,
+                "minimum_margin": 0.1, "quality_min_by_violation": {},
+            }),
+        ), patch(
+            "app.faces.face_recognition._read_person_crop",
+            return_value=(
+                np.zeros((160, 80, 3), dtype=np.uint8), [0, 0, 80, 160],
+            ),
+        ), patch(
+            "app.faces.face_recognition._encryption_key", return_value=key,
+        ), patch(
+            "app.faces.face_recognition.db.list_face_enrollments",
+            new=AsyncMock(return_value=[]),
+        ), patch(
+            "app.faces.face_recognition.db.list_face_embeddings",
+            new=AsyncMock(return_value=[]),
+        ), patch(
+            "app.faces.face_recognition.db.complete_face_recognition_job",
+            new=AsyncMock(),
+        ) as complete, patch(
+            "app.faces.face_recognition.db.write_audit_log", new=AsyncMock(),
+        ):
+            await worker._process_job({
+                "incident_id": 104,
+                "camera_id": "CAM01",
+                "track_id": 7,
+                "violation_type": "phone_detected",
+                "clean_snapshot_path": "not-read-by-test",
+            })
+
+        self.assertIsNone(complete.await_args.args[6])
+        self.assertEqual(
+            complete.await_args.args[5]["quality_status"], "Face Available",
+        )
+        encrypted_crop = complete.await_args.args[-1]
+        self.assertIsInstance(encrypted_crop, bytes)
+        decoded = cv2.imdecode(
+            np.frombuffer(decrypt_face_crop(encrypted_crop, key), dtype=np.uint8),
+            cv2.IMREAD_COLOR,
+        )
+        self.assertGreater(decoded.shape[0], 0)
+        self.assertGreater(decoded.shape[1], 0)
+
     async def test_no_face_is_recorded_without_blocking_worker(self):
         class _Analyzer:
             model_name = "test-model"

@@ -10,6 +10,40 @@ from app.detection.detector import Detection
 
 
 class ComplianceEnginePhoneTests(unittest.TestCase):
+    def test_crash_helmet_labels_normalize_as_helmet(self):
+        for label in (
+            "Crash Helmet", "crash helmet", "crash_helmet", "crash-helmet",
+            "Motorcycle Helmet", "motorcycle helmet", "motorcycle_helmet",
+            "motorcycle-helmet",
+        ):
+            with self.subTest(label=label):
+                self.assertEqual(config.CLASS_MAP[label], "helmet")
+
+    def test_detected_helmet_overrides_conflicting_no_helmet_detection(self):
+        engine = ComplianceEngine(
+            "CAM01", ["helmet"], {"person", "helmet", "no_helmet"},
+        )
+        engine.tracker.update = Mock(
+            return_value=np.asarray(
+                [[10, 10, 90, 190, 7, 0.99, 0, 0]],
+                dtype=np.float32,
+            )
+        )
+        engine.tracker.tracked_stracks = [SimpleNamespace(track_id=7)]
+        engine.tracker.lost_stracks = []
+        status = engine.evaluate(
+            [
+                Detection("Person", "person", 0.99, 10, 10, 90, 190),
+                Detection("Crash Helmet", "helmet", 0.9, 35, 10, 65, 35),
+                Detection("NO-Hardhat", "no_helmet", 0.8, 35, 10, 65, 35),
+            ],
+            (200, 200, 3),
+        )[0]
+
+        self.assertIn("helmet", status.present_ppe)
+        self.assertNotIn("helmet", status.missing_ppe)
+        self.assertFalse(status.is_violation)
+
     def test_phone_near_person_is_associated_with_person_box(self):
         self.assertTrue(
             _phone_belongs_to_person(

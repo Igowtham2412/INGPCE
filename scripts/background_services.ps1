@@ -13,6 +13,7 @@ if (-not (Test-Path $cloudflared)) {
 $logDirectory = Join-Path $env:LOCALAPPDATA "INGPCE\logs"
 New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
 $watchdogLog = Join-Path $logDirectory "background-watchdog.log"
+$tunnelStatusFile = Join-Path $logDirectory "cloudflare-tunnel-status.json"
 $dashboardProcess = $null
 $dashboardStartedAt = $null
 $dashboardRetryAfter = Get-Date
@@ -96,6 +97,34 @@ function Get-TunnelHealth {
         return [pscustomobject]@{ State = "starting"; Process = $Process; Url = $url }
     }
     return [pscustomobject]@{ State = "unhealthy"; Process = $Process; Url = $url }
+}
+
+function Write-TunnelStatus {
+    $process = Get-ConfiguredTunnelProcesses | Select-Object -First 1
+    $status = [ordered]@{
+        status = "not_running"
+        url = $null
+        process_id = $null
+        updated_at = (Get-Date).ToUniversalTime().ToString("o")
+    }
+    if ($process) {
+        $health = Get-TunnelHealth -Process $process
+        $status.status = switch ($health.State) {
+            "healthy" { "connected" }
+            "starting" { "starting" }
+            default { "disconnected" }
+        }
+        $status.url = if ($health.State -eq "healthy") { $health.Url } else { $null }
+        $status.process_id = [int]$process.ProcessId
+    }
+    $temporaryFile = "$tunnelStatusFile.tmp"
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText(
+        $temporaryFile,
+        (ConvertTo-Json -InputObject $status -Compress),
+        $encoding
+    )
+    Move-Item -LiteralPath $temporaryFile -Destination $tunnelStatusFile -Force
 }
 
 function Test-ConfiguredDashboardRunning {
@@ -202,6 +231,7 @@ while ($true) {
         if ($tunnelProcesses.Count -eq 0 -and (Get-Date) -ge $tunnelRetryAfter) {
             Start-CloudflareTunnel
         }
+        Write-TunnelStatus
     } catch {
         Write-WatchdogLog "Watchdog check failed: $($_.Exception.Message)"
     }

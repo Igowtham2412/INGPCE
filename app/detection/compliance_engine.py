@@ -185,10 +185,10 @@ class ComplianceEngine:
                         else:
                             unknown.add(req)
                         continue
-                    if explicit_negative:
-                        missing.add(req)
-                    elif has_positive:
+                    if has_positive:
                         present.add(req)
+                    elif explicit_negative:
+                        missing.add(req)
                     else:
                         unknown.add(req)
                 else:

@@ -751,15 +751,17 @@ class FaceRecognitionWorker:
                 "runtime_provider": getattr(analyzer, "runtime_provider", "unknown"),
                 "processing_ms": elapsed_ms,
                 "quality_status": (
-                    "Face Available" if evidence_face is not None
+                    "Face Available"
+                    if evidence_face is not None or best_face.get("face_crop") is not None
                     else "Face Not Clearly Visible"
                 ),
                 "evidence_rejected_reasons": evidence_rejected,
             }
+            crop_to_store = evidence_face or best_face
             stored_face_crop = None
-            if evidence_face is not None:
+            if crop_to_store.get("face_crop") is not None:
                 stored_face_crop = await self._run_blocking(
-                    _encrypt_recognized_face_crop, evidence_face, key,
+                    _encrypt_recognized_face_crop, crop_to_store, key,
                 )
             face_bbox = (
                 evidence_face["absolute_bbox"]

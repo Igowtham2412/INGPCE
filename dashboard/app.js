@@ -29,6 +29,7 @@ const state = {
   canReviewFaceMatches: false,
   canManageFaceSettings: false,
   canManageApplicationSettings: false,
+  tunnelStatusLoading: false,
   wallColumns: 4,
   playbackActive: false,
   faceFilterTimer: null,
@@ -595,6 +596,11 @@ function setupLiveWall() {
   const grid = document.getElementById("feedsByGroup");
   const areaFilter = document.getElementById("wallAreaFilter");
   const search = document.getElementById("wallCameraSearch");
+  const savedDesign = localStorage.getItem("ingpce-wall-design");
+  setWallDesign(savedDesign === "original" ? "original" : "design-1");
+  document.querySelectorAll("[data-wall-design]").forEach((button) => {
+    button.addEventListener("click", () => setWallDesign(button.dataset.wallDesign));
+  });
   areaFilter.addEventListener("change", applyLiveWallFilters);
   search.addEventListener("input", applyLiveWallFilters);
   document.querySelectorAll("[data-wall-columns]").forEach((button) => {
@@ -615,6 +621,19 @@ function setupLiveWall() {
     if (event.key === "Escape") setWallFocus(false);
   });
   updateWallFeedCount();
+}
+
+function setWallDesign(design) {
+  const useDesignOne = design !== "original";
+  document.body.classList.toggle("wall-design-1", useDesignOne);
+  document.body.classList.toggle("wall-design-original", !useDesignOne);
+  document.documentElement.dataset.wallDesign = useDesignOne ? "design-1" : "original";
+  localStorage.setItem("ingpce-wall-design", useDesignOne ? "design-1" : "original");
+  document.querySelectorAll("[data-wall-design]").forEach((button) => {
+    const active = button.dataset.wallDesign === (useDesignOne ? "design-1" : "original");
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
 }
 
 function applyLiveWallFilters() {
@@ -3849,6 +3868,7 @@ function activateDashboardTab(tabName, loadFaceMatchesAfterActivation = true) {
   }
   if (tabName === "settings") {
     loadApplicationSettings();
+    loadTunnelStatus();
     loadGitStatus();
   }
   return true;
@@ -3915,6 +3935,7 @@ function setupTabs() {
 function setupApplicationSettings() {
   if (!state.canManageApplicationSettings) return;
   document.getElementById("btnReloadApplicationSettings").addEventListener("click", loadApplicationSettings);
+  document.getElementById("btnRefreshTunnelStatus").addEventListener("click", loadTunnelStatus);
   document.getElementById("applicationSettingsForm").addEventListener("submit", saveApplicationSettings);
   document.getElementById("btnRefreshGitStatus").addEventListener("click", loadGitStatus);
   const gitIdentityForm = document.getElementById("gitIdentityForm");
@@ -3922,6 +3943,54 @@ function setupApplicationSettings() {
   gitIdentityForm.addEventListener("submit", saveGitIdentity);
   document.getElementById("gitCommitForm").addEventListener("submit", commitGitChanges);
   document.getElementById("gitPushForm").addEventListener("submit", pushGitChanges);
+  window.setInterval(() => {
+    const settingsTab = document.getElementById("tab-settings");
+    if (settingsTab.classList.contains("active")) loadTunnelStatus();
+  }, 15000);
+}
+
+async function loadTunnelStatus() {
+  if (state.tunnelStatusLoading) return;
+  state.tunnelStatusLoading = true;
+  const connection = document.getElementById("tunnelConnectionStatus");
+  connection.textContent = "Refreshing…";
+  try {
+    const response = await fetch("/api/tunnel/status");
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || `HTTP ${response.status}`);
+    const labels = {
+      connected: "Connected",
+      starting: "Connecting",
+      disconnected: "Disconnected",
+      not_running: "Not running",
+      stale: "Status update delayed",
+      unavailable: "Status unavailable",
+    };
+    connection.textContent = labels[result.status] || "Unknown";
+    const urlContainer = document.getElementById("tunnelPublicUrl");
+    urlContainer.replaceChildren();
+    if (result.url) {
+      const link = document.createElement("a");
+      link.href = result.url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = result.url;
+      urlContainer.append(link);
+    } else {
+      urlContainer.textContent = "—";
+    }
+    document.getElementById("tunnelProcessId").textContent =
+      result.process_id ? String(result.process_id) : "—";
+    document.getElementById("tunnelStatusUpdated").textContent =
+      result.updated_at ? new Date(result.updated_at).toLocaleString() : "—";
+  } catch (error) {
+    connection.textContent = `Could not load: ${error.message}`;
+    document.getElementById("tunnelPublicUrl").textContent = "—";
+    document.getElementById("tunnelProcessId").textContent = "—";
+    document.getElementById("tunnelStatusUpdated").textContent = "—";
+  } finally {
+    state.tunnelStatusLoading = false;
+  }
 }
 
 async function loadApplicationSettings() {

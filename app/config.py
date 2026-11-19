@@ -406,6 +406,10 @@ if PPE_COMPLIANCE_MODE not in {"explicit_negative", "positive_absence"}:
 CLASS_MAP: dict[str, str] = {
     "person": "person", "Person": "person",
     "helmet": "helmet", "Helmet": "helmet", "Hardhat": "helmet", "hardhat": "helmet",
+    "Crash Helmet": "helmet", "crash helmet": "helmet",
+    "crash_helmet": "helmet", "crash-helmet": "helmet",
+    "Motorcycle Helmet": "helmet", "motorcycle helmet": "helmet",
+    "motorcycle_helmet": "helmet", "motorcycle-helmet": "helmet",
     "no-helmet": "no_helmet", "No-Helmet": "no_helmet", "NO-Hardhat": "no_helmet", "no_hardhat": "no_helmet",
     "vest": "vest", "Vest": "vest", "Safety Vest": "vest", "safety_vest": "vest",
     "no-vest": "no_vest", "No-Vest": "no_vest", "NO-Safety Vest": "no_vest",

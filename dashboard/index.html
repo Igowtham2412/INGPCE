@@ -5,8 +5,33 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>INGPCE — SURVEILLANCE OPERATIONS CENTER</title>
 <link rel="stylesheet" href="/static/style.css?v=20261113-combined-tabs" />
+<link rel="stylesheet" href="/static/wall-design-1.css?v=20261119-sentinel2" />
 </head>
 <body>
+<script>
+  (() => {
+    const applyWallDesign = (design) => {
+      const useDesignOne = design === "design-1";
+      document.body.classList.toggle("wall-design-1", useDesignOne);
+      document.body.classList.toggle("wall-design-original", !useDesignOne);
+      document.documentElement.dataset.wallDesign = useDesignOne ? "design-1" : "original";
+      localStorage.setItem("ingpce-wall-design", useDesignOne ? "design-1" : "original");
+      document.querySelectorAll("[data-wall-design]").forEach((button) => {
+        const active = button.dataset.wallDesign === (useDesignOne ? "design-1" : "original");
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-pressed", String(active));
+      });
+    };
+
+    const savedDesign = localStorage.getItem("ingpce-wall-design");
+    applyWallDesign(savedDesign === "original" ? "original" : "design-1");
+
+    document.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-wall-design]");
+      if (button) applyWallDesign(button.dataset.wallDesign);
+    });
+  })();
+</script>
 
 <div class="ops-shell">
   <header class="cmd-bar">
@@ -65,6 +90,10 @@
               <button type="button" data-wall-columns="4" class="active" aria-pressed="true" title="4 columns">4 COL</button>
             </div>
             <span class="wall-feed-count" id="wallFeedCount">—</span>
+            <div class="wall-design-selector" role="group" aria-label="Live wall design">
+              <button type="button" data-wall-design="original" aria-pressed="false">ORIGINAL</button>
+              <button type="button" data-wall-design="design-1" aria-pressed="true">DESIGN 1</button>
+            </div>
             <button class="ops-btn-sec wall-focus-button" id="btnWallFocus" aria-pressed="false">⛶ FOCUS</button>
             <button class="ops-btn-sec" id="btnReconnectAll">↻ RECONNECT</button>
           </div>
@@ -614,6 +643,19 @@
         <div class="settings-security-note">
           Configure database, alert webhook, session, face-encryption, and seeded NVR credentials below. Secret values are masked and never sent back to the browser: leave a secret field blank to keep its saved value, or use a clear option when available. Settings are stored in the ignored <code>.app_settings.json</code> file as local plaintext, so restrict access to this computer and never commit or share the file. Custom camera stream URLs and their credentials remain editable in Cameras.
         </div>
+        <section class="git-admin-panel" aria-labelledby="tunnelStatusHeading">
+          <div class="settings-section-heading">
+            <div><span class="tab-eyebrow">REMOTE ACCESS / ADMIN ONLY</span><h3 id="tunnelStatusHeading">Cloudflare quick tunnel</h3></div>
+            <button type="button" class="ops-btn-sec" id="btnRefreshTunnelStatus">REFRESH STATUS</button>
+          </div>
+          <p>The temporary public URL and current <code>cloudflared</code> process ID refresh while this tab is open. Quick tunnels have no separate password or stable tunnel ID.</p>
+          <dl class="tunnel-status-grid">
+            <div><dt>Connection</dt><dd id="tunnelConnectionStatus" aria-live="polite">Not loaded</dd></div>
+            <div><dt>Public URL</dt><dd id="tunnelPublicUrl">—</dd></div>
+            <div><dt>Process ID (PID)</dt><dd id="tunnelProcessId">—</dd></div>
+            <div><dt>Last update</dt><dd id="tunnelStatusUpdated">—</dd></div>
+          </dl>
+        </section>
         <form id="applicationSettingsForm">
           <div id="applicationSettingsGroups" class="application-settings-groups">
             <p class="empty-state">Open Settings to load configuration.</p>

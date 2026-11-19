@@ -153,6 +153,12 @@ credentials. Secret fields are write-only: the API returns only whether a
 value is configured, never the value itself. Leave a field blank to keep its
 current value; use its clear option to remove a saved value when available.
 Custom camera stream URLs and their credentials remain managed in Cameras.
+
+The admin Settings tab also shows the current Cloudflare quick-tunnel URL,
+connection state, and `cloudflared` process ID. The existing background
+watchdog refreshes this status every 15 seconds, and the dashboard polls while
+Settings is open. A quick tunnel URL and process ID can change after a
+reconnect. Quick tunnels do not have a separate password or a stable tunnel ID.
 Changing the session secret signs users out after restart. Changing the face
 encryption key can make existing encrypted face data unreadable; preserve the
 original key if that data must remain accessible. Face matching still
