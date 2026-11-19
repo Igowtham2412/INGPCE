@@ -165,6 +165,14 @@ def _encode_annotated_frame(
     return buffer.tobytes() if ok else None
 
 
+def _encode_live_frame(frame):
+    tile = _resize_to_tile(frame)
+    ok, buffer = cv2.imencode(
+        ".jpg", tile, [cv2.IMWRITE_JPEG_QUALITY, config.JPEG_QUALITY],
+    )
+    return buffer.tobytes() if ok else None
+
+
 def _save_speed_snapshot(
     path: str,
     frame,
@@ -1151,14 +1159,8 @@ class CameraManager:
                 if (frame is not None and frame_sequence != last_frame_sequence
                         and now - last_broadcast >= broadcast_interval
                         and hub.has_video_subscribers(camera_id)):
-                    statuses = self._latest_statuses.get(camera_id, [])
                     jpeg_bytes = await asyncio.to_thread(
-                        _encode_annotated_frame,
-                        frame,
-                        statuses,
-                        f"{camera_name} ({area_group_name})",
-                        self._latest_speed_readings.get(camera_id, []),
-                        self._latest_speed_settings.get(camera_id),
+                        _encode_live_frame, frame,
                     )
                     if jpeg_bytes is not None:
                         await hub.broadcast_frame(camera_id, jpeg_bytes)

@@ -38,6 +38,7 @@ const state = {
 };
 
 document.addEventListener("DOMContentLoaded", async () => {
+  setupThemeToggle();
   startClock();
   const authReady = await initializeAuthentication();
   if (!authReady) return;
@@ -75,6 +76,30 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }, 60000);
 });
+
+function setupThemeToggle() {
+  const button = document.getElementById("themeToggleBtn");
+  const label = button.querySelector(".theme-toggle-label");
+  const savedTheme = localStorage.getItem("ingpce-dashboard-theme");
+  document.documentElement.classList.toggle("theme-dark", savedTheme === "dark");
+
+  const updateButton = () => {
+    const darkMode = document.documentElement.classList.contains("theme-dark");
+    const action = darkMode ? "Switch to light mode" : "Switch to dark mode";
+    label.textContent = darkMode ? "Light mode" : "Dark mode";
+    button.setAttribute("aria-label", action);
+    button.setAttribute("aria-pressed", String(darkMode));
+    button.title = action;
+  };
+  updateButton();
+
+  button.addEventListener("click", () => {
+    const darkMode = !document.documentElement.classList.contains("theme-dark");
+    document.documentElement.classList.toggle("theme-dark", darkMode);
+    localStorage.setItem("ingpce-dashboard-theme", darkMode ? "dark" : "light");
+    updateButton();
+  });
+}
 
 async function deleteIncident(incidentId) {
   if (!window.confirm(`Permanently delete incident #${incidentId}, its images, clips, and face-match data? This cannot be undone.`)) return;
@@ -136,6 +161,9 @@ async function initializeAuthentication() {
     document.getElementById("alertDeliveryTab").hidden = !state.canManageAlertDelivery;
     document.getElementById("faceMatchesTab").hidden = !state.canReviewFaceMatches;
     document.getElementById("applicationSettingsTab").hidden = !state.canManageApplicationSettings;
+    document.getElementById("signedInUser").textContent =
+      session.user.username || session.user.email || "Signed in";
+    document.getElementById("signedInRole").textContent = session.user.role;
     if (session.user.role !== "admin") {
       document.getElementById("btnCleanOldViolations").hidden = true;
     }
@@ -149,6 +177,8 @@ async function initializeAuthentication() {
   if (!session.auth_required) {
     state.canManageAlertDelivery = true;
     document.getElementById("alertDeliveryTab").hidden = false;
+    document.getElementById("signedInUser").textContent = "Local session";
+    document.getElementById("signedInRole").textContent = "Local";
   }
   return true;
 }
@@ -571,7 +601,7 @@ function renderFeedsGroupedByArea() {
     const cams = groups[groupName];
     const section = document.createElement("div"); section.className = "feed-group";
     section.dataset.area = groupName;
-    section.innerHTML = `<div class="feed-group-header"><h4>${escapeHtml(groupName)}</h4><span class="feed-group-count">${cams.length} FEED${cams.length !== 1 ? "S" : ""}</span></div><div class="camera-grid" style="--wall-columns:${state.wallColumns}"></div>`;
+    section.innerHTML = `<div class="feed-group-header"><h4>${escapeHtml(groupName)}</h4><span class="feed-group-count">${cams.length} ${cams.length === 1 ? "feed" : "feeds"}</span></div><div class="camera-grid"></div>`;
     container.appendChild(section);
     const grid = section.querySelector(".camera-grid");
 
@@ -579,6 +609,7 @@ function renderFeedsGroupedByArea() {
       try {
         const tile = buildCameraTile(cam);
         grid.appendChild(tile);
+        updateCameraTileStatus(cam);
       } catch (err) {
         console.error(`Failed to render tile for camera ${cam && cam.camera_id}:`, err);
         const errorTile = document.createElement("div");
@@ -596,11 +627,6 @@ function setupLiveWall() {
   const grid = document.getElementById("feedsByGroup");
   const areaFilter = document.getElementById("wallAreaFilter");
   const search = document.getElementById("wallCameraSearch");
-  const savedDesign = localStorage.getItem("ingpce-wall-design");
-  setWallDesign(savedDesign === "original" ? "original" : "design-1");
-  document.querySelectorAll("[data-wall-design]").forEach((button) => {
-    button.addEventListener("click", () => setWallDesign(button.dataset.wallDesign));
-  });
   areaFilter.addEventListener("change", applyLiveWallFilters);
   search.addEventListener("input", applyLiveWallFilters);
   document.querySelectorAll("[data-wall-columns]").forEach((button) => {
@@ -621,19 +647,6 @@ function setupLiveWall() {
     if (event.key === "Escape") setWallFocus(false);
   });
   updateWallFeedCount();
-}
-
-function setWallDesign(design) {
-  const useDesignOne = design !== "original";
-  document.body.classList.toggle("wall-design-1", useDesignOne);
-  document.body.classList.toggle("wall-design-original", !useDesignOne);
-  document.documentElement.dataset.wallDesign = useDesignOne ? "design-1" : "original";
-  localStorage.setItem("ingpce-wall-design", useDesignOne ? "design-1" : "original");
-  document.querySelectorAll("[data-wall-design]").forEach((button) => {
-    const active = button.dataset.wallDesign === (useDesignOne ? "design-1" : "original");
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-pressed", String(active));
-  });
 }
 
 function applyLiveWallFilters() {
@@ -659,8 +672,13 @@ function applyLiveWallFilters() {
 function updateWallFeedCount() {
   const visible = document.querySelectorAll("#feedsByGroup .camera-tile:not([hidden])").length;
   const online = state.cameras.filter((camera) => camera.enabled && camera.connected).length;
+  const enabled = state.cameras.filter((camera) => camera.enabled).length;
   const count = document.getElementById("wallFeedCount");
-  if (count) count.textContent = `${online} ONLINE · ${visible} SHOWN`;
+  if (count) {
+    count.querySelector(".wall-count-label").textContent = `${online} of ${enabled} streaming`
+      + (visible < enabled ? ` · ${visible} shown` : "");
+    count.classList.toggle("is-offline", online < enabled);
+  }
 }
 
 function toggleWallFocus() {
@@ -673,7 +691,8 @@ function setWallFocus(focused) {
   const button = document.getElementById("btnWallFocus");
   shell.classList.toggle("wall-focus", focused);
   button.setAttribute("aria-pressed", String(focused));
-  button.textContent = focused ? "⛶ EXIT FOCUS" : "⛶ FOCUS";
+  button.querySelector(".wall-button-label").textContent = focused ? "Exit focus" : "Focus";
+  button.title = focused ? "Exit camera wall focus" : "Focus the camera wall";
   document.body.classList.toggle("wall-focus-active", focused);
 }
 
@@ -684,6 +703,11 @@ function cameraConnectionLabel(camera) {
   return camera.connected ? "LIVE" : "OFFLINE";
 }
 
+function cameraConnectionDisplayLabel(camera) {
+  const label = cameraConnectionLabel(camera);
+  return label.charAt(0) + label.slice(1).toLowerCase();
+}
+
 function updateCameraTileStatus(camera) {
   const status = document.getElementById(`status-${camera.camera_id}`);
   if (!status) return;
@@ -691,20 +715,23 @@ function updateCameraTileStatus(camera) {
   const label = cameraConnectionLabel(camera);
   tile?.classList.toggle("reconnecting", label === "CONNECTING" || label === "RETRYING");
   status.className = `tile-status ${label === "LIVE" ? "online" : "offline"}`;
-  status.querySelector("span:last-child").textContent = label;
+  status.querySelector("span:last-child").textContent = cameraConnectionDisplayLabel(camera);
   status.title = camera.connection_error
     || (label === "CONNECTING" ? "Connecting to the configured stream." : "");
   const canvas = document.getElementById(`canvas-${camera.camera_id}`);
   const placeholder = document.getElementById(`placeholder-${camera.camera_id}`);
-  if (placeholder && (!canvas || !canvas.width)) {
-    const isConnecting = label === "CONNECTING" || label === "RETRYING";
+  if (placeholder && (!canvas || !canvas._wallContext)) {
+    const isConnecting = label === "CONNECTING" || label === "RETRYING"
+      || (label === "LIVE" && !camera.connection_error);
     const loader = placeholder.querySelector(".mac-loader");
     const placeholderLabel = placeholder.querySelector(".feed-placeholder-label");
     if (loader) loader.hidden = !isConnecting;
     if (placeholderLabel) placeholderLabel.textContent = camera.connection_error
-      || (label === "CONNECTING" ? "Connecting…" : "Stream unavailable; retrying…");
+      || (label === "LIVE" ? "Waiting for first frame…"
+        : label === "CONNECTING" ? "Connecting…" : "Stream unavailable; retrying…");
     else placeholder.textContent = camera.connection_error
-      || (label === "CONNECTING" ? "Connecting…" : "Stream unavailable; retrying…");
+      || (label === "LIVE" ? "Waiting for first frame…"
+        : label === "CONNECTING" ? "Connecting…" : "Stream unavailable; retrying…");
   }
 }
 
@@ -720,22 +747,21 @@ function buildCameraTile(cam) {
       <canvas id="canvas-${cam.camera_id}"></canvas>
       <div class="feed-placeholder" id="placeholder-${cam.camera_id}"><span class="mac-loader" aria-hidden="true"></span><span class="feed-placeholder-label">Connecting…</span></div>
       <div class="violation-flash" id="flash-${cam.camera_id}"></div>
+      <div class="tile-status ${cameraConnectionLabel(cam) === "LIVE" ? "online" : "offline"}" id="status-${cam.camera_id}">
+        <span class="dot"></span><span>${cameraConnectionDisplayLabel(cam)}</span>
+      </div>
     </div>
     <div class="tile-footer">
       <div>
-        <span class="tile-cam-name">${escapeHtml(cam.name)}</span>
-        <span class="tile-cam-zone">${escapeHtml(cam.camera_id)}</span>
+        <span class="tile-cam-name" title="${escapeHtml(cam.name)}">${escapeHtml(cam.name)}</span>
+        <span class="tile-cam-zone">${escapeHtml(cam.area_group_name || "Unassigned")}</span>
       </div>
       <div class="tile-actions">
-        <div class="tile-status ${cam.connected ? "online" : "offline"}" id="status-${cam.camera_id}">
-          <span class="dot"></span><span>${cameraConnectionLabel(cam)}</span>
-        </div>
         <button class="tile-edit-btn" data-edit-tile="${cam.camera_id}" title="Edit camera connection">EDIT</button>
-        <button class="tile-reconnect-btn" data-reconnect-tile="${cam.camera_id}" title="Reconnect this camera" aria-label="Reconnect this camera"><span class="reconnect-icon" aria-hidden="true">↻</span><span class="mac-loader mac-loader--small" aria-hidden="true"></span></button>
+        <button class="tile-reconnect-btn" data-reconnect-tile="${cam.camera_id}" title="Reconnect this camera" aria-label="Reconnect this camera"><span class="reconnect-icon" aria-hidden="true">↻</span><span class="mac-loader mac-loader--small" aria-hidden="true"></span><span class="tile-reconnect-label">Reconnect</span></button>
       </div>
     </div>
   `;
-  updateCameraTileStatus(cam);
   tile.querySelector(`[data-reconnect-tile="${cam.camera_id}"]`).addEventListener("click", (e) => {
     e.stopPropagation();
     reconnectSingleCamera(cam.camera_id);
@@ -781,7 +807,9 @@ async function reconnectSingleCamera(cameraId) {
 function setupReconnectAll() {
   document.getElementById("btnReconnectAll").addEventListener("click", async () => {
     const btn = document.getElementById("btnReconnectAll");
+    const idleTitle = btn.title;
     btn.disabled = true;
+    btn.title = "Reconnecting all cameras…";
     btn.innerHTML = buttonLoadingMarkup("Reconnecting all cameras…");
     try {
       for (const cam of state.cameras.filter((camera) => camera.enabled)) {
@@ -792,7 +820,8 @@ function setupReconnectAll() {
       await loadCameras();
     } finally {
       btn.disabled = false;
-      btn.textContent = "↻ Reconnect All Cameras";
+      btn.title = idleTitle;
+      btn.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4.6 9a7.5 7.5 0 0 1 12.6-2L20 12m-16 5v-5h5m10.4 3a7.5 7.5 0 0 1-12.6 2L4 12" /></svg><span>Reconnect</span>';
     }
   });
 }
@@ -1373,11 +1402,13 @@ function updateEditedCamera(camera) {
     }
     tile.setAttribute("aria-label", `Open live view for ${camera.name}`);
     tile.querySelector(".tile-cam-name").textContent = camera.name;
+    tile.querySelector(".tile-cam-name").title = camera.name;
+    tile.querySelector(".tile-cam-zone").textContent = groupName;
     updateCameraTileStatus(camera);
   } else if (camera.enabled) {
-    getOrCreateFeedGroup(groupName)
-      .querySelector(".camera-grid")
-      .appendChild(buildCameraTile(camera));
+    const newTile = buildCameraTile(camera);
+    getOrCreateFeedGroup(groupName).querySelector(".camera-grid").appendChild(newTile);
+    updateCameraTileStatus(camera);
     connectVideoStream(camera.camera_id);
   }
 
@@ -1388,7 +1419,7 @@ function updateEditedCamera(camera) {
       return;
     }
     group.querySelector(".feed-group-count").textContent =
-      `${count} FEED${count !== 1 ? "S" : ""}`;
+      `${count} ${count === 1 ? "feed" : "feeds"}`;
   });
   if (!document.querySelector("#feedsByGroup .feed-group")) {
     document.getElementById("feedsByGroup").innerHTML =
@@ -1416,7 +1447,7 @@ function getOrCreateFeedGroup(groupName) {
   group = document.createElement("div");
   group.className = "feed-group";
   group.dataset.area = groupName;
-  group.innerHTML = `<div class="feed-group-header"><h4>${escapeHtml(groupName)}</h4><span class="feed-group-count">0 FEEDS</span></div><div class="camera-grid" style="--wall-columns:${state.wallColumns}"></div>`;
+  group.innerHTML = `<div class="feed-group-header"><h4>${escapeHtml(groupName)}</h4><span class="feed-group-count">0 feeds</span></div><div class="camera-grid"></div>`;
   container.appendChild(group);
   return group;
 }
@@ -1492,6 +1523,7 @@ function connectEventStream() {
   const setConnectionState = (connected) => {
     state.wsEventsConnected = connected;
     dot.classList.toggle("connected", connected);
+    status.classList.toggle("connected", connected);
     dot.setAttribute("aria-label", `Event stream ${connected ? "connected" : "disconnected"}`);
     status.textContent = connected ? "STREAM ONLINE" : "STREAM OFFLINE";
   };
@@ -1608,7 +1640,14 @@ function setupViolationsGallery() {
     if (!button) return;
     if (button.id === "btnIncidentBack") {
       state.selectedIncidentId = null;
-      document.getElementById("incidentInspector").hidden = true;
+      document.querySelectorAll("#violationsGallery [data-incident-select]").forEach((row) => {
+        row.classList.remove("selected");
+      });
+      document.getElementById("incidentPreviewImage").hidden = true;
+      document.getElementById("incidentPreviewImage").removeAttribute("src");
+      document.getElementById("incidentDetails").innerHTML =
+        '<p class="incident-empty-detail">Select an incident to review its snapshot and actions.</p>';
+      document.getElementById("incidentInspector").hidden = false;
       document.getElementById("violationsGallery").hidden = false;
       document.getElementById("btnLoadMoreViolations").hidden = !state.hasMoreViolations;
       return;
@@ -1763,8 +1802,13 @@ async function loadViolationsGallery(append = false) {
     state.violationRecords = [];
     state.hasMoreViolations = false;
     state.selectedIncidentId = null;
-    inspector.hidden = true;
+    inspector.hidden = false;
     gallery.hidden = false;
+    document.getElementById("incidentPreviewImage").hidden = true;
+    document.getElementById("incidentPreviewImage").removeAttribute("src");
+    document.getElementById("incidentDetails").innerHTML =
+      '<p class="incident-empty-detail">Select an incident to review its snapshot and actions.</p>';
+    document.getElementById("incidentPosition").textContent = "";
     loadMoreButton.hidden = true;
     gallery.innerHTML = loadingMarkup("Loading violations…");
   }
@@ -1845,10 +1889,17 @@ async function loadViolationsGallery(append = false) {
       card.type = "button";
       card.className = "violation-card";
       card.dataset.incidentSelect = row.id;
-      card.setAttribute("aria-label", `Open ${formatViolationLabel(row.violation_type)} image from ${row.camera_name || row.camera_id}`);
       const label = formatViolationLabel(row.violation_type);
-      const snapshotUrl = row.snapshot_url;
-      card.innerHTML = `<img src="${escapeHtml(snapshotUrl)}" alt="${escapeHtml(label)}" loading="lazy" /><span class="thumb-badge" aria-hidden="true">${escapeHtml(label.toUpperCase())}</span>`;
+      const time = row.detected_at ? new Date(row.detected_at).toLocaleString() : "Time unavailable";
+      const reviewStatus = row.review_status === "confirmed" ? "Reviewed"
+        : row.review_status === "false_positive" ? "Dismissed" : "Needs review";
+      card.setAttribute("aria-label",
+        `Open ${label} incident from ${row.camera_name || row.camera_id} at ${time}. Status: ${reviewStatus}.`,
+      );
+      const statusClass = row.review_status === "confirmed" ? "reviewed"
+        : row.review_status === "dismissed" || row.review_status === "false_positive" ? "dismissed"
+          : "needs-review";
+      card.innerHTML = `<span class="incident-row-time">${escapeHtml(time)}</span><span class="incident-row-camera">${escapeHtml(row.camera_name || row.camera_id)}</span><span class="incident-row-type">${escapeHtml(label)}</span><span class="review-status ${statusClass}">${escapeHtml(reviewStatus)}</span>`;
       gallery.appendChild(card);
     } catch (err) {
       console.error("Failed to render a violation card:", err);
@@ -1871,7 +1922,8 @@ function renderIncidentInspector(incidentId) {
   const detectedAt = incident.detected_at
     ? new Date(incident.detected_at).toLocaleString() : "Time unavailable";
   const cameraName = incident.camera_name || incident.camera_id || "Camera unavailable";
-  const reviewStatus = (incident.review_status || "unreviewed").replace(/_/g, " ");
+  const reviewStatus = incident.review_status === "confirmed" ? "Reviewed"
+    : incident.review_status === "false_positive" ? "Dismissed" : "Needs review";
   const faceEligible = ["no_helmet", "no_arc_flash_suit", "phone_detected"]
     .includes(incident.violation_type);
   const people = Array.isArray(incident.detected_people) ? incident.detected_people : [];
@@ -1882,6 +1934,7 @@ function renderIncidentInspector(incidentId) {
     </div>` : "";
   const personCount = Number(incident.detected_person_count || 0);
   document.getElementById("incidentPreviewImage").src = incident.snapshot_url;
+  document.getElementById("incidentPreviewImage").hidden = false;
   document.getElementById("incidentPreviewImage").alt = `${label} · ${cameraName}`;
   document.getElementById("incidentPosition").textContent =
     `${itemIndex + 1} of ${state.violationRecords.length}`;
@@ -1891,7 +1944,7 @@ function renderIncidentInspector(incidentId) {
   document.getElementById("incidentDetails").innerHTML = `
     <div class="incident-detail-heading">
       <span class="incident-detail-kicker">INCIDENT ${String(incident.id).padStart(5, "0")}</span>
-      <h3>${escapeHtml(label)}</h3>
+      <h3>${escapeHtml(label)} · ${escapeHtml(cameraName)}</h3>
       <span class="incident-review-status">${escapeHtml(reviewStatus)}</span>
     </div>
     <div class="incident-detail-group">
@@ -1908,18 +1961,28 @@ function renderIncidentInspector(incidentId) {
       <h4>REVIEW</h4>
       <div class="incident-action-row">
         <button type="button" class="ops-btn" data-review="${incident.id}" data-review-status="confirmed">Confirm</button>
-        <button type="button" class="ops-btn-sec" data-review="${incident.id}" data-review-status="false_positive">False positive</button>
+        <button type="button" class="ops-btn-sec" data-review="${incident.id}" data-review-status="false_positive">Dismiss</button>
       </div>
       ${incident.clean_snapshot_url ? `<a class="ops-btn-sec incident-action-link" href="${escapeHtml(incident.clean_snapshot_url)}" target="_blank" rel="noopener">Open clean image</a>` : ""}
       ${incident.video_url ? `<a class="ops-btn-sec incident-action-link" href="${escapeHtml(incident.video_url)}" target="_blank" rel="noopener">Open video clip</a>` : ""}
       <a class="ops-btn-sec incident-action-link" href="${escapeHtml(incident.snapshot_url)}" download>Download image</a>
+      <p class="incident-review-note">Confirmed after temporal check. Confidence is a signal, not proof.</p>
     </div>
     ${faceActions}
     <div class="incident-detail-group incident-destructive-action">
       <button type="button" class="ops-btn-sec" data-incident-delete="${incident.id}">Delete incident…</button>
     </div>`;
-  gallery.hidden = true;
+  const selectedRow = gallery.querySelector(`[data-incident-select="${incident.id}"]`);
+  const rowStatus = selectedRow?.querySelector(".review-status");
+  if (rowStatus) {
+    rowStatus.textContent = reviewStatus;
+    rowStatus.className = `review-status ${incident.review_status === "confirmed" ? "reviewed" : incident.review_status === "false_positive" ? "dismissed" : "needs-review"}`;
+  }
+  gallery.hidden = false;
   inspector.hidden = false;
+  gallery.querySelectorAll("[data-incident-select]").forEach((row) => {
+    row.classList.toggle("selected", Number(row.dataset.incidentSelect) === Number(incidentId));
+  });
   document.getElementById("btnLoadMoreViolations").hidden = true;
 }
 
@@ -3077,7 +3140,7 @@ function closeCameraViewer() {
 // ---------------------------------------------------------------
 // Analytics dashboard
 // ---------------------------------------------------------------
-const ANALYTICS_COLORS = ["#e5e5e5", "#c7c7c7", "#a8a8a8", "#8a8a8a", "#6b6b6b", "#d0d0d0", "#999999"];
+const ANALYTICS_COLORS = ["#B42318", "#C2410C", "#FFB020", "#1B7F4B", "#3DBA78", "#6BA7FF", "#8A5A00"];
 
 function setupAnalyticsDashboard() {
   const range = document.getElementById("analyticsRange");
@@ -3227,7 +3290,7 @@ function drawHourlyChart(hourly, windowHours) {
     if (index === 0) ctx.moveTo(point.x, point.y);
     else ctx.lineTo(point.x, point.y);
   });
-  ctx.strokeStyle = "#e5e5e5";
+  ctx.strokeStyle = "#C2410C";
   ctx.lineWidth = 2.5;
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
@@ -3835,27 +3898,38 @@ function updateAlertSelectionSummary() {
 // ---------------------------------------------------------------
 // Tabs
 // ---------------------------------------------------------------
-function activateDashboardTab(tabName, loadFaceMatchesAfterActivation = true) {
+function activateDashboardTab(
+  tabName, loadFaceMatchesAfterActivation = true, loadDefaultSection = true,
+) {
   const button = document.querySelector(`.mode-btn[data-tab="${tabName}"]`);
   const pane = document.getElementById(`tab-${tabName}`);
   if (!button || !pane || button.hidden) return false;
-  document.querySelectorAll(".mode-btn").forEach((btn) => {
-    btn.classList.toggle("active", btn === button);
+  document.querySelectorAll(".dashboard-tabs button").forEach((tab) => {
+    const active = tab === button;
+    tab.classList.toggle("active", active);
+    if (tab.hasAttribute("role")) tab.setAttribute("aria-selected", String(active));
   });
   document.querySelectorAll(".tab-pane").forEach((item) => {
     item.classList.toggle("active", item === pane);
   });
   if (tabName === "surveillance" || tabName === "operations" || tabName === "alerts") {
-    const groupButtons = [...document.querySelectorAll(
-      `.section-btn[data-section-group="${tabName}"]`,
-    )];
-    const sectionButton = groupButtons.find((item) => item.classList.contains("active") && !item.hidden)
-      || groupButtons.find((item) => !item.hidden);
-    if (!sectionButton) return false;
     if (tabName !== "surveillance" && state.playbackActive) {
       document.getElementById("btnStopPlayback").click();
     }
-    return activateDashboardSection(sectionButton.dataset.tab);
+    if (!loadDefaultSection) return true;
+    const defaultSection = {
+      surveillance: "feeds",
+      operations: "analytics",
+      alerts: "alert-delivery",
+    }[tabName];
+    const sectionButton = document.querySelector(
+      `.section-btn[data-section-group="${tabName}"][data-tab="${defaultSection}"]`,
+    );
+    if (!sectionButton || sectionButton.hidden) return false;
+    const activated = activateDashboardSection(sectionButton.dataset.tab);
+    button.classList.add("active");
+    button.setAttribute("aria-selected", "true");
+    return activated;
   }
   document.querySelector(".ops-grid").classList.remove("live-wall-mode");
   setWallFocus(false);
@@ -3879,11 +3953,22 @@ function activateDashboardSection(sectionName, loadData = true) {
   if (!button || button.hidden) return false;
   const group = button.dataset.sectionGroup;
   const groupButtons = document.querySelectorAll(`.section-btn[data-section-group="${group}"]`);
+  const isDashboardTab = button.closest(".dashboard-tabs");
+  if (isDashboardTab) {
+    document.querySelectorAll(".dashboard-tabs button").forEach((tab) => {
+      tab.classList.remove("active");
+      if (tab.hasAttribute("role")) tab.setAttribute("aria-selected", "false");
+    });
+  }
   groupButtons.forEach((item) => {
     const active = item === button;
     item.classList.toggle("active", active);
     item.setAttribute("aria-selected", String(active));
   });
+  if (isDashboardTab) {
+    button.classList.add("active");
+    button.setAttribute("aria-selected", "true");
+  }
   document.querySelectorAll(`#tab-${group} .section-pane`).forEach((item) => {
     const active = item.id === `tab-${sectionName}`;
     item.classList.toggle("active", active);
@@ -3928,7 +4013,10 @@ function setupTabs() {
     if (activeButton) activateDashboardSection(activeButton.dataset.tab, false);
   });
   document.querySelectorAll(".section-btn").forEach((button) => {
-    button.addEventListener("click", () => activateDashboardSection(button.dataset.tab));
+    button.addEventListener("click", () => {
+      activateDashboardTab(button.dataset.sectionGroup, false, false);
+      activateDashboardSection(button.dataset.tab);
+    });
   });
 }
 

@@ -16,9 +16,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from demo.run_demo import run_simulation, write_outputs
-from demo.seed_employees import EMPLOYEES
-from app.faces.track_identity import (
+from demo.run_demo import run_simulation, write_outputs  # noqa: E402
+from demo.seed_employees import EMPLOYEES  # noqa: E402
+from app.faces.track_identity import (  # noqa: E402
     IdentityThresholds,
     STATUS_MATCHED,
     STATUS_UNKNOWN,

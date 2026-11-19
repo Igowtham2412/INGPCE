@@ -276,7 +276,11 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(playback_query["start"], ["2026-10-13T14:00"])
                 self.assertEqual(playback_query["duration_minutes"], ["10"])
                 await page.locator('[data-tab="operations"]').click()
-                await page.locator('[data-tab="analytics"]').click()
+                self.assertTrue(
+                    await page.locator("#tab-analytics").evaluate(
+                        "(element) => element.classList.contains('active')",
+                    ),
+                )
                 async with page.expect_response(
                     lambda response: "/api/stats?window_hours=24" in response.url,
                 ):
@@ -368,8 +372,9 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 ).wait_for()
 
                 return_invalid_status_shape = False
-                await page.locator('[data-tab="alerts"]').click()
-                await page.locator('[data-section-group="alerts"][data-tab="alert-delivery"]').click()
+                await page.locator(
+                    '[data-section-group="alerts"][data-tab="alert-delivery"]',
+                ).click()
                 await page.locator('[data-alert-open="101"]').wait_for()
                 await page.locator('[data-alert-open="101"]').click()
                 self.assertEqual(await page.locator("#alertPosition").inner_text(), "1 of 2")
@@ -435,7 +440,27 @@ class DashboardBrowserWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await page.locator('[data-tab="violations"]').click()
                 await page.locator('[data-incident-select="201"]').wait_for()
+                before_selection = await page.locator(".incident-list").evaluate(
+                    "(element) => ({"
+                    "headerTop: element.querySelector('.incident-table-header').getBoundingClientRect().top,"
+                    "rowTop: element.querySelector('#violationsGallery .violation-card').getBoundingClientRect().top,"
+                    "listLeft: element.getBoundingClientRect().left"
+                    "})",
+                )
                 await page.locator('[data-incident-select="201"]').click()
+                after_selection = await page.locator(".incident-list").evaluate(
+                    "(element) => ({"
+                    "headerTop: element.querySelector('.incident-table-header').getBoundingClientRect().top,"
+                    "rowTop: element.querySelector('#violationsGallery .violation-card').getBoundingClientRect().top,"
+                    "listLeft: element.getBoundingClientRect().left"
+                    "})",
+                )
+                inspector_left = await page.locator("#incidentInspector").evaluate(
+                    "(element) => element.getBoundingClientRect().left",
+                )
+                self.assertTrue(await page.locator("#violationsGallery").is_visible())
+                self.assertEqual(after_selection, before_selection)
+                self.assertGreater(inspector_left, after_selection["listLeft"])
                 self.assertEqual(await page.locator("#incidentPosition").inner_text(), "1 of 2")
                 await page.locator("#btnIncidentNext").click(position={"x": 17, "y": 17})
                 self.assertTrue(

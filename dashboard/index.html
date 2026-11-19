@@ -3,41 +3,17 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>INGPCE — SURVEILLANCE OPERATIONS CENTER</title>
-<link rel="stylesheet" href="/static/style.css?v=20261113-combined-tabs" />
-<link rel="stylesheet" href="/static/wall-design-1.css?v=20261119-sentinel2" />
+<title>INGPCE PPE Monitoring</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/static/style.css?v=20261119-incident-list-aligned" />
 </head>
 <body>
-<script>
-  (() => {
-    const applyWallDesign = (design) => {
-      const useDesignOne = design === "design-1";
-      document.body.classList.toggle("wall-design-1", useDesignOne);
-      document.body.classList.toggle("wall-design-original", !useDesignOne);
-      document.documentElement.dataset.wallDesign = useDesignOne ? "design-1" : "original";
-      localStorage.setItem("ingpce-wall-design", useDesignOne ? "design-1" : "original");
-      document.querySelectorAll("[data-wall-design]").forEach((button) => {
-        const active = button.dataset.wallDesign === (useDesignOne ? "design-1" : "original");
-        button.classList.toggle("active", active);
-        button.setAttribute("aria-pressed", String(active));
-      });
-    };
-
-    const savedDesign = localStorage.getItem("ingpce-wall-design");
-    applyWallDesign(savedDesign === "original" ? "original" : "design-1");
-
-    document.addEventListener("click", (event) => {
-      const button = event.target.closest("[data-wall-design]");
-      if (button) applyWallDesign(button.dataset.wallDesign);
-    });
-  })();
-</script>
-
 <div class="ops-shell">
   <header class="cmd-bar">
     <div class="cmd-left">
-      <div class="agency-badge"></div>
-      <div class="agency-text"><h1>INGPCE</h1><span>SURVEILLANCE OPERATIONS CENTER</span></div>
+      <div class="agency-text"><h1>INGPCE PPE Monitoring</h1></div>
     </div>
     <div class="cmd-stats" id="topbarStats">
       <div class="cmd-stat"><span class="stat-val" id="statCamerasOnline">–</span><span class="stat-lbl">FEEDS ACTIVE</span></div>
@@ -45,60 +21,76 @@
       <div class="cmd-stat"><span class="stat-val" id="statActiveRules">–</span><span class="stat-lbl">ALERT RULES</span></div>
     </div>
     <div class="cmd-right">
-      <span class="sys-status">SYSTEM INITIALIZING</span>
+      <button class="ops-btn-sec theme-toggle" id="themeToggleBtn" type="button" aria-pressed="false" aria-label="Switch to dark mode" title="Switch to dark mode">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.2 15.1A8.3 8.3 0 0 1 8.9 3.8 8.6 8.6 0 1 0 20.2 15.1Z" /></svg>
+        <span class="theme-toggle-label">Dark mode</span>
+      </button>
+      <span class="sys-status health-pill" role="status" aria-live="polite">STREAM OFFLINE</span>
+      <span class="signed-in-user" id="signedInUser">Signed out</span>
+      <span class="signed-in-role" id="signedInRole">—</span>
       <span class="cmd-clock" id="liveClock">--:--:--</span>
       <span class="conn-indicator" id="wsConnDot" title="Event stream"></span>
       <button class="ops-btn-sec" id="logoutBtn" hidden>Sign out</button>
     </div>
   </header>
 
+  <nav class="mode-selector dashboard-tabs" role="tablist" aria-label="Dashboard tabs">
+    <button class="mode-btn active" type="button" role="tab" aria-selected="true" data-tab="surveillance">Live Wall</button>
+    <button class="section-btn dashboard-section-tab" id="surveillance-playback-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-playback" data-section-group="surveillance" data-tab="playback">Playback</button>
+    <button class="mode-btn" type="button" role="tab" aria-selected="false" data-tab="violations">Incidents</button>
+    <button class="mode-btn" type="button" role="tab" aria-selected="false" data-tab="face-matches" id="faceMatchesTab" hidden>Face Matches</button>
+    <button class="mode-btn" type="button" role="tab" aria-selected="false" data-tab="operations">Analytics</button>
+    <button class="section-btn dashboard-section-tab" id="operations-cameras-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-cameras" data-section-group="operations" data-tab="cameras">Cameras &amp; Health</button>
+    <button class="mode-btn nav-parent-hidden" type="button" tabindex="-1" aria-hidden="true" data-tab="alerts">Alerts</button>
+    <button class="section-btn dashboard-section-tab" id="alertDeliveryTab" data-section-group="alerts" data-tab="alert-delivery" type="button" role="tab" aria-selected="false" aria-controls="tab-alert-delivery" hidden>Alert Delivery</button>
+    <button class="section-btn dashboard-section-tab" id="alerts-rules-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-rules" data-section-group="alerts" data-tab="rules">Alert Rules</button>
+    <button class="mode-btn" type="button" role="tab" aria-selected="false" data-tab="settings" id="applicationSettingsTab" hidden>Settings</button>
+  </nav>
+
   <main class="ops-grid">
     <section class="surveillance-panel">
       <div class="panel-hdr">
         <h2><span class="hdr-icon">◉</span> SURVEILLANCE FEEDS</h2>
-        <div class="mode-selector">
-          <button class="mode-btn active" data-tab="surveillance">LIVE WALL / PLAYBACK</button>
-          <button class="mode-btn" data-tab="violations">INCIDENTS</button>
-          <button class="mode-btn" data-tab="face-matches" id="faceMatchesTab" hidden>FACE MATCHES</button>
-          <button class="mode-btn" data-tab="operations">ANALYTICS / CAMERA HEALTH</button>
-          <button class="mode-btn" data-tab="alerts">ALERT DELIVERY / RULES</button>
-          <button class="mode-btn" data-tab="settings" id="applicationSettingsTab" hidden>SETTINGS</button>
-        </div>
       </div>
 
       <div id="tab-surveillance" class="tab-pane active">
         <div class="section-nav" role="tablist" aria-label="Surveillance views">
           <button class="section-btn active" id="surveillance-feeds-tab" type="button" role="tab" aria-selected="true" aria-controls="tab-feeds" data-section-group="surveillance" data-tab="feeds">LIVE WALL</button>
-          <button class="section-btn" id="surveillance-playback-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-playback" data-section-group="surveillance" data-tab="playback">PLAYBACK</button>
         </div>
       <section id="tab-feeds" class="section-pane active" role="tabpanel" aria-labelledby="surveillance-feeds-tab">
         <div class="wall-toolbar">
           <div class="wall-controls">
             <label class="wall-filter">
-              <span>AREA</span>
+              <span>Area</span>
               <select id="wallAreaFilter"><option value="">All areas</option></select>
             </label>
             <label class="wall-filter wall-search">
-              <span>CAMERA</span>
-              <input id="wallCameraSearch" type="search" placeholder="Search cameras…" />
+              <span>Camera</span>
+              <span class="wall-search-input">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.3" /><path d="m15.4 15.4 4.2 4.2" /></svg>
+                <input id="wallCameraSearch" type="search" aria-label="Search cameras" placeholder="Search cameras…" />
+              </span>
             </label>
           </div>
           <div class="wall-actions">
-            <div class="wall-layout" role="group" aria-label="Camera grid density">
+            <span class="wall-feed-count" id="wallFeedCount" role="status" aria-live="polite"><span class="wall-count-dot" aria-hidden="true"></span><span class="wall-count-label">—</span></span>
+            <div class="wall-layout" role="group" aria-label="Columns">
               <button type="button" data-wall-columns="2" aria-pressed="false" title="2 columns">2 COL</button>
               <button type="button" data-wall-columns="3" aria-pressed="false" title="3 columns">3 COL</button>
               <button type="button" data-wall-columns="4" class="active" aria-pressed="true" title="4 columns">4 COL</button>
             </div>
-            <span class="wall-feed-count" id="wallFeedCount">—</span>
-            <div class="wall-design-selector" role="group" aria-label="Live wall design">
-              <button type="button" data-wall-design="original" aria-pressed="false">ORIGINAL</button>
-              <button type="button" data-wall-design="design-1" aria-pressed="true">DESIGN 1</button>
-            </div>
-            <button class="ops-btn-sec wall-focus-button" id="btnWallFocus" aria-pressed="false">⛶ FOCUS</button>
-            <button class="ops-btn-sec" id="btnReconnectAll">↻ RECONNECT</button>
+            <button class="ops-btn-sec wall-action-button wall-focus-button" id="btnWallFocus" type="button" aria-pressed="false" title="Focus the camera wall">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3m13-5v3a2 2 0 0 1-2 2h-3" /></svg>
+              <span class="wall-button-label">Focus</span>
+            </button>
+            <button class="ops-btn-sec wall-action-button" id="btnReconnectAll" type="button" title="Reconnect all enabled cameras">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4.6 9a7.5 7.5 0 0 1 12.6-2L20 12m-16 5v-5h5m10.4 3a7.5 7.5 0 0 1-12.6 2L4 12" /></svg>
+              <span>Reconnect</span>
+            </button>
           </div>
         </div>
         <div id="feedsByGroup"><span class="loading-state" role="status" aria-live="polite"><span class="mac-loader" aria-hidden="true"></span><span>Loading camera feeds…</span></span></div>
+        <p class="human-review-note">Detections are decision-support signals and need human review.</p>
       </section>
 
       <section id="tab-playback" class="section-pane" role="tabpanel" aria-labelledby="surveillance-playback-tab" hidden>
@@ -141,9 +133,9 @@
       <div id="tab-violations" class="tab-pane">
         <div class="tab-intro"><div><span class="tab-eyebrow">SAFETY OPERATIONS / INCIDENT REVIEW</span><h2>Incident command</h2><p>Review, classify, and preserve evidence from every detected safety event.</p></div><span class="tab-live-indicator">● LIVE INDEX</span></div>
         <div class="filter-bar">
-          <select id="violationCameraFilter"><option value="">ALL CAMERAS</option></select>
-          <select id="violationAreaGroupFilter"><option value="">ALL SECTORS</option></select>
-          <select id="violationTypeFilter">
+        <select id="violationCameraFilter" aria-label="Camera"><option value="">ALL CAMERAS</option></select>
+        <select id="violationAreaGroupFilter" aria-label="Area"><option value="">ALL SECTORS</option></select>
+        <select id="violationTypeFilter" aria-label="Incident type">
             <option value="">ALL THREAT TYPES</option>
             <option value="no_helmet">MISSING HELMET</option>
             <option value="no_vest">MISSING VEST</option>
@@ -154,7 +146,7 @@
             <option value="no_goggles">MISSING GOGGLES</option>
             <option value="phone_detected">PHONE DETECTED NEAR PERSON</option>
           </select>
-          <select id="violationAgeFilter" aria-label="Violation date range">
+          <select id="violationAgeFilter" aria-label="Incident date range">
             <option value="2" selected>LAST 2 DAYS</option>
             <option value="all">ALL HISTORY</option>
           </select>
@@ -164,19 +156,23 @@
         </div>
         <p class="face-recognition-notice">Face Match runs asynchronously for no-helmet, no-arc-flash-suit, and phone incidents, regardless of incident review status. Results are suggestions for a human reviewer only and must never be treated as automatic disciplinary decisions.</p>
         <div class="incident-browser">
-          <div class="incidents-grid" id="violationsGallery"><span class="loading-state" role="status" aria-live="polite"><span class="mac-loader" aria-hidden="true"></span><span>Loading incident images…</span></span></div>
-          <section class="incident-inspector" id="incidentInspector" aria-label="Selected incident" hidden>
+          <div class="incident-list">
+            <div class="incident-table-header" aria-hidden="true"><span>Time</span><span>Camera</span><span>Type</span><span>Status</span></div>
+            <div class="incidents-grid" id="violationsGallery"><span class="loading-state" role="status" aria-live="polite"><span class="mac-loader" aria-hidden="true"></span><span>Loading incident images…</span></span></div>
+          </div>
+          <section class="incident-inspector" id="incidentInspector" aria-label="Selected incident">
             <header class="incident-viewer-toolbar">
               <button type="button" class="ops-btn-sec" id="btnIncidentBack">‹ Gallery</button>
               <span id="incidentPosition"></span>
               <div><button type="button" class="ops-btn-sec" id="btnIncidentPrevious" aria-label="Previous image">‹</button><button type="button" class="ops-btn-sec" id="btnIncidentNext" aria-label="Next image">›</button></div>
             </header>
             <div class="incident-inspector-layout">
-              <div class="incident-preview-stage"><img id="incidentPreviewImage" alt="" /></div>
-              <aside class="incident-details" id="incidentDetails" aria-label="Image details and actions"></aside>
+              <div class="incident-preview-stage"><img id="incidentPreviewImage" alt="" hidden /></div>
+              <aside class="incident-details" id="incidentDetails" aria-label="Image details and actions"><p class="incident-empty-detail">Select an incident to review its snapshot and actions.</p></aside>
             </div>
           </section>
         </div>
+        <p class="human-review-note">Detections are decision-support signals and need human review.</p>
         <button class="ops-btn-sec load-more-violations" id="btnLoadMoreViolations" type="button" hidden>LOAD MORE INCIDENTS</button>
       </div>
 
@@ -344,7 +340,6 @@
       <div id="tab-operations" class="tab-pane">
         <div class="section-nav" role="tablist" aria-label="Operations views">
           <button class="section-btn active" id="operations-analytics-tab" type="button" role="tab" aria-selected="true" aria-controls="tab-analytics" data-section-group="operations" data-tab="analytics">ANALYTICS</button>
-          <button class="section-btn" id="operations-cameras-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-cameras" data-section-group="operations" data-tab="cameras">CAMERA HEALTH</button>
         </div>
       <section id="tab-analytics" class="section-pane active" role="tabpanel" aria-labelledby="operations-analytics-tab">
         <div class="analytics-page">
@@ -503,10 +498,6 @@
       </div>
 
       <div id="tab-alerts" class="tab-pane">
-        <div class="section-nav" role="tablist" aria-label="Alert views">
-          <button class="section-btn active" id="alertDeliveryTab" data-section-group="alerts" data-tab="alert-delivery" type="button" role="tab" aria-selected="true" aria-controls="tab-alert-delivery" hidden>ALERT DELIVERY</button>
-          <button class="section-btn" id="alerts-rules-tab" type="button" role="tab" aria-selected="false" aria-controls="tab-rules" data-section-group="alerts" data-tab="rules">ALERT RULES</button>
-        </div>
       <section id="tab-alert-delivery" class="section-pane active" role="tabpanel" aria-labelledby="alertDeliveryTab">
         <section class="alert-delivery-panel">
           <div class="alert-delivery-header">
@@ -866,6 +857,6 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=20261113-combined-tabs"></script>
+<script src="/static/app.js?v=20261119-wall-theme-final-4"></script>
 </body>
 </html>

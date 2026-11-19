@@ -6,9 +6,11 @@ from unittest.mock import patch
 import cv2
 import numpy as np
 
+from app import config
 from app.cameras.camera_manager import (
     convert_speed_clip_to_webm,
     _encode_annotated_frame,
+    _encode_live_frame,
     _group_violation_people,
     _save_speed_snapshot,
 )
@@ -57,6 +59,29 @@ class CameraManagerStreamingTests(unittest.TestCase):
         draw.assert_called_once()
         resize.assert_called_once_with(frame)
         self.assertIs(draw.call_args.args[0], annotated)
+
+    @patch("app.cameras.camera_manager.cv2.imencode")
+    @patch("app.cameras.camera_manager._resize_to_tile")
+    @patch("app.cameras.camera_manager._draw_annotations")
+    def test_live_feed_encodes_the_clean_frame_without_annotations(
+        self, draw, resize, imencode,
+    ):
+        frame = np.zeros((2, 2, 3), dtype=np.uint8)
+        clean_tile = np.ones((2, 2, 3), dtype=np.uint8)
+        resize.return_value = clean_tile
+        imencode.return_value = (True, np.array([4, 5, 6], dtype=np.uint8))
+
+        result = _encode_live_frame(frame)
+
+        self.assertEqual(result, b"\x04\x05\x06")
+        resize.assert_called_once_with(frame)
+        self.assertEqual(imencode.call_args.args[0], ".jpg")
+        self.assertIs(imencode.call_args.args[1], clean_tile)
+        self.assertEqual(
+            imencode.call_args.args[2],
+            [cv2.IMWRITE_JPEG_QUALITY, config.JPEG_QUALITY],
+        )
+        draw.assert_not_called()
 
     @patch("app.cameras.camera_manager.cv2.imencode", return_value=(False, None))
     @patch("app.cameras.camera_manager._resize_to_tile")

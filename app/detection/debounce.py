@@ -64,7 +64,6 @@ class ViolationDebouncer:
         history.append(bool(present))
         if not present:
             # A clean frame ends the confirmed episode.
-            was_confirmed = key in self._confirmed
             self._confirmed.discard(key)
             return False
         confirmed_now = (
